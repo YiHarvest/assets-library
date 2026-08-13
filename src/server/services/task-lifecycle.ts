@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
+import { loadConfig } from "@/server/config";
 import { db } from "@/server/db";
 import { assets, jobs, taskItems, tasks } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
@@ -9,6 +10,47 @@ export interface PersistedTaskError {
   code: string;
   message: string;
   details?: Record<string, unknown>;
+}
+
+interface UploadSiblingState {
+  status: string;
+  directPublish: boolean;
+  reviewStatus: string;
+}
+
+/**
+ * 汇总同一原始文件产生的图片/视频切片。
+ *
+ * 只要任一切片分析失败，发布事务就不会启动；此时应在其余切片分析结束后立即把
+ * item 标记为失败，不能继续等待一个永远不会出现的 published 状态。
+ */
+export function uploadItemTerminalState(siblings: UploadSiblingState[]) {
+  if (
+    siblings.length === 0 ||
+    siblings.some(({ status }) => !["completed", "failed"].includes(status))
+  ) {
+    return null;
+  }
+  if (siblings.some(({ status }) => status === "failed")) {
+    return { failed: true } as const;
+  }
+  if (
+    siblings.every(
+      ({ directPublish, reviewStatus }) =>
+        !directPublish || reviewStatus === "published",
+    )
+  ) {
+    return { failed: false } as const;
+  }
+  return null;
+}
+
+/** 终态任务从 finished_at 起保留配置的小时数。 */
+export function taskHistoryExpiresAt(finishedAt: Date) {
+  return new Date(
+    finishedAt.getTime() +
+      loadConfig().TASK_HISTORY_RETENTION_HOURS * 60 * 60 * 1_000,
+  );
 }
 
 /** 任务状态机自身产生的公开错误，不复用媒体或分镜错误码。 */
@@ -123,6 +165,7 @@ export async function refreshUploadTask(taskId: string) {
         failedItems,
         progressPercent,
         finishedAt: terminal ? now : null,
+        expiresAt: terminal ? taskHistoryExpiresAt(now) : null,
         updatedAt: now,
       })
       .where(eq(tasks.id, taskId));
@@ -164,15 +207,17 @@ export async function refreshTaskForAsset(assetId: string) {
     .limit(1);
   if (!asset?.taskId || !asset.taskItemId) return;
   const siblings = await db
-    .select({ status: assets.processingStatus })
+    .select({
+      status: assets.processingStatus,
+      directPublish: assets.directPublish,
+      reviewStatus: assets.reviewStatus,
+    })
     .from(assets)
     .where(eq(assets.taskItemId, asset.taskItemId));
   if (!siblings.length) return;
-  const terminal = siblings.every(
-    ({ status }) => status === "completed" || status === "failed",
-  );
+  const terminal = uploadItemTerminalState(siblings);
   if (!terminal) return;
-  const failed = siblings.some(({ status }) => status === "failed");
+  const { failed } = terminal;
   await db
     .update(taskItems)
     .set({
@@ -206,6 +251,7 @@ export async function finishMutationTask(
         failedItems: 0,
         result,
         finishedAt: now,
+        expiresAt: taskHistoryExpiresAt(now),
         updatedAt: now,
       })
       .where(eq(tasks.id, taskId));
@@ -229,6 +275,7 @@ export async function failMutationTask(taskId: string, error: unknown) {
         errorMessage: failure.message,
         errorDetails: failure.details ?? null,
         finishedAt: now,
+        expiresAt: taskHistoryExpiresAt(now),
         updatedAt: now,
       })
       .where(eq(tasks.id, taskId));

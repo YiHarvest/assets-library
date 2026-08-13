@@ -9,11 +9,12 @@ Chroma、电信云 ZOS 和独立分镜服务，提供图片与视频上传、视
 - Web 与 worker 共用远程 MySQL；数据库会话统一使用 UTC，API 时间统一返回
   ISO 8601 上海时区（`+08:00`）。
 - 上传文件先流式写入 `MEDIA_ROOT/.staging`，不在进程内长期缓存完整文件或分析结果。
-- 图片按文件名扩展名正规化为 JPEG、PNG 或 WebP，再持久化到私有 ZOS。
+- 图片按文件名扩展名正规化为 JPEG、PNG 或 WebP，先保存到本地待审核区；
+  发布后才进入私有 ZOS。
 - 完整视频先正规化为 H.264/yuv420p MP4，再交给同机
   `scene-detect-service` 分镜。父视频仅作为内部来源保存，素材库对外只暴露子视频。
-- 父视频及全部子视频通过 ZOS 补偿事务和单个 MySQL 事务整批持久化。任一切片损坏、
-  下载不完整或超过 10 MiB 时，整批不入库。
+- 父视频不进入 ZOS。全部子视频和第一帧先在一个 MySQL 事务中建立本地待审核记录；
+  任一切片损坏、下载不完整或超过 10 MiB 时，整批不建立素材。
 - 整批持久化成功后，每个子视频独立提取 1–5 张关键帧并进入现有 VLM 分析流程。
 - 语义向量保存到 Chroma；关系数据、任务状态和分析结果保存到 MySQL。
 - 所有业务 API 使用 `/api/v1` 和 `snake_case`。项目部署于可信内网，接口不做
@@ -57,8 +58,15 @@ Secret 中，不能写入 README、Compose、镜像或 Git 历史。
 3. 通过 Drizzle 的数据库迁移账本幂等执行 MySQL migration；
 4. 启动 Next.js Web 与 worker，并等待 Web 健康检查。
 
-任一依赖提前退出或超时，脚本会显示对应日志末尾、清理 PID 并返回非零状态，
-不会误报“全部就绪”。运行日志位于 `.run/`。
+默认端口链固定为：Web `23015`、Chroma `23016`、分镜服务 `28200`。
+Web 与 worker 分别写入 `.run/web.pid`、`.run/worker.pid`；worker 每 2 秒原子更新
+`.run/worker.heartbeat.json`。脚本最终调用 `GET /health`，只有 Web、worker、
+MySQL（UTC 会话）、Chroma、分镜服务与 ZOS bucket 全部可用时才报告启动成功。
+分镜明确禁用时健康状态为 `disabled`，不阻塞图片场景启动。
+
+任一依赖提前退出或超时，脚本会显示对应日志末尾、只清理本次启动的新进程并
+返回非零状态，不会误报“全部就绪”。每次启动都会幂等执行 MySQL migration；
+生产模式会重新构建以避免旧 `.next` 与源码不一致。运行日志位于 `.run/`。
 
 `APP_MODE=dev` 使用 Turbopack 开发模式；`APP_MODE=prd` 使用构建产物。应用监听地址
 由 `PORT` 控制。服务监听可以使用 `0.0.0.0`，但同机客户端连接地址应使用
@@ -75,17 +83,20 @@ Secret 中，不能写入 README、Compose、镜像或 Git 历史。
 DATABASE_URL=mysql://<user>:<url-encoded-password>@<host>:<port>/<database>
 DATABASE_SSL_CA_PATH=./data/mysql-ca.pem
 DATABASE_POOL_SIZE=20
+PORT=23015
+APP_MODE=prd
 MEDIA_ROOT=./media
-UPLOAD_MAX_ITEMS=100
 UPLOAD_MAX_TOTAL_BYTES=2147483648
-STAGING_RETENTION_HOURS=24
-TASK_RETENTION_DAYS=7
+PENDING_ASSET_RETENTION_HOURS=24
+TASK_HISTORY_RETENTION_HOURS=24
 CLEANUP_INTERVAL_SECONDS=3600
 
 SCENE_DETECT_ENABLED=true
 SCENE_DETECT_BASE_URL=http://127.0.0.1:28200
 SCENE_DETECT_PROJECT_DIR=../scene-detect-service
 SCENE_SEGMENT_MAX_BYTES=10485760
+
+CHROMA_URL=http://127.0.0.1:23016
 
 ZOS_API_ENDPOINT=<s3-compatible-api-endpoint>
 ZOS_BUCKET=<private-bucket>
@@ -106,28 +117,32 @@ pnpm db:migrate
 ## API v1
 
 完整请求/响应、字段类型和错误码见 [API 文档](docs/api.md)；机器可读规范见
-[OpenAPI](spec/contracts/openapi.yaml)，浏览器文档页位于 `/docs`；原 `/api-docs`
-入口继续保留。
+[OpenAPI](spec/contracts/openapi.yaml)，浏览器文档页位于 `/api-docs`。项目不提供
+`/docs` 路由，避免产生两个含义相同的文档入口。
+
+`GET /health` 是无需业务参数的部署探针，成功返回 `200`，任一必需依赖不可用时
+返回 `503`。响应只包含 `web`、`worker`、`mysql`、`chroma`、`scene_detect`、
+`zos` 的 `up`/`down`/`disabled` 状态和上海时区检查时间，不会返回连接地址、
+密钥或底层异常。
 
 主要接口：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `POST` | `/api/v1/uploads` | 创建批量上传任务及 item 清单 |
-| `PUT` | `/api/v1/uploads/{task_id}/items/{item_id}` | 逐项流式上传 |
-| `POST` | `/api/v1/uploads/{task_id}` | 封存任务并启动验证、分镜、持久化和分析 |
-| `GET` | `/api/v1/tasks/{task_id}` | 查询上传及所有异步变更任务 |
-| `POST` | `/api/v1/assets/query` | 统一浏览、标签过滤与语义搜索 |
-| `GET` | `/api/v1/assets/{asset_id}` | 获取素材详情 |
-| `PATCH` | `/api/v1/assets/{asset_id}` | 异步修改素材 |
-| `POST` | `/api/v1/assets/{asset_id}/publish` | 异步发布素材 |
-| `POST` | `/api/v1/assets/{asset_id}/retry` | 异步重试失败分析 |
-| `DELETE` | `/api/v1/assets/{asset_id}` | 异步释放个人素材或删除公共素材 |
-| `GET` | `/api/v1/media/{asset_id}` | 私有媒体流、下载和 HTTP Range |
+| `POST` | `/api/v1/uploads` | 单次 multipart 上传 1–5 张图片或一个视频，并启动异步处理 |
+| `GET` | `/api/v1/tasks?task_id=...` | 查询上传及所有异步变更任务 |
+| `POST` | `/api/v1/assets/list` | 列出已发布图片和视频第一帧直链 |
+| `POST` | `/api/v1/assets/search` | 组合过滤、标签统计与语义搜索 |
+| `GET` | `/api/v1/assets/detail?asset_id=...` | 获取素材详情 |
+| `PATCH` | `/api/v1/assets` | 异步修改素材 |
+| `POST` | `/api/v1/assets/actions` | 异步发布、重试或删除素材 |
+| `POST` | `/api/v1/storage/usage` | 统计用户或公共库的已发布对象空间 |
+| `GET` | `/api/v1/media?asset_id=...` | 图片/子视频直链和 HTTP Range |
+| `GET` | `/api/v1/thumbnail?asset_id=...` | 视频第一帧直链和 HTTP Range |
 
-上传任务默认最多 100 个文件、总计最多 2 GiB。创建任务后必须上传清单中的每一项，
-再调用封存接口；不存在“从任务中删除 item”的接口。上传中断会释放行级租约、清零该项
-进度并删除不完整临时文件，可以从头重传。相同 item 的并发 PUT 会返回 409。
+上传请求使用重复的 `files` multipart 字段，一次只允许 1–5 张图片，或恰好一个视频，
+两类不能混合。`content_type` 由后端根据目标扩展名和完整解码结果确定，不由调用者提交。
+请求中途断开时整批重新上传；项目不提供三阶段上传、断点续传或 Idempotency-Key。
 
 任务及 item 的 `status` 仅使用 `queued`、`running`、`done`、`failed`；详细阶段由
 `phase` 表达。创建任务时可选 `callback_url`。没有回调时按 `task_id` 轮询；有回调时
@@ -151,12 +166,14 @@ pnpm db:migrate
 
 ## 文件与任务生命周期
 
-- 未封存或失败的本地 staging 文件保留 24 小时，每小时扫描一次。
-- 成功写入 ZOS/MySQL 的本地 staging、分析下载文件和分镜工作区立即清理。
-- 任务终态记录默认保留 7 天；长期存在的父视频/素材引用会在任务清理时自动置空，
-  不会级联删除媒体。
-- 完整父视频、切片和图片长期保存于私有 ZOS；媒体 API 负责用户作用域、
-  `Content-Type`、下载文件名及 Range，不向客户端暴露对象存储密钥。
+- 上传 staging、分析下载文件和分镜工作区在处理完成后立即清理；异常残留最多保留
+  `PENDING_ASSET_RETENTION_HOURS`（默认 24 小时）。
+- 待审核图片、子视频和第一帧仅保存在 `media/.pending`。分析完成后未发布满 24 小时，
+  worker 会硬删除媒体、素材/分析/标签/父子关系和 Chroma 向量。
+- 发布时才把图片，或子视频及其第一帧上传 ZOS；成功切换 MySQL 引用后立即删除本地副本。
+  完整父视频始终不上传 ZOS。
+- 终态任务从最后一次完成/过期清理起继续保留 `TASK_HISTORY_RETENTION_HOURS`（默认
+  24 小时），之后从 MySQL 删除。
 
 ## 模型与候选链
 

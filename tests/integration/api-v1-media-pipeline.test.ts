@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -47,7 +48,6 @@ const applicationTables = [
   "asset_tags",
   "assets",
   "callback_deliveries",
-  "idempotency_requests",
   "jobs",
   "media_objects",
   "outbox_events",
@@ -312,28 +312,44 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     if (temporaryRoot) await fs.rm(temporaryRoot, { recursive: true, force: true });
   });
 
-  async function createAndSeal(filename: string, bytes: Buffer) {
+  async function createAndSeal(
+    filename: string,
+    bytes: Buffer,
+    autoPublish = true,
+  ) {
     const service = new api.DefaultApiV1Service();
-    const created = await service.createUploadTask({
+    const taskId = crypto.randomUUID();
+    const itemId = crypto.randomUUID();
+    const extension = path.extname(filename).toLowerCase();
+    const stagingPath = path.posix.join(
+      ".staging",
+      taskId,
+      `${itemId}${extension}`,
+    );
+    const absolutePath = path.join(
+      process.env.MEDIA_ROOT!,
+      ...stagingPath.split("/"),
+    );
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, bytes);
+    const created = await service.submitUpload({
+      taskId,
       user_id: "user-pipeline",
       callback_url: null,
-      auto_publish: true,
-      items: [{ filename, size_bytes: bytes.byteLength, content_type: null }],
+      auto_publish: autoPublish,
+      files: [
+        {
+          id: itemId,
+          ordinal: 0,
+          filename,
+          mediaType: extension === ".mp4" ? "video" : "image",
+          contentType: extension === ".mp4" ? "video/mp4" : "image/png",
+          sizeBytes: bytes.byteLength,
+          stagingPath,
+        },
+      ],
     });
-    const itemId = created.items[0]!.item_id;
-    const received = await service.receiveUploadItem({
-      taskId: created.task_id,
-      itemId,
-      body: body(bytes),
-      contentLength: bytes.byteLength,
-      contentType: null,
-    });
-    expect(received).toMatchObject({
-      phase: "waiting_for_seal",
-      received_bytes: bytes.byteLength,
-    });
-    const sealed = await service.sealUploadTask(created.task_id);
-    expect(sealed).toMatchObject({ status: "running", phase: "validating" });
+    expect(created).toMatchObject({ status: "running", phase: "validating" });
     return { service, taskId: created.task_id, itemId };
   }
 
@@ -354,7 +370,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     }
   }
 
-  test("图片三步上传后持久化到对象存储和 MySQL，并完成分析", async () => {
+  test("图片单次上传后持久化到对象存储和 MySQL，并完成分析", async () => {
     const image = await sharp({
       create: { width: 8, height: 8, channels: 3, background: "#3388cc" },
     })
@@ -368,21 +384,21 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       status: "done",
       phase: "finished",
       progress_percent: 100,
-      done_items: 1,
-      failed_items: 0,
+      done_files: 1,
+      failed_files: 0,
     });
-    expect(status.items[0]).toMatchObject({
+    expect(status.files[0]).toMatchObject({
       item_id: itemId,
       media_type: "image",
       status: "done",
       phase: "finished",
     });
-    expect(status.items[0]!.asset_ids).toHaveLength(1);
+    expect(status.files[0]!.asset_ids).toHaveLength(1);
 
     const [assetRow] = await database.db
       .select()
       .from(schema.assets)
-      .where(eq(schema.assets.id, status.items[0]!.asset_ids[0]!));
+      .where(eq(schema.assets.id, status.files[0]!.asset_ids[0]!));
     const [analysis] = await database.db
       .select()
       .from(schema.analysisResults)
@@ -406,6 +422,153 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     await expect(
       fs.stat(path.join(process.env.MEDIA_ROOT!, ".staging", taskId)),
     ).rejects.toThrow();
+  }, 30_000);
+
+  test("待审核图片只保存在本地，手动发布后原子迁移 ZOS 并清理本地", async () => {
+    const image = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: "#cc8833" },
+    })
+      .jpeg()
+      .toBuffer();
+    const { service, taskId } = await createAndSeal(
+      "pending.jpg",
+      image,
+      false,
+    );
+    await processUntilIdle();
+
+    const status = await service.getTask(taskId);
+    expect(status).toMatchObject({ status: "done", phase: "finished" });
+    const assetId = status.files[0]!.asset_ids[0]!;
+    const [pendingAsset] = await database.db
+      .select()
+      .from(schema.assets)
+      .where(eq(schema.assets.id, assetId));
+    const [localObject] = await database.db
+      .select()
+      .from(schema.mediaObjects)
+      .where(eq(schema.mediaObjects.id, pendingAsset!.mediaObjectId!));
+    expect(pendingAsset).toMatchObject({
+      processingStatus: "completed",
+      reviewStatus: "pending_review",
+      directPublish: false,
+    });
+    expect(localObject).toMatchObject({
+      provider: "local",
+      status: "persisted",
+    });
+    expect(storage.objects.size).toBe(0);
+    const localAbsolutePath = path.join(
+      process.env.MEDIA_ROOT!,
+      localObject!.localPath!,
+    );
+    expect(await fs.readFile(localAbsolutePath)).toEqual(image);
+    const { mediaResponse } = await import("@/server/media/response");
+    const range = await mediaResponse(
+      assetId,
+      new Request(`http://localhost/api/v1/media/${assetId}`, {
+        headers: { range: "bytes=0-7" },
+      }),
+    );
+    expect(range.status).toBe(206);
+    expect((await range.arrayBuffer()).byteLength).toBe(8);
+
+    await service.actOnAsset({
+      asset_id: assetId,
+      action: "publish",
+      user_id: "user-pipeline",
+      callback_url: null,
+    });
+    await processUntilIdle();
+    const [publishedAsset] = await database.db
+      .select()
+      .from(schema.assets)
+      .where(eq(schema.assets.id, assetId));
+    const [zosObject] = await database.db
+      .select()
+      .from(schema.mediaObjects)
+      .where(eq(schema.mediaObjects.id, publishedAsset!.mediaObjectId!));
+    expect(publishedAsset!.reviewStatus).toBe("published");
+    expect(zosObject).toMatchObject({
+      provider: "zos",
+      localPath: null,
+      status: "persisted",
+    });
+    expect(storage.objects.get(zosObject!.objectKey)?.bytes).toEqual(image);
+    await expect(fs.stat(localAbsolutePath)).rejects.toThrow();
+  }, 30_000);
+
+  test("待审核素材过期清理失败可重入，最终同时清 DB、本地和任务", async () => {
+    const image = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: "#663399" },
+    })
+      .png()
+      .toBuffer();
+    const { service, taskId } = await createAndSeal(
+      "expires.png",
+      image,
+      false,
+    );
+    await processUntilIdle();
+    const initial = await service.getTask(taskId);
+    const assetId = initial.files[0]!.asset_ids[0]!;
+    const [asset] = await database.db
+      .select()
+      .from(schema.assets)
+      .where(eq(schema.assets.id, assetId));
+    const [object] = await database.db
+      .select()
+      .from(schema.mediaObjects)
+      .where(eq(schema.mediaObjects.id, asset!.mediaObjectId!));
+    await database.db
+      .update(schema.assets)
+      .set({ updatedAt: new Date("2026-08-10T00:00:00Z") })
+      .where(eq(schema.assets.id, assetId));
+    const localPath = path.join(process.env.MEDIA_ROOT!, object!.localPath!);
+    const chroma = await import("@/server/search/chroma");
+    vi.mocked(chroma.deleteAnalysis)
+      .mockRejectedValueOnce(new Error("temporary Chroma failure"))
+      .mockResolvedValue(undefined);
+    const { cleanupExpiredPendingAssets } = await import(
+      "@/server/services/pending-asset-cleanup"
+    );
+
+    await expect(
+      cleanupExpiredPendingAssets(new Date("2026-08-13T00:00:00Z"), storage),
+    ).rejects.toThrow("temporary Chroma failure");
+    expect(await fs.readFile(localPath)).toEqual(image);
+    expect(
+      await database.db
+        .select()
+        .from(schema.assets)
+        .where(eq(schema.assets.id, assetId)),
+    ).toMatchObject([
+      { reviewStatus: "deleted", failureCode: "pending_asset_expired" },
+    ]);
+
+    await expect(
+      cleanupExpiredPendingAssets(new Date("2026-08-13T01:00:00Z"), storage),
+    ).resolves.toBe(1);
+    await expect(fs.stat(localPath)).rejects.toThrow();
+    expect(
+      await database.db
+        .select()
+        .from(schema.assets)
+        .where(eq(schema.assets.id, assetId)),
+    ).toHaveLength(0);
+    expect(
+      await database.db
+        .select()
+        .from(schema.mediaObjects)
+        .where(eq(schema.mediaObjects.id, object!.id)),
+    ).toHaveLength(0);
+    const finalTask = await service.getTask(taskId);
+    expect(finalTask).toMatchObject({
+      status: "failed",
+      phase: "finished",
+    });
+    expect(finalTask.error?.message).toContain("待审核素材超过保留期");
+    expect(finalTask.expires_at).not.toBeNull();
   }, 30_000);
 
   test("父视频分镜为多个子素材，父视频不进 assets，每个切片独立关键帧分析", async () => {
@@ -444,17 +607,17 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(status).toMatchObject({
       status: "done",
       phase: "finished",
-      total_items: 1,
-      done_items: 1,
-      failed_items: 0,
+      total_files: 1,
+      done_files: 1,
+      failed_files: 0,
     });
-    expect(status.items[0]).toMatchObject({
+    expect(status.files[0]).toMatchObject({
       item_id: itemId,
       media_type: "video",
       status: "done",
       phase: "finished",
     });
-    expect(status.items[0]!.asset_ids).toHaveLength(2);
+    expect(status.files[0]!.asset_ids).toHaveLength(2);
 
     const assetRows = await database.db
       .select()
@@ -466,6 +629,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       .where(eq(schema.videoSources.taskId, taskId));
     const analysisRows = await database.db.select().from(schema.analysisResults);
     expect(sourceRows).toHaveLength(1);
+    expect(sourceRows[0]!.mediaObjectId).toBeNull();
     expect(assetRows).toHaveLength(2);
     expect(assetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
     expect(assetRows.every((row) => row.sizeBytes <= 10 * 1024 * 1024)).toBe(true);
@@ -476,7 +640,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(analysisRows).toHaveLength(2);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);
     expect(framePreparation).toHaveBeenCalledTimes(2);
-    expect(storage.objects.size).toBe(5); // 1 个父对象 + 2 个切片 + 2 张首帧
+    expect(storage.objects.size).toBe(4); // 父视频不进 ZOS：2 个切片 + 2 张首帧
     for (const asset of assetRows) {
       const [thumbnail] = await database.db
         .select()
@@ -529,12 +693,16 @@ mysqlPipeline("API v1 完整媒体管线", () => {
         .from(schema.mediaObjects)
         .where(eq(schema.mediaObjects.id, deletedAsset.thumbnailMediaObjectId!))
     )[0]!.objectKey;
-    await service.deleteAsset(deletedAsset.id, {
+    await service.actOnAsset({
+      asset_id: deletedAsset.id,
+      action: "delete",
       user_id: "user-pipeline",
       callback_url: null,
     });
     await processUntilIdle(client, framePreparation);
-    await service.deleteAsset(deletedAsset.id, {
+    await service.actOnAsset({
+      asset_id: deletedAsset.id,
+      action: "delete",
       user_id: null,
       callback_url: null,
     });
@@ -553,7 +721,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
         .from(schema.mediaObjects)
         .where(eq(schema.mediaObjects.id, deletedAsset.thumbnailMediaObjectId!)),
     ).toHaveLength(0);
-    expect(storage.objects.size).toBe(3);
+    expect(storage.objects.size).toBe(2);
   }, 45_000);
 
   test("任一切片超过 10 MiB 时整批失败，不创建 asset、父视频或媒体对象记录", async () => {
@@ -582,10 +750,10 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(status).toMatchObject({
       status: "failed",
       phase: "finished",
-      done_items: 0,
-      failed_items: 1,
+      done_files: 0,
+      failed_files: 1,
     });
-    expect(status.items[0]).toMatchObject({
+    expect(status.files[0]).toMatchObject({
       status: "failed",
       phase: "finished",
       asset_ids: [],

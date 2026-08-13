@@ -29,7 +29,17 @@ SCENE_DETECT_PORT="${SCENE_DETECT_PORT:-28200}"
 SCENE_DETECT_WAIT_SECONDS="${SCENE_DETECT_WAIT_SECONDS:-30}"
 CHROMA_DIR="$(pwd)/chroma-data"
 PID_DIR="$(pwd)/.run"
-mkdir -p "$PID_DIR" "$CHROMA_DIR"
+PROJECT_ROOT="$(pwd)"
+UV_CACHE_DIR="${UV_CACHE_DIR:-$PID_DIR/uv-cache}"
+UV_TOOL_DIR="${UV_TOOL_DIR:-$PID_DIR/uv-tools}"
+export UV_CACHE_DIR UV_TOOL_DIR
+mkdir -p "$PID_DIR" "$CHROMA_DIR" "$UV_CACHE_DIR" "$UV_TOOL_DIR"
+
+startup_complete=false
+started_chroma=false
+started_scene=false
+started_worker=false
+started_web=false
 
 c_ok()    { printf '\033[0;32m%s\033[0m\n' "$*"; }
 c_warn()  { printf '\033[0;33m%s\033[0m\n' "$*"; }
@@ -93,7 +103,48 @@ stop_managed_process() {
   rm -f "$file"
 }
 
-chroma_url="${CHROMA_URL:-http://127.0.0.1:8000}"
+project_worker_groups() {
+  local pid pgid arguments cwd
+  while read -r pid pgid arguments; do
+    [[ "$arguments" == *"src/worker/index.ts"* ]] || continue
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$PROJECT_ROOT" ] || continue
+    printf '%s\n' "$pgid"
+  done < <(ps -eo pid=,pgid=,args=)
+}
+
+stop_orphan_worker_group() {
+  local pgid="$1"
+  c_warn "检测到当前项目未纳入 worker.pid 管理的旧 worker（PGID $pgid），自动清理。"
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    kill -0 -- "-$pgid" 2>/dev/null || return
+    sleep 1
+  done
+  c_warn "旧 worker 未在 10s 内退出，发送 SIGKILL。"
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+}
+
+# 启动链中任一步失败时，只回收本次调用新建的进程；调用前已经健康运行的
+# 服务保持不动，避免一次探针失败影响其他正在使用的实例。
+cleanup_failed_startup() {
+  local status=$?
+  if [ "$status" -eq 0 ] || [ "$startup_complete" = true ]; then
+    return
+  fi
+  set +e
+  c_warn "启动未完成，清理本次新启动的进程 ..."
+  [ "$started_web" = true ] && stop_managed_process "$PID_DIR/web.pid" "Web"
+  [ "$started_worker" = true ] && stop_managed_process "$PID_DIR/worker.pid" "worker"
+  [ "$started_scene" = true ] && stop_managed_process "$PID_DIR/scene.pid" "分镜服务"
+  [ "$started_chroma" = true ] && stop_managed_process "$PID_DIR/chroma.pid" "Chroma"
+  rm -f "$PID_DIR/worker.heartbeat.json"
+  exit "$status"
+}
+
+trap cleanup_failed_startup EXIT
+
+chroma_url="${CHROMA_URL:-http://127.0.0.1:23016}"
 chroma_authority="${chroma_url#*://}"
 chroma_authority="${chroma_authority%%/*}"
 chroma_url_port="${chroma_authority##*:}"
@@ -216,6 +267,7 @@ else
     > "$CHROMA_LOG" 2>&1 &
   chroma_pid=$!
   echo "$chroma_pid" > "$CHROMA_PID_FILE"
+  started_chroma=true
   # 等待端口就绪
   chroma_ready=false
   for i in $(seq 1 "$CHROMA_WAIT_SECONDS"); do
@@ -289,6 +341,7 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
     nohup setsid ./scripts/run-scene-service.sh > "$SCENE_LOG" 2>&1 &
     scene_pid=$!
     echo "$scene_pid" > "$SCENE_PID_FILE"
+    started_scene=true
     scene_ready=false
     for i in $(seq 1 "$SCENE_DETECT_WAIT_SECONDS"); do
       if scene_is_ready; then
@@ -321,78 +374,163 @@ pnpm run db:migrate
 c_ok "数据库迁移完成"
 
 # ---------- Web + worker ----------
-APP_PID_FILE="$PID_DIR/app.pid"
-APP_LOG="$PID_DIR/app.log"
+WEB_PID_FILE="$PID_DIR/web.pid"
+WORKER_PID_FILE="$PID_DIR/worker.pid"
+LEGACY_APP_PID_FILE="$PID_DIR/app.pid"
+WEB_LOG="$PID_DIR/web.log"
+WORKER_LOG="$PID_DIR/worker.log"
+WORKER_HEARTBEAT="$PID_DIR/worker.heartbeat.json"
+HEALTH_URL="http://127.0.0.1:$PORT/health"
+APP_WAIT_SECONDS="${APP_WAIT_SECONDS:-90}"
 
-web_is_ready() {
-  curl -q -fsS -m 1 "http://127.0.0.1:$PORT" >/dev/null 2>&1
+web_is_responding() {
+  # curl 在 HTTP 503 时仍返回 0；这里仅判断端口上的 Web 是否能响应 HTTP。
+  curl -q -sS -m 2 -o /dev/null "$HEALTH_URL" >/dev/null 2>&1
 }
 
-if is_running "$APP_PID_FILE" \
-  && ! web_is_ready; then
-  c_warn "Web+worker PID 存在但健康检查失败，自动清理后重新启动。"
-  stop_managed_process "$APP_PID_FILE" "Web+worker"
+application_is_healthy() {
+  curl -q -fsS -m 8 "$HEALTH_URL" >/dev/null 2>&1
+}
+
+worker_heartbeat_is_fresh() {
+  local modified now
+  [ -f "$WORKER_HEARTBEAT" ] || return 1
+  modified="$(stat -c %Y "$WORKER_HEARTBEAT" 2>/dev/null)" || return 1
+  now="$(date +%s)"
+  [ $((now - modified)) -le 10 ]
+}
+
+unmanaged_worker_is_alive() {
+  local heartbeat_pid
+  worker_heartbeat_is_fresh || return 1
+  heartbeat_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$WORKER_HEARTBEAT")"
+  [[ "$heartbeat_pid" =~ ^[0-9]+$ ]] && [ "$heartbeat_pid" -gt 1 ] \
+    && kill -0 "$heartbeat_pid" 2>/dev/null
+}
+
+# 兼容旧版 start.sh 的 concurrently 进程组；升级后首次启动会先停止旧托管组，
+# 再分别托管 Web 与 worker，健康接口才能准确区分两者。
+if is_running "$LEGACY_APP_PID_FILE"; then
+  c_warn "检测到旧版 Web+worker 进程组，迁移到独立 PID 管理。"
+  stop_managed_process "$LEGACY_APP_PID_FILE" "旧版 Web+worker"
+else
+  rm -f "$LEGACY_APP_PID_FILE"
 fi
 
-# PID 文件缺失时不能直接覆盖一个已经监听的旧实例，否则新进程会因
-# EADDRINUSE 退出，并把原实例留在重建后的 .next 上造成客户端 chunk 异常。
-if ! is_running "$APP_PID_FILE" && web_is_ready; then
+# PID 文件丢失或旧版 concurrently 被外部终止时，其 worker 子进程可能继续运行，
+# 不占端口却会重复消费 MySQL 队列。只清理 cwd 精确等于当前仓库的 worker 进程组。
+managed_worker_pid="$(pid_from_file "$WORKER_PID_FILE" 2>/dev/null || true)"
+while IFS= read -r worker_group; do
+  [ -n "$worker_group" ] || continue
+  [ "$worker_group" = "$managed_worker_pid" ] && continue
+  stop_orphan_worker_group "$worker_group"
+done < <(project_worker_groups | sort -u)
+if [ -z "$managed_worker_pid" ]; then
+  rm -f "$WORKER_HEARTBEAT"
+fi
+
+if is_running "$WORKER_PID_FILE" && ! worker_heartbeat_is_fresh; then
+  c_warn "worker PID 存在但心跳已过期，自动清理后重新启动。"
+  stop_managed_process "$WORKER_PID_FILE" "worker"
+  rm -f "$WORKER_HEARTBEAT"
+fi
+
+if ! is_running "$WORKER_PID_FILE" && unmanaged_worker_is_alive; then
+  c_err "检测到未纳入 worker.pid 管理但仍在更新心跳的 worker。"
+  c_err "请先停止该旧实例，再运行 ./scripts/start.sh，避免重复消费任务。"
+  exit 1
+fi
+
+if is_running "$WEB_PID_FILE" && ! web_is_responding; then
+  c_warn "Web PID 存在但 HTTP 无响应，自动清理后重新启动。"
+  stop_managed_process "$WEB_PID_FILE" "Web"
+fi
+
+if ! is_running "$WEB_PID_FILE" && web_is_responding; then
   c_err "端口 $PORT 已被未纳入当前 PID 文件的 Web 服务占用。"
   c_err "请先停止该旧实例，确认端口释放后再运行 ./scripts/start.sh。"
   exit 1
 fi
 
-if is_running "$APP_PID_FILE"; then
-  c_warn "Web+worker 已在运行 (PID $(cat "$APP_PID_FILE"))"
+if is_running "$WORKER_PID_FILE"; then
+  c_warn "worker 已在运行 (PID $(cat "$WORKER_PID_FILE"))"
 else
+  rm -f "$WORKER_PID_FILE" "$WORKER_HEARTBEAT"
+  : > "$WORKER_LOG"
+  c_info "启动 worker ..."
+  nohup setsid pnpm run start:worker > "$WORKER_LOG" 2>&1 &
+  worker_pid=$!
+  echo "$worker_pid" > "$WORKER_PID_FILE"
+  started_worker=true
+fi
+
+if is_running "$WEB_PID_FILE"; then
+  c_warn "Web 已在运行 (PID $(cat "$WEB_PID_FILE"))"
+else
+  rm -f "$WEB_PID_FILE"
+  : > "$WEB_LOG"
   if [ "$APP_MODE" = "dev" ]; then
-    c_info "启动 Web + worker [dev/turbopack] (PORT=$PORT) ..."
+    c_info "启动 Web [dev/turbopack] (PORT=$PORT) ..."
     nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
-      pnpm run dev > "$APP_LOG" 2>&1 &
+      pnpm exec next dev --turbo > "$WEB_LOG" 2>&1 &
   else
-    # prd: 确保 build 产物存在
-    if [ ! -d ".next" ] || [ ! -f ".next/BUILD_ID" ]; then
-      c_info "生产模式首次启动，执行 build ..."
-      pnpm run build
-    fi
-    c_info "启动 Web + worker [prd] (PORT=$PORT) ..."
+    # 每次新启生产 Web 都重新构建，避免残留 .next 与当前源码不一致。
+    c_info "构建生产 Web ..."
+    pnpm run build
+    c_info "启动 Web [prd] (PORT=$PORT) ..."
     nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
-      pnpm run start:all > "$APP_LOG" 2>&1 &
+      pnpm run start:web > "$WEB_LOG" 2>&1 &
   fi
-  app_pid=$!
-  echo "$app_pid" > "$APP_PID_FILE"
-  # prd 秒起，dev 首次编译慢，统一给 60s
-  app_ready=false
-  for i in $(seq 1 60); do
-    if web_is_ready; then
-      c_ok "Web 就绪 → http://127.0.0.1:$PORT  [mode=$APP_MODE]"
-      app_ready=true
-      break
-    fi
-    if ! is_running "$APP_PID_FILE"; then
-      wait "$app_pid" 2>/dev/null || app_status=$?
-      rm -f "$APP_PID_FILE"
-      c_err "Web+worker 启动进程提前退出（状态码 ${app_status:-0}）。"
-      [ -s "$APP_LOG" ] && tail -n 40 "$APP_LOG" >&2 || true
-      exit 1
-    fi
-    sleep 1
-  done
-  if [ "$app_ready" != true ]; then
-    stop_managed_process "$APP_PID_FILE" "Web+worker"
-    c_err "Web 60s 内未响应，已停止 Web+worker 启动进程。日志末尾："
-    [ -s "$APP_LOG" ] && tail -n 40 "$APP_LOG" >&2 || true
+  web_pid=$!
+  echo "$web_pid" > "$WEB_PID_FILE"
+  started_web=true
+fi
+
+# 最终就绪条件不是“首页可访问”，而是 /health 确认 Web、worker、MySQL、
+# Chroma、分镜服务和 ZOS 全部可用。
+app_ready=false
+app_deadline=$((SECONDS + APP_WAIT_SECONDS))
+while [ "$SECONDS" -lt "$app_deadline" ]; do
+  if application_is_healthy; then
+    app_ready=true
+    break
+  fi
+  if ! is_running "$WORKER_PID_FILE"; then
+    c_err "worker 启动进程提前退出。日志末尾："
+    [ -s "$WORKER_LOG" ] && tail -n 40 "$WORKER_LOG" >&2 || true
     exit 1
   fi
+  if ! is_running "$WEB_PID_FILE"; then
+    c_err "Web 启动进程提前退出。日志末尾："
+    [ -s "$WEB_LOG" ] && tail -n 40 "$WEB_LOG" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+
+if [ "$app_ready" != true ]; then
+  c_err "应用 ${APP_WAIT_SECONDS}s 内未通过聚合健康检查：$HEALTH_URL"
+  if web_is_responding; then
+    c_err "健康状态（不含密钥和底层异常）："
+    curl -q -sS -m 8 "$HEALTH_URL" >&2 || true
+    echo >&2
+  fi
+  [ -s "$WORKER_LOG" ] && tail -n 30 "$WORKER_LOG" >&2 || true
+  [ -s "$WEB_LOG" ] && tail -n 30 "$WEB_LOG" >&2 || true
+  exit 1
 fi
+
+startup_complete=true
+trap - EXIT
 
 echo
 c_ok "全部就绪。  [mode=$APP_MODE]"
 echo "  Web:     http://127.0.0.1:$PORT"
+echo "  健康:    $HEALTH_URL"
 echo "  Chroma:  $CHROMA_HEALTH_URL"
 if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
   echo "  分镜:    $SCENE_HEALTH_URL"
 fi
 echo "  模式:    $APP_MODE  (改 .env 的 APP_MODE=dev 切开发模式)"
-echo "  日志:    $PID_DIR/{chroma,scene,app}.log"
+echo "  日志:    $PID_DIR/{chroma,scene,worker,web}.log"
 echo "  关闭:    ./scripts/stop.sh"

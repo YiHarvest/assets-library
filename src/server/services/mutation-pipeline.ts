@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { loadConfig } from "@/server/config";
 import { db } from "@/server/db";
 import {
   assets,
@@ -11,16 +12,19 @@ import {
 import { AppError } from "@/server/errors";
 import {
   completeJob,
-  publishAsset,
   releaseAssetToPublic,
   updateAssetMetadata,
   type AssetScope,
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import { deleteAnalysis } from "@/server/search/chroma";
+import { publishAssetMedia } from "@/server/services/media-publication";
+import { deleteMediaObjectBytes } from "@/server/services/pending-media";
 import {
+  failTaskItem,
   failMutationTask,
   finishMutationTask,
+  refreshTaskForAsset,
 } from "@/server/services/task-lifecycle";
 import type { ObjectStorage } from "@/server/storage/object-storage";
 import { createZosObjectStorage } from "@/server/storage/zos";
@@ -124,7 +128,9 @@ async function queueRetryAnalysis(job: ClaimedJob) {
 
 interface DeletingObject {
   id: string;
+  provider: "local" | "zos";
   objectKey: string;
+  localPath: string | null;
 }
 
 interface PublicDeletionReservation {
@@ -189,7 +195,12 @@ async function reservePublicAssetDeletion(
     let object: DeletingObject | undefined;
     if (asset.mediaObjectId) {
       const [stored] = await tx
-        .select({ id: mediaObjects.id, objectKey: mediaObjects.objectKey })
+        .select({
+          id: mediaObjects.id,
+          provider: mediaObjects.provider,
+          objectKey: mediaObjects.objectKey,
+          localPath: mediaObjects.localPath,
+        })
         .from(mediaObjects)
         .where(eq(mediaObjects.id, asset.mediaObjectId))
         .limit(1);
@@ -205,7 +216,12 @@ async function reservePublicAssetDeletion(
     let thumbnailObject: DeletingObject | undefined;
     if (asset.thumbnailMediaObjectId) {
       const [stored] = await tx
-        .select({ id: mediaObjects.id, objectKey: mediaObjects.objectKey })
+        .select({
+          id: mediaObjects.id,
+          provider: mediaObjects.provider,
+          objectKey: mediaObjects.objectKey,
+          localPath: mediaObjects.localPath,
+        })
         .from(mediaObjects)
         .where(eq(mediaObjects.id, asset.thumbnailMediaObjectId))
         .limit(1);
@@ -236,7 +252,12 @@ async function reservePublicAssetDeletion(
         parent = { sourceId: lockedSource.id };
         if (lockedSource.mediaObjectId) {
           const [parentObject] = await tx
-            .select({ id: mediaObjects.id, objectKey: mediaObjects.objectKey })
+            .select({
+              id: mediaObjects.id,
+              provider: mediaObjects.provider,
+              objectKey: mediaObjects.objectKey,
+              localPath: mediaObjects.localPath,
+            })
             .from(mediaObjects)
             .where(eq(mediaObjects.id, lockedSource.mediaObjectId))
             .limit(1);
@@ -321,12 +342,15 @@ async function hardDeletePublicAsset(
 
   // 外部对象先幂等删除；若进程中断，隐藏的 deleted 行可由同一任务重试收尾。
   await deleteAnalysis(assetId);
-  if (record.object) await storage.deleteObject(record.object.objectKey);
+  const mediaRoot = loadConfig().mediaRoot;
+  if (record.object) {
+    await deleteMediaObjectBytes(record.object, storage, mediaRoot);
+  }
   if (record.thumbnailObject) {
-    await storage.deleteObject(record.thumbnailObject.objectKey);
+    await deleteMediaObjectBytes(record.thumbnailObject, storage, mediaRoot);
   }
   if (record.parent?.object) {
-    await storage.deleteObject(record.parent.object.objectKey);
+    await deleteMediaObjectBytes(record.parent.object, storage, mediaRoot);
   }
 
   await finalizePublicAssetDeletion(assetId, record);
@@ -342,6 +366,22 @@ async function deleteAsset(job: ClaimedJob, storage: ObjectStorage) {
     return { released_to_public: true, parent_video_reclaimed: false };
   }
   return hardDeletePublicAsset(assetId, storage);
+}
+
+function isAutomaticPublication(job: ClaimedJob) {
+  return job.type === "publish" && job.payload?.autoPublishBatch === true;
+}
+
+async function failAutomaticPublication(job: ClaimedJob, error: unknown) {
+  if (!job.taskId || !job.assetId) return;
+  const [asset] = await db
+    .select({ taskItemId: assets.taskItemId })
+    .from(assets)
+    .where(eq(assets.id, job.assetId))
+    .limit(1);
+  if (asset?.taskItemId) {
+    await failTaskItem(job.taskId, asset.taskItemId, error);
+  }
 }
 
 /** 执行 update/publish/retry/delete 变更作业。 */
@@ -364,7 +404,19 @@ export async function processMutationJob(
       await updateAssetMetadata(assetId, updatePayload(job), scopeForJob(job));
       result = { asset_id: assetId };
     } else if (job.type === "publish") {
-      await publishAsset(assetId, scopeForJob(job));
+      const publishedIds = await publishAssetMedia({
+        assetId,
+        expectedUserId: stringPayload(job, "userId")?.trim() || null,
+        publishSiblingBatch: isAutomaticPublication(job),
+        storage,
+      });
+      if (isAutomaticPublication(job)) {
+        await completeJob(job);
+        for (const publishedId of publishedIds) {
+          await refreshTaskForAsset(publishedId);
+        }
+        return;
+      }
       result = { asset_id: assetId, review_status: "published" };
     } else if (job.type === "delete") {
       result = { asset_id: assetId, ...(await deleteAsset(job, storage)) };
@@ -374,7 +426,11 @@ export async function processMutationJob(
     await finishMutationTask(job.taskId, result);
     await completeJob(job);
   } catch (error) {
-    await failMutationTask(job.taskId, error);
+    if (isAutomaticPublication(job)) {
+      await failAutomaticPublication(job, error);
+    } else {
+      await failMutationTask(job.taskId, error);
+    }
     throw error;
   }
 }

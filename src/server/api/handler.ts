@@ -7,7 +7,6 @@ import type {
   ApiV1ErrorResponse,
 } from "@/shared/contracts";
 import { apiV1ErrorCodeSchema } from "@/shared/contracts";
-import { userIdSchema } from "@/shared/contracts";
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
@@ -157,23 +156,4 @@ export function parseUuid(value: string, field: string) {
     throw new ApiV1Error("invalid_request", `${field} 必须是有效的 UUID。`, 400);
   }
   return value;
-}
-
-/** 路径参数可能仍含百分号编码；在服务层之前统一解码、去空白并限长。 */
-export function parseUserIdPath(value: string) {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(value);
-  } catch {
-    throw new ApiV1Error("invalid_request", "user_id 路径编码无效。", 400);
-  }
-  const parsed = userIdSchema.safeParse(decoded);
-  if (!parsed.success) {
-    throw new ApiV1Error(
-      "invalid_request",
-      parsed.error.issues[0]?.message ?? "user_id 无效。",
-      400,
-    );
-  }
-  return parsed.data;
 }

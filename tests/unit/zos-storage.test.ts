@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   type S3Client,
@@ -22,6 +23,7 @@ function streamFor(bytes: Uint8Array) {
 
 type FakeS3Command =
   | PutObjectCommand
+  | HeadBucketCommand
   | HeadObjectCommand
   | GetObjectCommand
   | DeleteObjectCommand;
@@ -35,6 +37,7 @@ function fakeS3() {
   const send = vi.fn<
     (command: FakeS3Command) => Promise<FakeS3Response>
   >(async (command) => {
+    if (command instanceof HeadBucketCommand) return {};
     if (command instanceof PutObjectCommand) {
       const key = command.input.Key!;
       objects.set(key, {
@@ -94,6 +97,24 @@ describe("ZOS object storage adapter", () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it("checks bucket access without requiring a probe object", async () => {
+    const fake = fakeS3();
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test",
+      bucket: "archives",
+      accessKeyId: "test-access-key",
+      secretAccessKey: "test-secret-key",
+      client: fake.client,
+    });
+
+    await expect(storage.checkHealth()).resolves.toBeUndefined();
+    expect(fake.send).toHaveBeenCalledWith(
+      expect.any(HeadBucketCommand),
+      expect.objectContaining({ abortSignal: expect.any(AbortSignal) }),
+    );
+    expect(fake.objects.size).toBe(0);
+  });
+
   it("verifies uploaded object size with HEAD and supports byte ranges", async () => {
     const fake = fakeS3();
     const storage = new ZosObjectStorage({
@@ -129,6 +150,36 @@ describe("ZOS object storage adapter", () => {
     });
     const bytes = new Uint8Array(await new Response(ranged.body).arrayBuffer());
     expect([...bytes]).toEqual([7, 7, 7, 7]);
+  });
+
+  it("isolates every newly stored object below the configured prefix", async () => {
+    const fake = fakeS3();
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test",
+      bucket: "archives",
+      accessKeyId: "test-access-key",
+      secretAccessKey: "test-secret-key",
+      objectPrefix: "/test_assets/",
+      client: fake.client,
+      publicBaseUrl: "https://cdn.example.test",
+    });
+    const filePath = path.join(directory, "image.jpg");
+    await fs.writeFile(filePath, "image");
+
+    const stored = await storage.storeFile({
+      key: "assets/images/image.jpg",
+      filePath,
+      contentType: "image/jpeg",
+    });
+
+    expect(stored.key).toBe("test_assets/assets/images/image.jpg");
+    expect(stored.url).toBe(
+      "https://cdn.example.test/test_assets/assets/images/image.jpg",
+    );
+    expect(fake.objects.has(stored.key)).toBe(true);
+
+    await storage.deleteObject(stored.key);
+    expect(fake.objects.has(stored.key)).toBe(false);
   });
 
   it("downloads through a temporary file and verifies the complete size", async () => {

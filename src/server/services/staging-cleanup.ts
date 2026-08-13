@@ -9,13 +9,12 @@ import {
   TaskLifecycleError,
 } from "@/server/services/task-lifecycle";
 
-export const stagingRetentionMs = 24 * 60 * 60 * 1_000;
-
 /** 每小时扫描一次；仅删除超过配置保留期的 staging 文件。 */
 export async function cleanupExpiredStaging(
   now = Date.now(),
   root = path.join(loadConfig().mediaRoot, ".staging"),
-  retentionMs = loadConfig().STAGING_RETENTION_HOURS * 60 * 60 * 1_000,
+  retentionMs =
+    loadConfig().PENDING_ASSET_RETENTION_HOURS * 60 * 60 * 1_000,
 ) {
   let entries: string[];
   try {
@@ -37,11 +36,13 @@ export async function cleanupExpiredStaging(
 
 /**
  * 把超过 staging 保留期但尚未封存的上传任务置为 failed。
- * 任务记录继续保留到 TASK_RETENTION_DAYS 到期，因此调用方仍能查询明确原因。
+ * 任务记录继续保留到 TASK_HISTORY_RETENTION_HOURS 到期，因此调用方仍能
+ * 查询明确原因。
  */
 export async function expireAbandonedUploadTasks(
   now = new Date(),
-  retentionMs = loadConfig().STAGING_RETENTION_HOURS * 60 * 60 * 1_000,
+  retentionMs =
+    loadConfig().PENDING_ASSET_RETENTION_HOURS * 60 * 60 * 1_000,
 ) {
   const staleTasks = await db
     .select({ id: tasks.id })

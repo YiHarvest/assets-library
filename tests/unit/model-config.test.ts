@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "@/server/config";
 
 describe("model configuration", () => {
+  it("normalizes the isolated permanent ZOS prefix and configures default temporary upload", () => {
+    const config = loadConfig({
+      ZOS_OBJECT_PREFIX: "/test_assets/",
+      ZOS_TEMP_UPLOAD_URL: "http://localhost:11111/api/file/tmp/upload",
+    });
+
+    expect(config.ZOS_OBJECT_PREFIX).toBe("test_assets");
+    expect(config.ZOS_TEMP_UPLOAD_URL).toBe(
+      "http://localhost:11111/api/file/tmp/upload",
+    );
+  });
+
   it("builds the VLM target from the current settings", () => {
     const config = loadConfig({
       VLM_PROTOCOL: "openai_chat_completions",

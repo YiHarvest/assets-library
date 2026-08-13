@@ -2,10 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  cleanupExpiredStaging,
-  stagingRetentionMs,
-} from "@/server/services/staging-cleanup";
+import { cleanupExpiredStaging } from "@/server/services/staging-cleanup";
+
+const stagingRetentionMs = 24 * 60 * 60 * 1_000;
 
 const temporaryRoots: string[] = [];
 

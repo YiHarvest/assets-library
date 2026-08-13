@@ -4,7 +4,7 @@ function firstHeaderValue(value: string | null) {
   return value?.split(",", 1)[0]?.trim() || null;
 }
 
-function publicRequestOrigin(request: Request) {
+export function publicRequestOrigin(request: Request) {
   const internalUrl = new URL(request.url);
   const forwardedHost = firstHeaderValue(
     request.headers.get("x-forwarded-host"),

@@ -23,7 +23,8 @@ export default defineConfig({
   testDir: "./tests/e2e",
   use: { baseURL: "http://localhost:3100" },
   webServer: {
-    command: "./scripts/run-e2e-web.sh",
+    command:
+      "pnpm db:migrate && NEXT_DIST_DIR=.next-e2e pnpm exec next dev -p 3100",
     // 在 Linux 上 localhost 可能优先解析到 ::1，而 Next 的测试进程只监听
     // IPv4；固定回环地址也让健康检查与浏览器访问使用同一端点。
     url: "http://127.0.0.1:3100/",

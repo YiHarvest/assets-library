@@ -11,6 +11,19 @@ const optionalBooleanSchema = z
 const booleanSchema = z
   .union([z.boolean(), z.enum(["true", "false"])])
   .transform((value) => value === true || value === "true");
+const objectPrefixSchema = z
+  .string()
+  .trim()
+  .default("")
+  .transform((value) => value.replace(/^\/+|\/+$/g, ""))
+  .refine(
+    (value) =>
+      !value ||
+      (!value.includes("\\") &&
+        !value.includes("\0") &&
+        value.split("/").every((part) => part && part !== "." && part !== "..")),
+    "对象存储前缀必须是安全的相对路径。",
+  );
 const MODEL_FAMILY_THINKING_DEFAULTS = [
   { namePattern: /^qwen3\.[5-9]/i, enableThinking: false },
 ] as const;
@@ -56,14 +69,21 @@ const envSchema = z
       .default("mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library"),
     DATABASE_SSL_CA_PATH: z.string().optional().or(z.literal("")),
     DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(20),
-    UPLOAD_MAX_ITEMS: z.coerce.number().int().min(1).max(100).default(100),
     UPLOAD_MAX_TOTAL_BYTES: z.coerce
       .number()
       .int()
       .positive()
       .default(2 * 1024 * 1024 * 1024),
-    STAGING_RETENTION_HOURS: z.coerce.number().int().positive().default(24),
-    TASK_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
+    PENDING_ASSET_RETENTION_HOURS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(24),
+    TASK_HISTORY_RETENTION_HOURS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(24),
     CLEANUP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(3_600),
     MEDIA_ROOT: z.string().default("./media"),
     MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
@@ -81,10 +101,14 @@ const envSchema = z
     ZOS_API_ENDPOINT: z.string().url().optional().or(z.literal("")),
     ZOS_ENDPOINT: z.string().url().optional().or(z.literal("")),
     ZOS_BUCKET: z.string().optional(),
+    /** 所有由本服务长期写入的 ZOS key 都自动位于此前缀下。 */
+    ZOS_OBJECT_PREFIX: objectPrefixSchema,
     ZOS_WEB_URL: z.string().url().optional().or(z.literal("")),
     ZOS_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
     ZOS_FORCE_PATH_STYLE: booleanSchema.default(true),
     ZOS_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    /** 外部临时文件服务；当前仅配置，待临时媒体 refactor 接入。 */
+    ZOS_TEMP_UPLOAD_URL: z.string().url().optional().or(z.literal("")),
     VLM_PROTOCOL: modelProtocolSchema.default("openai_chat_completions"),
     VLM_BASE_URL: z.string().url().optional().or(z.literal("")),
     VLM_API_KEY: z.string().optional(),

@@ -100,33 +100,6 @@ export const taskItems = mysqlTable(
   ],
 );
 
-/** 幂等键只在同一操作类型及用户作用域内唯一。 */
-export const idempotencyRequests = mysqlTable(
-  "idempotency_requests",
-  {
-    id: uuid("id").primaryKey(),
-    operation: varchar("operation", { length: 64 }).notNull(),
-    userScope: varchar("user_scope", { length: 191 }).notNull().default("public"),
-    idempotencyKey: varchar("idempotency_key", { length: 255 }).notNull(),
-    requestHash: varchar("request_hash", { length: 64 }).notNull(),
-    taskId: uuid("task_id")
-      .notNull()
-      .references(() => tasks.id, { onDelete: "cascade" }),
-    responseStatus: int("response_status", { unsigned: true }),
-    responseBody: json("response_body").$type<Record<string, unknown>>(),
-    createdAt: utcDateTime("created_at").notNull(),
-    expiresAt: utcDateTime("expires_at").notNull(),
-  },
-  (table) => [
-    uniqueIndex("idempotency_scope_key_unique").on(
-      table.operation,
-      table.userScope,
-      table.idempotencyKey,
-    ),
-    index("idempotency_expires_idx").on(table.expiresAt),
-  ],
-);
-
 /** 本地 staging 或 ZOS 中的一个真实对象，业务表只保存对象引用。 */
 export const mediaObjects = mysqlTable(
   "media_objects",
@@ -162,7 +135,7 @@ export const videoSources = mysqlTable(
   "video_sources",
   {
     id: uuid("id").primaryKey(),
-    // 任务明细只保留 7 天；父视频仍需存活到最后一个切片被删除，因此追溯引用可置空。
+    // 任务历史按小时过期；父视频仍需存活到最后一个切片被删除，因此追溯引用可置空。
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
     taskItemId: uuid("task_item_id").references(() => taskItems.id, {
       onDelete: "set null",
@@ -295,6 +268,7 @@ export const assets = mysqlTable(
       table.createdAt,
     ),
     index("assets_review_created_idx").on(table.reviewStatus, table.createdAt),
+    index("assets_review_updated_idx").on(table.reviewStatus, table.updatedAt),
     uniqueIndex("assets_task_segment_unique").on(table.taskItemSegmentId),
     uniqueIndex("assets_source_segment_unique").on(
       table.videoSourceId,

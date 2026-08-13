@@ -148,8 +148,10 @@ vite.config.ts.timestamp-*
 /media/
 /chroma-data/
 /.run/
+/.codegraph/
 /playwright-report/
 /test-results/
 
 # Docker Compose override (local, environment-specific)
 compose.override.yaml
+docs/

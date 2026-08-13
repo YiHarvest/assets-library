@@ -23,7 +23,14 @@ import {
   failJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
-import { persistSceneBatch } from "@/server/services/scene-persistence";
+import {
+  persistLocalSceneBatch,
+} from "@/server/services/scene-persistence";
+import {
+  copyPendingObject,
+  pendingAssetPath,
+  removePendingAsset,
+} from "@/server/services/pending-media";
 import {
   failTaskItem,
   markTaskItemPersisted,
@@ -88,14 +95,6 @@ async function uploadContext(job: ClaimedJob): Promise<UploadContext> {
   };
 }
 
-function datePrefix(now: Date) {
-  return [
-    now.getUTCFullYear(),
-    String(now.getUTCMonth() + 1).padStart(2, "0"),
-    String(now.getUTCDate()).padStart(2, "0"),
-  ].join("/");
-}
-
 function baseName(filename: string) {
   return path.basename(filename, path.extname(filename)).slice(0, 255) || "未命名素材";
 }
@@ -118,14 +117,15 @@ function mediaObjectValues(
   mimeType: string,
   bucket: string | undefined,
   now: Date,
+  provider: "local" | "zos" = "zos",
 ) {
   return {
     id,
-    provider: "zos" as const,
-    bucket: bucket?.trim() || null,
+    provider,
+    bucket: provider === "zos" ? bucket?.trim() || null : null,
     objectKey: object.key,
-    publicUrl: object.url ?? null,
-    localPath: null,
+    publicUrl: provider === "zos" ? object.url ?? null : null,
+    localPath: provider === "local" ? object.key : null,
     sha256: null,
     mimeType,
     sizeBytes: object.sizeBytes,
@@ -153,14 +153,14 @@ async function processImage(
   const now = dependencies.now();
   const assetId = crypto.randomUUID();
   const mediaObjectId = crypto.randomUUID();
-  const key = `assets/images/${datePrefix(now)}/${context.task.id}/${context.item.id}${validated.extension}`;
-  const stored = await dependencies.storage.storeFile({
-    key,
-    filePath: stagingPath(context, dependencies),
-    contentType: validated.mimeType,
+  const key = pendingAssetPath(assetId, `original${validated.extension}`);
+  const stored = await copyPendingObject({
+    sourcePath: stagingPath(context, dependencies),
+    relativePath: key,
+    mediaRoot: dependencies.config.mediaRoot,
   });
   try {
-    // ZOS 与 MySQL 无法共享事务：对象先写入，建档失败时立即补偿删除。
+    // 文件先安全落盘，再用单个事务建立媒体、素材与分析作业。
     await db.transaction(async (tx) => {
       await tx.insert(mediaObjects).values(
         mediaObjectValues(
@@ -169,6 +169,7 @@ async function processImage(
           validated.mimeType,
           dependencies.config.ZOS_BUCKET,
           now,
+          "local",
         ),
       );
       await tx.insert(assets).values({
@@ -221,7 +222,9 @@ async function processImage(
         .where(eq(taskItems.id, context.item.id));
     });
   } catch (error) {
-    await dependencies.storage.deleteObject(stored.key).catch(() => undefined);
+    await removePendingAsset(stored.key, dependencies.config.mediaRoot).catch(
+      () => undefined,
+    );
     throw error;
   }
 }
@@ -247,31 +250,27 @@ async function processVideo(
   });
   try {
     await markTaskItemRunning(context.task.id, context.item.id, "persisting");
-    await persistSceneBatch({
+    const sourceId = crypto.randomUUID();
+    const segmentIds = batch.segments.map(() => ({
+      mediaId: crypto.randomUUID(),
+      thumbnailMediaId: crypto.randomUUID(),
+      segmentId: crypto.randomUUID(),
+      assetId: crypto.randomUUID(),
+    }));
+    const parentStat = await fs.stat(stagingPath(context, dependencies));
+    await persistLocalSceneBatch({
       batch,
-      storage: dependencies.storage,
-      now: dependencies.now(),
+      assetIds: segmentIds.map((row) => row.assetId),
+      mediaRoot: dependencies.config.mediaRoot,
       commitDatabase: async (persisted) => {
         const now = dependencies.now();
-        const sourceId = crypto.randomUUID();
-        const parentMediaId = crypto.randomUUID();
-        const segmentRows = persisted.segments.map((segment) => ({
+        const segmentRows = persisted.segments.map((segment, index) => ({
           segment,
-          mediaId: crypto.randomUUID(),
-          thumbnailMediaId: crypto.randomUUID(),
-          segmentId: crypto.randomUUID(),
-          assetId: crypto.randomUUID(),
+          ...segmentIds[index]!,
         }));
-        // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
+        // 父视频不建媒体对象；全部本地切片、首帧和素材在一个事务内同时可见。
         await db.transaction(async (tx) => {
           await tx.insert(mediaObjects).values([
-            mediaObjectValues(
-              parentMediaId,
-              persisted.parentObject,
-              "video/mp4",
-              dependencies.config.ZOS_BUCKET,
-              now,
-            ),
             ...segmentRows.map(({ segment, mediaId }) =>
               mediaObjectValues(
                 mediaId,
@@ -279,6 +278,7 @@ async function processVideo(
                 "video/mp4",
                 dependencies.config.ZOS_BUCKET,
                 now,
+                "local",
               ),
             ),
             ...segmentRows.map(({ segment, thumbnailMediaId }) =>
@@ -288,6 +288,7 @@ async function processVideo(
                 "image/jpeg",
                 dependencies.config.ZOS_BUCKET,
                 now,
+                "local",
               ),
             ),
           ]);
@@ -296,10 +297,10 @@ async function processVideo(
             taskId: context.task.id,
             taskItemId: context.item.id,
             userId: context.task.userId,
-            mediaObjectId: parentMediaId,
+            mediaObjectId: null,
             originalFilename: context.item.filename,
             mimeType: "video/mp4",
-            sizeBytes: persisted.parentObject.sizeBytes,
+            sizeBytes: parentStat.size,
             durationMs: Math.round(batch.durationSeconds * 1_000),
             status: "done",
             createdAt: now,
@@ -421,6 +422,10 @@ export async function processValidateJob(
       console.error("持久化成功，但本地 staging 文件清理失败。", error);
     });
   } catch (error) {
+    console.error(
+      `上传校验任务 ${job.id}（task ${job.taskId ?? "unknown"}）失败。`,
+      error,
+    );
     await failJob(job);
     const failedItemId = context?.item.id ??
       (typeof job.payload?.taskItemId === "string"

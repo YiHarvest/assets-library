@@ -251,47 +251,21 @@ export const callbackUrlSchema = z
   .nullable()
   .default(null);
 
-export const MAX_UPLOAD_TASK_ITEMS = 100;
-export const MAX_UPLOAD_TASK_BYTES = 2 * 1024 * 1024 * 1024;
+export const MAX_UPLOAD_IMAGE_FILES = 5;
 
-export const uploadManifestItemSchema = z
-  .object({
-    filename: z.string().trim().min(1).max(255),
-    size_bytes: z.number().int().positive().max(MAX_UPLOAD_TASK_BYTES),
-    content_type: z.string().trim().min(1).max(255).nullable().default(null),
-  })
-  .strict();
-export type UploadManifestItem = z.infer<typeof uploadManifestItemSchema>;
-
-export const createUploadTaskSchema = z
+/** multipart 中除重复 files 外，仅允许这三个业务字段。 */
+export const uploadMetadataSchema = z
   .object({
     user_id: nullableUserIdSchema,
     callback_url: callbackUrlSchema,
     auto_publish: z.boolean().default(false),
-    items: z
-      .array(uploadManifestItemSchema)
-      .min(1)
-      .max(MAX_UPLOAD_TASK_ITEMS),
   })
-  .strict()
-  .superRefine((input, context) => {
-    const totalBytes = input.items.reduce(
-      (total, item) => total + item.size_bytes,
-      0,
-    );
-    if (totalBytes > MAX_UPLOAD_TASK_BYTES) {
-      context.addIssue({
-        code: "custom",
-        path: ["items"],
-        message: "单个上传任务的文件总大小不得超过 2 GiB。",
-      });
-    }
-  });
-export type CreateUploadTask = z.infer<typeof createUploadTaskSchema>;
+  .strict();
+export type UploadMetadata = z.infer<typeof uploadMetadataSchema>;
 
 export const taskErrorSchema = apiV1ErrorSchema.nullable();
 
-export const uploadTaskItemSchema = z.object({
+export const taskFileSchema = z.object({
   item_id: z.string().uuid(),
   filename: z.string(),
   media_type: mediaTypeSchema.nullable(),
@@ -303,7 +277,7 @@ export const uploadTaskItemSchema = z.object({
   asset_ids: z.array(z.string().uuid()),
   error: taskErrorSchema,
 });
-export type UploadTaskItem = z.infer<typeof uploadTaskItemSchema>;
+export type TaskFile = z.infer<typeof taskFileSchema>;
 
 const apiDateTimeSchema = z.string().datetime({ offset: true });
 
@@ -313,14 +287,12 @@ export const taskStatusResponseSchema = z.object({
   status: apiTaskStatusSchema,
   phase: apiTaskPhaseSchema,
   progress_percent: z.number().min(0).max(100),
-  received_bytes: z.number().int().nonnegative(),
-  total_bytes: z.number().int().nonnegative(),
-  total_items: z.number().int().nonnegative(),
-  done_items: z.number().int().nonnegative(),
-  failed_items: z.number().int().nonnegative(),
+  total_files: z.number().int().nonnegative(),
+  done_files: z.number().int().nonnegative(),
+  failed_files: z.number().int().nonnegative(),
   callback_url: callbackUrlSchema,
   result: z.record(z.string(), z.unknown()).nullable(),
-  items: z.array(uploadTaskItemSchema),
+  files: z.array(taskFileSchema),
   error: taskErrorSchema,
   created_at: apiDateTimeSchema,
   started_at: apiDateTimeSchema.nullable(),
@@ -335,8 +307,10 @@ export const taskAcceptedSchema = taskStatusResponseSchema.pick({
   status: true,
   phase: true,
   progress_percent: true,
-  total_items: true,
-  items: true,
+  total_files: true,
+  done_files: true,
+  failed_files: true,
+  files: true,
   created_at: true,
 });
 export type TaskAccepted = z.infer<typeof taskAcceptedSchema>;
@@ -388,6 +362,7 @@ export const apiV1AssetSummarySchema = z.object({
   review_status: reviewStatusSchema,
   tags: z.array(tagSchema),
   media_url: z.string(),
+  thumbnail_url: z.string().nullable(),
   created_at: apiDateTimeSchema,
   updated_at: apiDateTimeSchema,
   search_score: z.number().optional(),
@@ -427,6 +402,16 @@ export const assetQueryResponseSchema = z.object({
 });
 export type AssetQueryResponse = z.infer<typeof assetQueryResponseSchema>;
 
+/** 已发布素材列表只接受归属和分页参数；空 user_id 表示公共素材库。 */
+export const assetListSchema = z
+  .object({
+    user_id: nullableUserIdSchema,
+    cursor: z.string().min(1).max(2_048).nullable().default(null),
+    limit: z.number().int().min(1).max(100).default(20),
+  })
+  .strict();
+export type AssetList = z.infer<typeof assetListSchema>;
+
 /** 用户空间统计中的逐素材字节明细。视频的 total_bytes 包含首帧缩略图。 */
 export const userStorageUsageItemSchema = z.object({
   asset_id: z.string().uuid(),
@@ -439,7 +424,7 @@ export const userStorageUsageItemSchema = z.object({
 export type UserStorageUsageItem = z.infer<typeof userStorageUsageItemSchema>;
 
 export const userStorageUsageResponseSchema = z.object({
-  user_id: userIdSchema,
+  user_id: userIdSchema.nullable(),
   total_files: z.number().int().nonnegative(),
   image_files: z.number().int().nonnegative(),
   video_files: z.number().int().nonnegative(),
@@ -449,6 +434,11 @@ export const userStorageUsageResponseSchema = z.object({
   items: z.array(userStorageUsageItemSchema),
 });
 export type UserStorageUsageResponse = z.infer<typeof userStorageUsageResponseSchema>;
+
+export const storageUsageRequestSchema = z
+  .object({ user_id: nullableUserIdSchema })
+  .strict();
+export type StorageUsageRequest = z.infer<typeof storageUsageRequestSchema>;
 
 const signedUrlSchema = z.string().min(1);
 
@@ -478,14 +468,8 @@ export const userMediaItemSchema = z.discriminatedUnion("media_type", [
 ]);
 export type UserMediaItem = z.infer<typeof userMediaItemSchema>;
 
-export const userMediaListQuerySchema = z.object({
-  cursor: z.string().min(1).max(2_048).nullable().default(null),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-});
-export type UserMediaListQuery = z.infer<typeof userMediaListQuerySchema>;
-
 export const userMediaListResponseSchema = z.object({
-  user_id: userIdSchema,
+  user_id: userIdSchema.nullable(),
   items: z.array(userMediaItemSchema),
   next_cursor: z.string().nullable(),
   has_more: z.boolean(),
@@ -550,9 +534,18 @@ export type MutationContext = z.infer<typeof mutationContextSchema>;
 
 export const updateAssetTaskSchema = mutationContextSchema
   .extend({
+    asset_id: z.string().uuid(),
     name: assetEditSchema.shape.name,
     description: assetEditSchema.shape.description,
     tags: assetEditSchema.shape.tags,
   })
   .strict();
 export type UpdateAssetTask = z.infer<typeof updateAssetTaskSchema>;
+
+export const assetActionSchema = mutationContextSchema
+  .extend({
+    asset_id: z.string().uuid(),
+    action: z.enum(["publish", "retry", "delete"]),
+  })
+  .strict();
+export type AssetAction = z.infer<typeof assetActionSchema>;

@@ -91,7 +91,7 @@ export default async function OverviewPage({
   const userScope: UserScope = userId
     ? { mode: "user", user_id: userId }
     : { mode: "public" };
-  const page = await getApiV1Service().queryAssets({
+  const page = await getApiV1Service().searchAssets({
     ...(tagQuery ? { keywords: [tagQuery] } : {}),
     filter: {
       user_scope: userScope,

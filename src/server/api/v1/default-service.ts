@@ -7,13 +7,10 @@ import { assets, jobs, tasks } from "@/server/db/schema";
 import { ApiV1Error } from "@/server/api/errors";
 import type {
   ApiV1Service,
-  ReceiveUploadItemInput,
+  StagedUpload,
 } from "@/server/api/v1/service";
 import { loadConfig } from "@/server/config";
-import { AppError } from "@/server/errors";
 import { mediaResponse } from "@/server/media/response";
-import { targetFormatFromFilename } from "@/server/media/target-format";
-import { writeAll } from "@/server/storage/object-storage";
 import {
   acquireTaskItemUploadLease,
   createTaskWithItems,
@@ -21,17 +18,20 @@ import {
   getAssetRecord,
   getTaskWithItems,
   queryAssetsPage,
-  listUserMediaPage,
-  releaseTaskItemUploadLease,
   sealTaskIfComplete,
-  summarizeUserStorage,
   updateTaskItemUploadProgress,
   type AssetScope,
-  type UserMediaCursor,
 } from "@/server/repositories/assets";
+import {
+  listPublishedMedia,
+  summarizePublishedStorage,
+  type PublishedMediaCursor,
+} from "@/server/repositories/user-media";
 import { thumbnailResponse } from "@/server/media/response";
 import { apiV1ErrorCodeSchema } from "@/shared/contracts";
 import type {
+  AssetAction,
+  AssetList,
   ApiTaskPhase,
   ApiTaskStatus,
   ApiV1ErrorCode,
@@ -41,34 +41,25 @@ import type {
   AssetQuery,
   AssetQueryResponse,
   AnalysisResult,
-  CreateUploadTask,
   MutationContext,
   ProcessingStatus,
   TaskAccepted,
   TaskStatusResponse,
   UpdateAssetTask,
-  UserMediaListQuery,
   UserMediaListResponse,
   UserScope,
   UserStorageUsageResponse,
 } from "@/shared/contracts";
 
-const uploadProgressFlushBytes = 4 * 1024 * 1024;
-
 function directMediaUrl(
   origin: string,
   assetId: string,
-  userId: string,
   variant: "media" | "thumbnail",
 ) {
-  const suffix = variant === "thumbnail" ? "/thumbnail" : "";
-  const url = new URL(`/api/v1/media/${assetId}${suffix}`, origin);
-  url.searchParams.set("user_id", userId);
+  const pathname = variant === "thumbnail" ? "/api/v1/thumbnail" : "/api/v1/media";
+  const url = new URL(pathname, origin);
+  url.searchParams.set("asset_id", assetId);
   return url.toString();
-}
-
-function taskRetentionMs() {
-  return loadConfig().TASK_RETENTION_DAYS * 24 * 60 * 60 * 1_000;
 }
 
 function shanghaiIso(value: Date | null) {
@@ -193,14 +184,12 @@ async function taskResponse(taskId: string): Promise<TaskStatusResponse> {
     status: apiStatus(task.status),
     phase: apiPhase(task.phase, task.status),
     progress_percent: task.progressPercent,
-    received_bytes: task.receivedBytes,
-    total_bytes: task.totalBytes,
-    total_items: task.totalItems,
-    done_items: task.doneItems,
-    failed_items: task.failedItems,
+    total_files: task.totalItems,
+    done_files: task.doneItems,
+    failed_files: task.failedItems,
     callback_url: task.callbackUrl,
     result: task.result,
-    items: items.map((item) => ({
+    files: items.map((item) => ({
       item_id: item.id,
       filename: item.filename,
       media_type: item.mediaType,
@@ -230,8 +219,10 @@ function accepted(response: TaskStatusResponse): TaskAccepted {
     status: response.status,
     phase: response.phase,
     progress_percent: response.progress_percent,
-    total_items: response.total_items,
-    items: response.items,
+    total_files: response.total_files,
+    done_files: response.done_files,
+    failed_files: response.failed_files,
+    files: response.files,
     created_at: response.created_at,
   };
 }
@@ -269,7 +260,7 @@ function decodeCursor(cursor: string | null) {
 }
 
 /** 用户媒体游标编码 UTC 时间和 UUID，避免新增数据导致 OFFSET 翻页漂移。 */
-export function encodeUserMediaCursor(cursor: UserMediaCursor) {
+export function encodeUserMediaCursor(cursor: PublishedMediaCursor) {
   return Buffer.from(
     JSON.stringify({
       created_at: cursor.createdAt.toISOString(),
@@ -281,7 +272,7 @@ export function encodeUserMediaCursor(cursor: UserMediaCursor) {
 
 export function decodeUserMediaCursor(
   cursor: string | null,
-): UserMediaCursor | null {
+): PublishedMediaCursor | null {
   if (!cursor) return null;
   try {
     const value = JSON.parse(
@@ -371,9 +362,6 @@ function apiAnalysis(result: AnalysisResult | null) {
 async function assetSummary(asset: AssetSummary) {
   const record = await getAssetRecord(asset.id);
   if (!record) throw new ApiV1Error("not_found", "素材不存在。", 404);
-  const mediaUrl = record.userId
-    ? `${asset.mediaUrl}${asset.mediaUrl.includes("?") ? "&" : "?"}user_id=${encodeURIComponent(record.userId)}`
-    : asset.mediaUrl;
   return {
     asset_id: asset.id,
     parent_video_id: record.videoSourceId,
@@ -385,7 +373,11 @@ async function assetSummary(asset: AssetSummary) {
     status: taskStatusFromProcessing(asset.processingStatus),
     review_status: asset.reviewStatus,
     tags: asset.tags,
-    media_url: mediaUrl,
+    media_url: `/api/v1/media?asset_id=${encodeURIComponent(asset.id)}`,
+    thumbnail_url:
+      asset.mediaType === "video"
+        ? `/api/v1/thumbnail?asset_id=${encodeURIComponent(asset.id)}`
+        : null,
     created_at: shanghaiIso(record.createdAt)!,
     updated_at: shanghaiIso(record.updatedAt)!,
     ...(asset.searchScore === undefined
@@ -395,90 +387,6 @@ async function assetSummary(asset: AssetSummary) {
       ? {}
       : { semantic_score: asset.semanticScore }),
   } satisfies ApiV1AssetSummary;
-}
-
-function stagingRelativePath(taskId: string, itemId: string, filename: string) {
-  const target = targetFormatFromFilename(filename);
-  if (!target) {
-    throw new ApiV1Error(
-      "unsupported_media_type",
-      "图片仅支持 JPEG、PNG、WebP，视频目标格式仅支持 MP4。",
-      415,
-    );
-  }
-  return path.posix.join(".staging", taskId, `${itemId}${target.extension}`);
-}
-
-function resolveStagingPath(relativePath: string) {
-  const root = loadConfig().mediaRoot;
-  const absolute = path.resolve(root, relativePath);
-  if (!absolute.startsWith(`${root}${path.sep}`)) {
-    throw new ApiV1Error("storage_error", "上传暂存路径无效。", 500);
-  }
-  return absolute;
-}
-
-async function writeUploadBody(
-  input: ReceiveUploadItemInput,
-  expectedBytes: number,
-  destination: string,
-) {
-  await fs.mkdir(path.dirname(destination), { recursive: true });
-  const temporary = `${destination}.${crypto.randomUUID()}.uploading`;
-  const handle = await fs.open(temporary, "wx");
-  let received = 0;
-  let lastFlushed = 0;
-  try {
-    const reader = input.body.getReader();
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!value?.byteLength) continue;
-      received += value.byteLength;
-      if (received > expectedBytes) {
-        throw new ApiV1Error(
-          "upload_size_mismatch",
-          "实际上传字节数超过清单声明大小。",
-          409,
-        );
-      }
-      await writeAll(handle, value);
-      if (received - lastFlushed >= uploadProgressFlushBytes) {
-        await updateTaskItemUploadProgress({
-          taskId: input.taskId,
-          itemId: input.itemId,
-          receivedBytes: received,
-        });
-        lastFlushed = received;
-      }
-    }
-    if (received !== expectedBytes) {
-      throw new ApiV1Error(
-        "upload_size_mismatch",
-        `实际上传 ${received} 字节，与声明的 ${expectedBytes} 字节不一致。`,
-        409,
-      );
-    }
-    await handle.sync();
-    await handle.close();
-    await fs.rename(temporary, destination);
-    return received;
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await fs.rm(temporary, { force: true });
-    throw error;
-  }
-}
-
-function normalizeUploadRepositoryError(error: unknown) {
-  if (!(error instanceof AppError)) return error;
-  if (error.status === 404) {
-    return new ApiV1Error("not_found", error.message, 404);
-  }
-  if (error.status === 409) {
-    return new ApiV1Error("conflict", error.message, 409);
-  }
-  return new ApiV1Error("invalid_request", error.message, error.status);
 }
 
 async function createMutationTask(
@@ -506,7 +414,6 @@ async function createMutationTask(
       userId: context.user_id,
       callbackUrl: context.callback_url,
       totalItems: 1,
-      expiresAt: new Date(now.getTime() + taskRetentionMs()),
       createdAt: now,
       updatedAt: now,
     });
@@ -525,110 +432,59 @@ async function createMutationTask(
 }
 
 export class DefaultApiV1Service implements ApiV1Service {
-  async createUploadTask(input: CreateUploadTask) {
-    const config = loadConfig();
-    if (input.items.length > config.UPLOAD_MAX_ITEMS) {
-      throw new ApiV1Error(
-        "file_too_large",
-        `每个上传任务最多包含 ${config.UPLOAD_MAX_ITEMS} 个文件。`,
-        413,
-      );
-    }
-    const totalBytes = input.items.reduce(
-      (total, item) => total + item.size_bytes,
-      0,
-    );
-    if (totalBytes > config.UPLOAD_MAX_TOTAL_BYTES) {
-      throw new ApiV1Error(
-        "file_too_large",
-        `上传任务总大小不得超过 ${config.UPLOAD_MAX_TOTAL_BYTES} 字节。`,
-        413,
-        [{ size_bytes: totalBytes, limit_bytes: config.UPLOAD_MAX_TOTAL_BYTES }],
-      );
-    }
-    const taskId = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + taskRetentionMs());
-    const manifests = input.items.map((item, ordinal) => {
-      const id = crypto.randomUUID();
-      return {
-        id,
-        ordinal,
-        filename: item.filename,
-        declaredContentType: item.content_type,
-        totalBytes: item.size_bytes,
-        stagingPath: stagingRelativePath(taskId, id, item.filename),
-      };
-    });
-    await createTaskWithItems({
-      id: taskId,
-      type: "upload",
-      userId: input.user_id,
-      callbackUrl: input.callback_url,
-      expiresAt,
-      result: { auto_publish: input.auto_publish },
-      items: manifests,
-    });
-    return taskResponse(taskId);
-  }
-
-  async receiveUploadItem(input: ReceiveUploadItemInput) {
-    let leaseAcquired = false;
-    let destination: string | undefined;
+  async submitUpload(input: StagedUpload) {
+    let sealed = false;
     try {
-      const lease = await acquireTaskItemUploadLease({
-        taskId: input.taskId,
-        itemId: input.itemId,
+      await createTaskWithItems({
+        id: input.taskId,
+        type: "upload",
+        userId: input.user_id,
+        callbackUrl: input.callback_url,
+        result: { auto_publish: input.auto_publish },
+        items: input.files.map((file) => ({
+          id: file.id,
+          ordinal: file.ordinal,
+          filename: file.filename,
+          declaredContentType: file.contentType,
+          totalBytes: file.sizeBytes,
+          stagingPath: file.stagingPath,
+        })),
       });
-      if (lease.state === "already_complete") {
-        return taskResponse(input.taskId);
+      // 文件已由 multipart parser 原子落盘；这里只借用既有租约状态机登记实收字节。
+      for (const file of input.files) {
+        await acquireTaskItemUploadLease({
+          taskId: input.taskId,
+          itemId: file.id,
+        });
+        await updateTaskItemUploadProgress({
+          taskId: input.taskId,
+          itemId: file.id,
+          receivedBytes: file.sizeBytes,
+          completed: true,
+        });
       }
-      leaseAcquired = true;
-      const { item } = lease;
-      if (input.contentLength !== null && input.contentLength !== item.totalBytes) {
-        throw new ApiV1Error(
-          "upload_size_mismatch",
-          "Content-Length 与上传清单声明大小不一致。",
-          409,
-        );
-      }
-
-      destination = resolveStagingPath(item.stagingPath);
-      // 只有持有行级租约的请求才能替换目标文件。
-      await fs.rm(destination, { force: true });
-      const received = await writeUploadBody(input, item.totalBytes, destination);
-      await updateTaskItemUploadProgress({
-        taskId: input.taskId,
-        itemId: input.itemId,
-        receivedBytes: received,
-        completed: true,
-      });
-      leaseAcquired = false;
+      await sealTaskIfComplete(input.taskId);
+      sealed = true;
       return taskResponse(input.taskId);
     } catch (error) {
-      if (leaseAcquired) {
-        // 先确认租约仍有效，再删文件；如完成事务已提交，则不误删成品。
-        const released = await releaseTaskItemUploadLease({
-          taskId: input.taskId,
-          itemId: input.itemId,
-        }).catch(() => false);
-        if (released && destination) {
-          await fs.rm(destination, { force: true }).catch(() => undefined);
-        }
+      if (!sealed) {
+        // 未成功入队时 staging 不再有消费者；完整回收该任务目录。
+        const directory = path.join(
+          loadConfig().mediaRoot,
+          ".staging",
+          input.taskId,
+        );
+        await fs.rm(directory, { recursive: true, force: true }).catch(() => undefined);
       }
-      throw normalizeUploadRepositoryError(error);
+      throw error;
     }
-  }
-
-  async sealUploadTask(taskId: string) {
-    await sealTaskIfComplete(taskId);
-    return taskResponse(taskId);
   }
 
   getTask(taskId: string) {
     return taskResponse(taskId);
   }
 
-  async queryAssets(input: AssetQuery): Promise<AssetQueryResponse> {
+  async searchAssets(input: AssetQuery): Promise<AssetQueryResponse> {
     if (input.query && input.cursor) {
       throw new ApiV1Error(
         "invalid_request",
@@ -663,18 +519,15 @@ export class DefaultApiV1Service implements ApiV1Service {
     };
   }
 
-  async getUserStorageUsage(
-    userId: string,
+  async getStorageUsage(
+    userId: string | null,
   ): Promise<UserStorageUsageResponse> {
-    const summary = await summarizeUserStorage(userId);
-    const imageFiles = summary.items.filter(
-      (item) => item.mediaType === "image",
-    ).length;
+    const summary = await summarizePublishedStorage(userId);
     return {
       user_id: summary.userId,
       total_files: summary.totalFiles,
-      image_files: imageFiles,
-      video_files: summary.totalFiles - imageFiles,
+      image_files: summary.imageFiles,
+      video_files: summary.videoFiles,
       total_bytes: summary.totalBytes,
       image_bytes: summary.imageBytes,
       video_bytes: summary.videoBytes,
@@ -689,29 +542,23 @@ export class DefaultApiV1Service implements ApiV1Service {
     };
   }
 
-  async listUserMedia(
-    userId: string,
-    input: UserMediaListQuery,
+  async listAssets(
+    input: AssetList,
     origin: string,
   ): Promise<UserMediaListResponse> {
-    const result = await listUserMediaPage(
-      userId,
+    const result = await listPublishedMedia(
+      input.user_id,
       decodeUserMediaCursor(input.cursor),
       input.limit,
     );
     return {
-      user_id: userId,
+      user_id: result.userId,
       items: result.items.map((item) => {
-        const media_url = directMediaUrl(
-          origin,
-          item.assetId,
-          userId,
-          "media",
-        );
+        const media_url = directMediaUrl(origin, item.assetId, "media");
         const common = {
           asset_id: item.assetId,
           name: item.name,
-          size_bytes: item.sizeBytes,
+          size_bytes: item.mediaBytes,
           media_url,
           created_at: shanghaiIso(item.createdAt)!,
         };
@@ -722,12 +569,7 @@ export class DefaultApiV1Service implements ApiV1Service {
           ...common,
           media_type: "video" as const,
           thumbnail_bytes: item.thumbnailBytes,
-          thumbnail_url: directMediaUrl(
-            origin,
-            item.assetId,
-            userId,
-            "thumbnail",
-          ),
+          thumbnail_url: directMediaUrl(origin, item.assetId, "thumbnail"),
         };
       }),
       next_cursor: result.nextCursor
@@ -737,8 +579,8 @@ export class DefaultApiV1Service implements ApiV1Service {
     };
   }
 
-  async getAsset(assetId: string, scope: UserScope): Promise<ApiV1AssetDetail> {
-    const detail = await getAssetDetail(assetId, scopeForRepository(scope));
+  async getAsset(assetId: string): Promise<ApiV1AssetDetail> {
+    const detail = await getAssetDetail(assetId, { includeAllUsers: true });
     const summary = await assetSummary(detail);
     return {
       ...summary,
@@ -760,33 +602,25 @@ export class DefaultApiV1Service implements ApiV1Service {
     };
   }
 
-  updateAsset(assetId: string, input: UpdateAssetTask) {
-    return createMutationTask("update", assetId, input, {
+  updateAsset(input: UpdateAssetTask) {
+    return createMutationTask("update", input.asset_id, input, {
       name: input.name,
       description: input.description,
       tags: input.tags,
     });
   }
 
-  publishAsset(assetId: string, input: MutationContext) {
-    return createMutationTask("publish", assetId, input);
+  actOnAsset(input: AssetAction) {
+    return createMutationTask(input.action, input.asset_id, input);
   }
 
-  retryAsset(assetId: string, input: MutationContext) {
-    return createMutationTask("retry", assetId, input);
-  }
-
-  deleteAsset(assetId: string, input: MutationContext) {
-    return createMutationTask("delete", assetId, input);
-  }
-
-  async getMedia(assetId: string, scope: UserScope, request: Request) {
-    await getAssetDetail(assetId, scopeForRepository(scope));
+  async getMedia(assetId: string, request: Request) {
+    await getAssetDetail(assetId, { includeAllUsers: true });
     return mediaResponse(assetId, request);
   }
 
-  async getThumbnail(assetId: string, scope: UserScope, request: Request) {
-    await getAssetDetail(assetId, scopeForRepository(scope));
+  async getThumbnail(assetId: string, request: Request) {
+    await getAssetDetail(assetId, { includeAllUsers: true });
     return thumbnailResponse(assetId, request);
   }
 }

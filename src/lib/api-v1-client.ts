@@ -4,12 +4,10 @@ interface ApiFailure {
   error?: { message?: string };
 }
 
-export const UI_API_V1 = "/api/ui/v1";
+export const UI_API_V1 = "/api/v1";
 
 export function browserMediaUrl(url: string) {
-  return url.startsWith("/api/v1/")
-    ? `${UI_API_V1}/${url.slice("/api/v1/".length)}`
-    : url;
+  return url;
 }
 
 export async function uiApi<T>(path: string, init?: RequestInit) {
@@ -39,9 +37,12 @@ export async function waitForTask(
   const intervalMs = options.intervalMs ?? 1_000;
   for (;;) {
     if (options.signal?.aborted) throw new DOMException("已停止轮询。", "AbortError");
-    const status = await uiApi<TaskStatusResponse>(`/tasks/${task.task_id}`, {
-      signal: options.signal,
-    });
+    const status = await uiApi<TaskStatusResponse>(
+      `/tasks?task_id=${encodeURIComponent(task.task_id)}`,
+      {
+        signal: options.signal,
+      },
+    );
     if (status.status === "done") return status;
     if (status.status === "failed") {
       throw new Error(status.error?.message ?? "后台任务执行失败。");

@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PID_DIR="$(pwd)/.run"
+PROJECT_ROOT="$(pwd)"
 
 c_ok()   { printf '\033[0;32m%s\033[0m\n' "$*"; }
 c_warn() { printf '\033[0;33m%s\033[0m\n' "$*"; }
@@ -69,8 +70,42 @@ stop_pid_file() {
   fi
 }
 
-# 先停 Web+worker（dev/prd 都是 concurrently 父进程，会带走 next 和 tsx 子进程）
-stop_pid_file "Web+worker" "$PID_DIR/app.pid"
+project_worker_groups() {
+  local pid pgid arguments cwd
+  while read -r pid pgid arguments; do
+    [[ "$arguments" == *"src/worker/index.ts"* ]] || continue
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$PROJECT_ROOT" ] || continue
+    printf '%s\n' "$pgid"
+  done < <(ps -eo pid=,pgid=,args=)
+}
+
+stop_orphan_worker_group() {
+  local pgid="$1"
+  c_info "停止未纳入 PID 文件管理的旧 worker (PGID $pgid) ..."
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    kill -0 -- "-$pgid" 2>/dev/null || {
+      c_ok "旧 worker 已停止"
+      return
+    }
+    sleep 1
+  done
+  c_warn "旧 worker 未在 10s 内退出，发送 SIGKILL"
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+}
+
+# 先停对外 Web，再停 worker；app.pid 是升级前 concurrently 版本的兼容清理。
+stop_pid_file "Web" "$PID_DIR/web.pid"
+stop_pid_file "worker" "$PID_DIR/worker.pid"
+rm -f "$PID_DIR/worker.heartbeat.json"
+stop_pid_file "旧版 Web+worker" "$PID_DIR/app.pid"
+
+# PID 文件丢失时仍按 cwd 精确识别当前仓库的 worker，避免留下重复队列消费者。
+while IFS= read -r worker_group; do
+  [ -n "$worker_group" ] || continue
+  stop_orphan_worker_group "$worker_group"
+done < <(project_worker_groups | sort -u)
 
 # 再停只监听回环地址的分镜服务
 stop_pid_file "分镜服务" "$PID_DIR/scene.pid"

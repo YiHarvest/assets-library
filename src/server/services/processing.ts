@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { MySqlRawQueryResult } from "drizzle-orm/mysql2";
 import { db } from "@/server/db";
 import { loadConfig } from "@/server/config";
@@ -249,12 +249,50 @@ async function persistAnalysis(
       .set({
         description: asset.description || result.description,
         processingStatus: "completed",
-        reviewStatus: asset.directPublish ? "published" : "pending_review",
+        // 无论是否自动入库，都必须先完成本地分析；发布作业负责迁移 ZOS。
+        reviewStatus: "pending_review",
         failureCode: null,
         failureMessage: null,
         updatedAt: now,
       })
       .where(eq(assets.id, assetId));
+    if (asset.directPublish && asset.taskItemId && job.taskId) {
+      const siblings = await tx
+        .select({ id: assets.id, status: assets.processingStatus })
+        .from(assets)
+        .where(eq(assets.taskItemId, asset.taskItemId));
+      if (siblings.every(({ status }) => status === "completed")) {
+        const siblingIds = siblings.map(({ id }) => id);
+        const [existingPublish] = await tx
+          .select({ id: jobs.id })
+          .from(jobs)
+          .where(
+            and(
+              eq(jobs.taskId, job.taskId),
+              eq(jobs.type, "publish"),
+              inArray(jobs.assetId, siblingIds),
+            ),
+          )
+          .limit(1);
+        if (!existingPublish) {
+          await tx.insert(jobs).values({
+            id: crypto.randomUUID(),
+            taskId: job.taskId,
+            assetId,
+            type: "publish",
+            phase: "publishing",
+            payload: {
+              assetId,
+              userId: asset.userId,
+              autoPublishBatch: true,
+            },
+            availableAt: now,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+    }
     if (semanticSearchEnabled()) {
       await tx.insert(jobs).values({
         id: crypto.randomUUID(),

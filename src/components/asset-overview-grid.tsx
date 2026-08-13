@@ -32,10 +32,7 @@ const statusLabel: Record<ApiTaskStatus, string> = {
 };
 
 function detailHref(asset: ApiV1AssetSummary) {
-  const query = asset.user_id
-    ? `?user_id=${encodeURIComponent(asset.user_id)}`
-    : "";
-  return `/assets/${asset.asset_id}${query}`;
+  return `/assets/${asset.asset_id}`;
 }
 
 export function AssetOverviewGrid({
@@ -86,13 +83,14 @@ export function AssetOverviewGrid({
     setPublishingId(asset.asset_id);
     setMessage("");
     try {
-      const task = await uiApi<TaskAccepted>(
-        `/assets/${asset.asset_id}/publish`,
-        {
-          method: "POST",
-          body: JSON.stringify({ user_id: asset.user_id }),
-        },
-      );
+      const task = await uiApi<TaskAccepted>("/assets/actions", {
+        method: "POST",
+        body: JSON.stringify({
+          asset_id: asset.asset_id,
+          action: "publish",
+          user_id: asset.user_id,
+        }),
+      });
       await waitForTask(task);
       router.refresh();
     } catch (cause) {
@@ -240,6 +238,7 @@ function GalleryCard({
           <MediaPreview
             mediaType={asset.media_type}
             src={browserMediaUrl(asset.media_url)}
+            poster={asset.thumbnail_url ? browserMediaUrl(asset.thumbnail_url) : null}
             name={asset.name}
             className="transition-transform duration-500 ease-out group-hover:scale-[1.025] motion-reduce:transition-none"
           />
@@ -301,6 +300,7 @@ function ListRow({
         <MediaPreview
           mediaType={asset.media_type}
           src={browserMediaUrl(asset.media_url)}
+          poster={asset.thumbnail_url ? browserMediaUrl(asset.thumbnail_url) : null}
           name={asset.name}
         />
       </button>
@@ -405,6 +405,7 @@ function PreviewDialog({
           <MediaPreview
             mediaType={asset.media_type}
             src={browserMediaUrl(asset.media_url)}
+            poster={asset.thumbnail_url ? browserMediaUrl(asset.thumbnail_url) : null}
             name={asset.name}
             className="object-contain"
           />

@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -28,6 +29,8 @@ export interface ZosObjectStorageOptions {
   bucket: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /** 仅在写入新对象时追加；数据库保存完整 key，读取和删除不重复追加。 */
+  objectPrefix?: string;
   publicBaseUrl?: string;
   forcePathStyle?: boolean;
   timeoutMs?: number;
@@ -38,10 +41,15 @@ export interface ZosObjectStorageOptions {
 export class ZosObjectStorage implements ObjectStorage {
   private readonly client: S3Client;
   private readonly bucket: string;
+  private readonly objectPrefix?: string;
   private readonly publicBaseUrl?: string;
 
   constructor(options: ZosObjectStorageOptions) {
     this.bucket = options.bucket;
+    const objectPrefix = options.objectPrefix?.trim().replace(/^\/+|\/+$/g, "");
+    this.objectPrefix = objectPrefix
+      ? normalizeObjectKey(objectPrefix)
+      : undefined;
     this.publicBaseUrl = options.publicBaseUrl;
     this.client =
       options.client ??
@@ -66,7 +74,10 @@ export class ZosObjectStorage implements ObjectStorage {
   }
 
   async storeFile(input: StoreFileInput): Promise<StoredObject> {
-    const key = normalizeObjectKey(input.key);
+    const inputKey = normalizeObjectKey(input.key);
+    const key = this.objectPrefix
+      ? normalizeObjectKey(`${this.objectPrefix}/${inputKey}`)
+      : inputKey;
     const stat = await fsPromises.stat(input.filePath);
     if (!stat.isFile() || stat.size <= 0) {
       throw new Error("只能上传非空的本地文件到 ZOS。");
@@ -99,6 +110,14 @@ export class ZosObjectStorage implements ObjectStorage {
       etag: response.ETag?.replaceAll('"', ""),
       url: publicObjectUrl(this.publicBaseUrl, key),
     };
+  }
+
+  /** 只验证 bucket 可达和凭据有效，不枚举对象或泄露存储信息。 */
+  async checkHealth(timeoutMs = 3_000) {
+    await this.client.send(
+      new HeadBucketCommand({ Bucket: this.bucket }),
+      { abortSignal: AbortSignal.timeout(timeoutMs) },
+    );
   }
 
   async headObject(key: string): Promise<ObjectMetadata> {
@@ -225,6 +244,7 @@ export function createZosObjectStorage(
     bucket,
     accessKeyId,
     secretAccessKey,
+    objectPrefix: config.ZOS_OBJECT_PREFIX || undefined,
     publicBaseUrl: config.ZOS_WEB_URL?.trim() || undefined,
     forcePathStyle: config.ZOS_FORCE_PATH_STYLE,
     timeoutMs: config.ZOS_TIMEOUT_MS,

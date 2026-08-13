@@ -16,16 +16,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { UI_API_V1, uiApi } from "@/lib/api-v1-client";
-import {
-  MAX_UPLOAD_TASK_BYTES,
-  MAX_UPLOAD_TASK_ITEMS,
-  type TaskStatusResponse,
-} from "@/shared/contracts";
-
-interface ApiError {
-  error?: { message?: string };
-}
+import { uiApi } from "@/lib/api-v1-client";
+import type { TaskStatusResponse } from "@/shared/contracts";
 
 type UploadPhase =
   | "queued"
@@ -61,7 +53,7 @@ function isVideo(file: File) {
   return file.name.toLocaleLowerCase().endsWith(".mp4");
 }
 
-function taskItemError(item: TaskStatusResponse["items"][number]) {
+function taskItemError(item: TaskStatusResponse["files"][number]) {
   if (!item.error) return "素材处理失败。";
   const segments = item.error.details
     ?.filter((detail) => detail.segment_index !== undefined)
@@ -99,21 +91,12 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     };
   }, []);
 
-  const updateItem = (itemId: string, patch: Partial<UploadItem>) => {
-    if (!mountedRef.current) return;
-    setItems((current) =>
-      current.map((item) =>
-        item.id === itemId ? { ...item, ...patch } : item,
-      ),
-    );
-  };
-
   const applyTask = (next: TaskStatusResponse) => {
     if (!mountedRef.current) return;
     setTask(next);
     setItems((current) =>
       current.map((item) => {
-        const remote = next.items.find(
+        const remote = next.files.find(
           (candidate) => candidate.item_id === item.serverItemId,
         );
         if (!remote) return item;
@@ -152,9 +135,12 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
             { once: true },
           );
         });
-        const next = await uiApi<TaskStatusResponse>(`/tasks/${taskId}`, {
-          signal: controller.signal,
-        });
+        const next = await uiApi<TaskStatusResponse>(
+          `/tasks?task_id=${encodeURIComponent(taskId)}`,
+          {
+            signal: controller.signal,
+          },
+        );
         applyTask(next);
         if (next.status === "done") return;
         if (next.status === "failed") {
@@ -176,94 +162,49 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     }
   };
 
-  const sendItem = (item: UploadItem, taskId: string, itemId: string) => {
-    updateItem(item.id, {
-      serverItemId: itemId,
-      phase: "uploading",
-      progress: 0,
-      error: "",
-    });
-    return new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("PUT", `${UI_API_V1}/uploads/${taskId}/items/${itemId}`);
-      xhr.setRequestHeader(
-        "content-type",
-        item.file.type || "application/octet-stream",
-      );
-      xhr.upload.onprogress = (event) => {
-        if (mountedRef.current && event.lengthComputable) {
-          updateItem(item.id, {
-            progress: Math.round((event.loaded / event.total) * 100),
-          });
-        }
-      };
-      xhr.onerror = () => reject(new Error(`${item.file.name} 网络上传中断。`));
-      xhr.onload = () => {
-        let payload: (TaskStatusResponse & ApiError) | null = null;
-        try {
-          payload = JSON.parse(xhr.responseText || "{}") as TaskStatusResponse &
-            ApiError;
-        } catch {
-          // 下面使用稳定的 HTTP 错误兜底。
-        }
-        if (xhr.status !== 202 || !payload?.task_id) {
-          reject(
-            new Error(payload?.error?.message ?? `${item.file.name} 上传失败。`),
-          );
-          return;
-        }
-        applyTask(payload);
-        resolve();
-      };
-      xhr.send(item.file);
-    });
-  };
-
   const upload = async () => {
     const queuedItems = items.filter((item) => item.phase === "queued");
     if (queuedItems.length === 0) return;
-    if (items.length > MAX_UPLOAD_TASK_ITEMS) {
-      setError(`每个任务最多上传 ${MAX_UPLOAD_TASK_ITEMS} 个文件。`);
-      return;
-    }
-    const totalBytes = items.reduce((total, item) => total + item.file.size, 0);
-    if (totalBytes > MAX_UPLOAD_TASK_BYTES) {
-      setError("每个任务的文件总大小不得超过 2 GiB。");
+    const videoItems = items.filter((item) => isVideo(item.file));
+    if (
+      (videoItems.length > 0 && items.length !== 1) ||
+      (videoItems.length === 0 && items.length > 5)
+    ) {
+      setError("每批只能上传一个视频，或最多五张图片，且不能混合上传。");
       return;
     }
     setSubmitting(true);
     setError("");
     try {
+      const body = new FormData();
+      body.set("user_id", userId);
+      body.set("auto_publish", String(autoPublish));
+      for (const item of items) body.append("files", item.file, item.file.name);
+      setItems((current) =>
+        current.map((item) => ({
+          ...item,
+          phase: "uploading",
+          progress: 0,
+          error: "",
+        })),
+      );
       const created = await uiApi<TaskStatusResponse>("/uploads", {
         method: "POST",
-        body: JSON.stringify({
-          user_id: userId,
-          auto_publish: autoPublish,
-          items: items.map((item) => ({
-            filename: item.file.name,
-            size_bytes: item.file.size,
-            content_type: item.file.type || null,
-          })),
-        }),
+        body,
       });
-      if (created.items.length !== items.length) {
+      if (created.files.length !== items.length) {
         throw new Error("服务端返回的上传清单与所选文件不一致。");
       }
       setTask(created);
       setItems((current) =>
         current.map((item, index) => ({
           ...item,
-          serverItemId: created.items[index]?.item_id ?? null,
+          serverItemId: created.files[index]?.item_id ?? null,
+          phase: "processing",
+          progress: created.files[index]?.progress_percent ?? 100,
         })),
       );
-      for (let index = 0; index < items.length; index += 1) {
-        await sendItem(items[index]!, created.task_id, created.items[index]!.item_id);
-      }
-      const sealed = await uiApi<TaskStatusResponse>(
-        `/uploads/${created.task_id}`,
-        { method: "POST", body: JSON.stringify({}) },
-      );
-      applyTask(sealed);
+      applyTask(created);
       void poll(created.task_id);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "上传任务创建失败。";
@@ -282,8 +223,13 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
 
   const choose = (selected: File[]) => {
     if (selected.length === 0) return;
-    if (items.length + selected.length > MAX_UPLOAD_TASK_ITEMS) {
-      setError(`每个任务最多选择 ${MAX_UPLOAD_TASK_ITEMS} 个文件。`);
+    const combined = [...items.map((item) => item.file), ...selected];
+    const videos = combined.filter(isVideo);
+    if (
+      (videos.length > 0 && combined.length !== 1) ||
+      (videos.length === 0 && combined.length > 5)
+    ) {
+      setError("每批只能选择一个视频，或最多五张图片，且不能混合上传。");
       return;
     }
     const additions = selected.map((file) => {
@@ -465,7 +411,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <Link
-                          href={`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`}
+                          href={`/assets/${item.assetIds[0]}`}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
@@ -523,7 +469,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
               />
             </div>
             <p className="mt-2 text-xs text-slate-500">
-              {task.done_items}/{task.total_items} 完成 · {task.failed_items} 失败 · task_id: {task.task_id}
+              {task.done_files}/{task.total_files} 完成 · {task.failed_files} 失败 · task_id: {task.task_id}
             </p>
           </div>
         )}
@@ -537,7 +483,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-slate-500">
             {items.length === 0
-              ? "一次任务最多 100 个文件，总计不超过 2 GiB。"
+              ? "一次可上传 1–5 张图片，或一个 MP4 视频，不能混合。"
               : failedCount > 0
                 ? `${failedCount} 个素材上传或处理失败，请查看原因。${queuedCount > 0 ? ` 还有 ${queuedCount} 个素材等待上传。` : ""}`
                 : completeCount === items.length && items.length > 0

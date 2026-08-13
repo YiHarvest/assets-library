@@ -33,10 +33,7 @@ const statusLabel = {
 };
 
 function detailPath(asset: ApiV1AssetDetail) {
-  const query = asset.user_id
-    ? `?user_id=${encodeURIComponent(asset.user_id)}`
-    : "";
-  return `/assets/${asset.asset_id}${query}`;
+  return `/assets/detail?asset_id=${encodeURIComponent(asset.asset_id)}`;
 }
 
 export function AssetEditor({
@@ -59,10 +56,7 @@ export function AssetEditor({
 
   useEffect(() => {
     if (!["queued", "running"].includes(assetStatus)) return;
-    const query = assetUserId
-      ? `?user_id=${encodeURIComponent(assetUserId)}`
-      : "";
-    const path = `/assets/${assetId}${query}`;
+    const path = `/assets/detail?asset_id=${encodeURIComponent(assetId)}`;
     const timer = window.setInterval(async () => {
       try {
         const next = await uiApi<ApiV1AssetDetail>(path);
@@ -111,9 +105,10 @@ export function AssetEditor({
 
   const save = () =>
     run(async () => {
-      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+      const task = await uiApi<TaskAccepted>("/assets", {
         method: "PATCH",
         body: JSON.stringify({
+          asset_id: asset.asset_id,
           user_id: asset.user_id,
           name,
           description,
@@ -129,9 +124,10 @@ export function AssetEditor({
 
   const publish = () =>
     run(async () => {
-      const updateTask = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
+      const updateTask = await uiApi<TaskAccepted>("/assets", {
         method: "PATCH",
         body: JSON.stringify({
+          asset_id: asset.asset_id,
           user_id: asset.user_id,
           name,
           description,
@@ -139,13 +135,14 @@ export function AssetEditor({
         }),
       });
       await waitForTask(updateTask);
-      const publishTask = await uiApi<TaskAccepted>(
-        `/assets/${asset.asset_id}/publish`,
-        {
+      const publishTask = await uiApi<TaskAccepted>("/assets/actions", {
           method: "POST",
-          body: JSON.stringify({ user_id: asset.user_id }),
-        },
-      );
+          body: JSON.stringify({
+            asset_id: asset.asset_id,
+            action: "publish",
+            user_id: asset.user_id,
+          }),
+        });
       await waitForTask(publishTask);
       const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
@@ -155,13 +152,14 @@ export function AssetEditor({
 
   const retry = () =>
     run(async () => {
-      const task = await uiApi<TaskAccepted>(
-        `/assets/${asset.asset_id}/retry`,
-        {
+      const task = await uiApi<TaskAccepted>("/assets/actions", {
           method: "POST",
-          body: JSON.stringify({ user_id: asset.user_id }),
-        },
-      );
+          body: JSON.stringify({
+            asset_id: asset.asset_id,
+            action: "retry",
+            user_id: asset.user_id,
+          }),
+        });
       await waitForTask(task);
       const next = await uiApi<ApiV1AssetDetail>(detailPath(asset));
       setAsset(next);
@@ -174,9 +172,13 @@ export function AssetEditor({
         ? "移出个人素材库并转为公共素材"
         : "永久删除公共素材及其文件";
       if (!window.confirm(`确认${action}？`)) return;
-      const task = await uiApi<TaskAccepted>(`/assets/${asset.asset_id}`, {
-        method: "DELETE",
-        body: JSON.stringify({ user_id: asset.user_id }),
+      const task = await uiApi<TaskAccepted>("/assets/actions", {
+        method: "POST",
+        body: JSON.stringify({
+          asset_id: asset.asset_id,
+          action: "delete",
+          user_id: asset.user_id,
+        }),
       });
       await waitForTask(task);
       router.push("/");
@@ -246,6 +248,7 @@ export function AssetEditor({
               <MediaPreview
                 mediaType={asset.media_type}
                 src={browserMediaUrl(asset.media_url)}
+                poster={asset.thumbnail_url ? browserMediaUrl(asset.thumbnail_url) : null}
                 name={asset.name}
               />
             </div>

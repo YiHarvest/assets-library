@@ -1,7 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
@@ -44,7 +41,6 @@ const applicationTables = [
   "asset_tags",
   "assets",
   "callback_deliveries",
-  "idempotency_requests",
   "jobs",
   "media_objects",
   "outbox_events",
@@ -273,163 +269,6 @@ mysqlTest("MySQL 数据层", () => {
       receivedBytes: 10,
       progressPercent: 100,
     });
-  });
-
-  test("请求体中断会释放租约、清理暂存文件并允许 PUT 重试", async () => {
-    const mediaRoot = await fs.mkdtemp(path.join(os.tmpdir(), "assets-upload-"));
-    const previousMediaRoot = process.env.MEDIA_ROOT;
-    process.env.MEDIA_ROOT = mediaRoot;
-    try {
-      const { DefaultApiV1Service } = await import(
-        "@/server/api/v1/default-service"
-      );
-      const service = new DefaultApiV1Service();
-      const payloadSize = 4 * 1024 * 1024 + 1;
-      const created = await service.createUploadTask({
-        user_id: null,
-        callback_url: null,
-        auto_publish: false,
-        items: [
-          {
-            filename: "interrupted.jpg",
-            size_bytes: payloadSize,
-            content_type: "image/jpeg",
-          },
-        ],
-      });
-      const itemId = created.items[0]!.item_id;
-      let pullCount = 0;
-      const interrupted = new ReadableStream<Uint8Array>({
-        pull(controller) {
-          if (pullCount++ === 0) {
-            controller.enqueue(new Uint8Array(4 * 1024 * 1024));
-            return;
-          }
-          controller.error(new Error("client disconnected"));
-        },
-      });
-
-      await expect(
-        service.receiveUploadItem({
-          taskId: created.task_id,
-          itemId,
-          body: interrupted,
-          contentLength: payloadSize,
-          contentType: "image/jpeg",
-        }),
-      ).rejects.toThrow("client disconnected");
-      const afterInterruption = await repository.getTaskWithItems(created.task_id);
-      expect(afterInterruption.task).toMatchObject({
-        phase: "receiving",
-        receivedBytes: 0,
-      });
-      expect(afterInterruption.items[0]).toMatchObject({
-        status: "queued",
-        phase: "receiving",
-        receivedBytes: 0,
-      });
-
-      const completeBody = new Uint8Array(payloadSize);
-      const retried = await service.receiveUploadItem({
-        taskId: created.task_id,
-        itemId,
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(completeBody);
-            controller.close();
-          },
-        }),
-        contentLength: payloadSize,
-        contentType: "image/jpeg",
-      });
-      expect(retried).toMatchObject({
-        phase: "waiting_for_seal",
-        received_bytes: payloadSize,
-      });
-      const stagingFiles = await fs.readdir(
-        path.join(mediaRoot, ".staging", created.task_id),
-      );
-      expect(stagingFiles).toEqual([`${itemId}.jpg`]);
-    } finally {
-      if (previousMediaRoot === undefined) delete process.env.MEDIA_ROOT;
-      else process.env.MEDIA_ROOT = previousMediaRoot;
-      await fs.rm(mediaRoot, { recursive: true, force: true });
-    }
-  });
-
-  test("同一 item 的重叠 PUT 会在服务层返回 conflict", async () => {
-    const mediaRoot = await fs.mkdtemp(path.join(os.tmpdir(), "assets-race-"));
-    const previousMediaRoot = process.env.MEDIA_ROOT;
-    process.env.MEDIA_ROOT = mediaRoot;
-    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-    try {
-      const { DefaultApiV1Service } = await import(
-        "@/server/api/v1/default-service"
-      );
-      const service = new DefaultApiV1Service();
-      const created = await service.createUploadTask({
-        user_id: null,
-        callback_url: null,
-        auto_publish: false,
-        items: [
-          {
-            filename: "race.jpg",
-            size_bytes: 3,
-            content_type: "image/jpeg",
-          },
-        ],
-      });
-      const itemId = created.items[0]!.item_id;
-      const firstBody = new ReadableStream<Uint8Array>({
-        start(streamController) {
-          controller = streamController;
-          streamController.enqueue(new Uint8Array([1]));
-        },
-      });
-      const firstPut = service.receiveUploadItem({
-        taskId: created.task_id,
-        itemId,
-        body: firstBody,
-        contentLength: 3,
-        contentType: "image/jpeg",
-      });
-
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const current = await repository.getTaskWithItems(created.task_id);
-        if (current.items[0]?.phase === "uploading") break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(
-        (await repository.getTaskWithItems(created.task_id)).items[0]?.phase,
-      ).toBe("uploading");
-      await expect(
-        service.receiveUploadItem({
-          taskId: created.task_id,
-          itemId,
-          body: new ReadableStream<Uint8Array>({
-            start(secondController) {
-              secondController.enqueue(new Uint8Array([1, 2, 3]));
-              secondController.close();
-            },
-          }),
-          contentLength: 3,
-          contentType: "image/jpeg",
-        }),
-      ).rejects.toMatchObject({ code: "conflict", status: 409 });
-
-      controller!.enqueue(new Uint8Array([2, 3]));
-      controller!.close();
-      controller = undefined;
-      await expect(firstPut).resolves.toMatchObject({
-        phase: "waiting_for_seal",
-        received_bytes: 3,
-      });
-    } finally {
-      if (controller) controller.error(new Error("test cleanup"));
-      if (previousMediaRoot === undefined) delete process.env.MEDIA_ROOT;
-      else process.env.MEDIA_ROOT = previousMediaRoot;
-      await fs.rm(mediaRoot, { recursive: true, force: true });
-    }
   });
 
   test("user_id 为空表示公共素材，个人删除会将素材释放到公共库", async () => {

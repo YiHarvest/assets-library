@@ -1843,8 +1843,8 @@ export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
 /**
  * 删除已到期且处于终态的任务明细。
  *
- * assets/video_sources 的追溯外键会自动置空；正在排队或运行的任务即使超过
- * expires_at 也不会被清理，避免长视频处理过程中丢失状态。
+ * assets/video_sources 的追溯外键会自动置空；expires_at 在任务进入终态时按
+ * TASK_HISTORY_RETENTION_HOURS 计算，排队或运行中的任务不会被清理。
  */
 export async function deleteExpiredTasks(now = new Date()) {
   const result = await db

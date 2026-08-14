@@ -1,8 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Build from the repository root. The resulting image can run either role:
-#   docker run ... ghcr.io/<owner>/assets-library pnpm start:web
-#   docker run ... ghcr.io/<owner>/assets-library pnpm start:worker
+# 同一 tag 镜像包含 frontend、backend 和 worker，运行时通过 command 选择角色。
 FROM node:22-bookworm-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/onestudentforcode/assets-library"
@@ -19,10 +17,6 @@ FROM base AS dependencies
 
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
-
-# Native dependencies such as sharp may need to compile.
-# The slim base image has no system CA bundle yet. Debian repository metadata
-# remains signature-verified while the initial packages install ca-certificates.
 RUN sed -i \
       -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
       -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
@@ -32,59 +26,46 @@ RUN sed -i \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY frontend/package.json ./frontend/package.json
+COPY backend/package.json ./backend/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM dependencies AS builder
 
-COPY . .
-RUN pnpm build
+ARG NEXT_PUBLIC_BASE_PATH=
+ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
+COPY frontend ./frontend
+COPY backend ./backend
+COPY scripts/log-pipe.mjs ./scripts/log-pipe.mjs
+RUN pnpm --dir backend run build && pnpm --dir frontend run build
 
 FROM base AS runner
 
 ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
-
-ENV COREPACK_HOME=/pnpm/corepack
-ENV HOME=/home/node
 ENV NODE_ENV=production
-ENV PORT=3000
-ENV HOSTNAME=0.0.0.0
-# 媒体暂存目录位于持久化卷；关系数据使用 DATABASE_URL 指向外部 MySQL。
-ENV MEDIA_ROOT=/app/media
-
-WORKDIR /app
+ENV PORT=23015
+ENV BACKEND_HOST=127.0.0.1
+ENV BACKEND_PORT=23017
+ENV BACKEND_URL=http://127.0.0.1:23017
+ENV RUNTIME_DIR=/app/.run
+ENV RUN_DATABASE_MIGRATIONS=false
 
 RUN sed -i \
       -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
       -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
       /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && apt-get install --no-install-recommends -y ffmpeg \
+    && apt-get install --no-install-recommends -y ffmpeg util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# The worker is TypeScript and uses tsx, so retain its runtime dependency and
-# source files in addition to the standalone Next.js output.
-COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/spec ./spec
-COPY --from=builder /app/drizzle ./drizzle
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+WORKDIR /app
+COPY --from=builder --chown=node:node /app /app
+COPY --chown=root:root docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN chmod 0755 /usr/local/bin/docker-entrypoint \
+    && mkdir -p /app/.run \
+    && chown node:node /app/.run
 
-RUN mkdir -p /pnpm \
-    && cp -a /root/.cache/node/corepack /pnpm/corepack \
-    && touch /app/.env \
-    && mkdir -p /app/data /app/media \
-    && mkdir -p /home/node/.config/pnpm \
-    && chown -R node:node /pnpm /home/node \
-    && chmod +x /usr/local/bin/docker-entrypoint
-
-EXPOSE 3000
-
+EXPOSE 23015 23017
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
-
-# Start the Web service by default. Override this command with
-# "pnpm start:worker" to run the background worker from the same image.
-CMD ["pnpm", "start:web"]
+CMD ["pnpm", "--dir", "frontend", "start"]

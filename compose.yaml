@@ -1,37 +1,96 @@
 x-app: &app
+  image: ${ASSETS_LIBRARY_IMAGE:-assets-library:local}
   build:
     context: .
     network: host
-  env_file:
-    - .env
-  # This host runs Docker without veth support. The services share only
-  # persistent files, so they do not require an isolated bridge network.
+    args:
+      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
   network_mode: host
   volumes:
-    - assets-library-data:/app/data
-    - assets-library-media:/app/media
+    - assets-library-runtime:/app/.run
+
+x-backend-volumes: &backend-volumes
+  - assets-library-runtime:/app/.run
+  - type: bind
+    source: ${DATABASE_SSL_CA_HOST_PATH:-./data/mysql-ca.pem}
+    target: /run/secrets/mysql-ca.pem
+    read_only: true
 
 services:
-  web:
+  migration:
     <<: *app
+    env_file:
+      - .env
+    command: /bin/true
+    environment:
+      DATABASE_SSL_CA_PATH: /run/secrets/mysql-ca.pem
+      LOG_SERVICE: migration
+      RUN_DATABASE_MIGRATIONS: ${RUN_DATABASE_MIGRATIONS:-false}
+    volumes: *backend-volumes
+    restart: "no"
+
+  frontend:
+    <<: *app
+    command: pnpm --dir frontend start
+    environment:
+      PORT: ${PORT:-23015}
+      BACKEND_URL: ${BACKEND_URL:-http://127.0.0.1:23017}
+      RUNTIME_DIR: /app/.run
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
+      LOG_CLEANUP_INTERVAL_SECONDS: ${LOG_CLEANUP_INTERVAL_SECONDS:-3600}
+      LOG_SERVICE: frontend
+      RUN_DATABASE_MIGRATIONS: "false"
+    restart: unless-stopped
+
+  backend:
+    <<: *app
+    env_file:
+      - .env
+    command: pnpm --dir backend start
+    environment:
+      DATABASE_SSL_CA_PATH: /run/secrets/mysql-ca.pem
+      LOG_SERVICE: backend
+      RUN_DATABASE_MIGRATIONS: "false"
+      # Compose 当前只启动一个 worker；本地 WORKER_INSTANCES 不得让健康检查
+      # 误等并不存在的容器实例。
+      WORKER_INSTANCES: "1"
+    volumes: *backend-volumes
+    depends_on:
+      migration:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
     <<: *app
-    command: pnpm start:worker
+    env_file:
+      - .env
+    command: pnpm --dir backend start:worker
+    environment:
+      DATABASE_SSL_CA_PATH: /run/secrets/mysql-ca.pem
+      DATABASE_POOL_SIZE: ${WORKER_DATABASE_POOL_SIZE:-5}
+      LOG_SERVICE: worker
+      RUN_DATABASE_MIGRATIONS: "false"
+      WORKER_INDEX: "1"
+      WORKER_INSTANCES: "1"
+    volumes: *backend-volumes
+    depends_on:
+      migration:
+        condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: 35s
 
   chroma:
-    image: chromadb/chroma:latest
-    network_mode: host
+    image: chromadb/chroma:${CHROMA_VERSION:-1.5.9}
+    ports:
+      - "0.0.0.0:${CHROMA_PORT:-23016}:8000"
     environment:
-      IS_PERSISTENT: "TRUE"
-      PERSIST_DIRECTORY: /data
+      CHROMA_LISTEN_ADDRESS: 0.0.0.0
+      CHROMA_PORT: "8000"
+      CHROMA_PERSIST_PATH: /data
     volumes:
       - assets-library-chroma:/data
     restart: unless-stopped
 
 volumes:
-  assets-library-data:
-  assets-library-media:
+  assets-library-runtime:
   assets-library-chroma:

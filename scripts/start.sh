@@ -580,7 +580,7 @@ for pid_file in "${WORKER_PID_FILES[@]}"; do
 done
 while IFS= read -r worker_group; do
   [ -n "$worker_group" ] || continue
-  local found=false
+  found=false
   for managed_pid in "${managed_worker_pids[@]}"; do
     [ "$worker_group" = "$managed_pid" ] && found=true && break
   done

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 assets-library 的所有服务：Chroma + 分镜服务 + Next.js Web + worker
+# 启动 assets-library 的所有服务：Chroma + 分镜服务 + NestJS + worker + Next.js
 # 模式由 .env 的 APP_MODE 决定（prd 默认 / dev）
 set -euo pipefail
 
@@ -20,31 +20,139 @@ fi
 
 PORT="${PORT:-23015}"
 APP_MODE="${APP_MODE:-prd}"
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+BACKEND_PORT="${BACKEND_PORT:-23017}"
+BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:$BACKEND_PORT}"
+RUN_DATABASE_MIGRATIONS="${RUN_DATABASE_MIGRATIONS:-false}"
+PROCESS_STOP_TIMEOUT_SECONDS="${PROCESS_STOP_TIMEOUT_SECONDS:-35}"
+WORKER_INSTANCES="${WORKER_INSTANCES:-1}"
+WORKER_DATABASE_POOL_SIZE="${WORKER_DATABASE_POOL_SIZE:-5}"
 CHROMA_VERSION="${CHROMA_VERSION:-1.5.9}"
 CHROMA_INDEX_URL="${CHROMA_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 CHROMA_WAIT_SECONDS="${CHROMA_WAIT_SECONDS:-30}"
-SCENE_DETECT_ENABLED="${SCENE_DETECT_ENABLED:-true}"
 SCENE_DETECT_BASE_URL="${SCENE_DETECT_BASE_URL:-http://127.0.0.1:28200}"
 SCENE_DETECT_PORT="${SCENE_DETECT_PORT:-28200}"
 SCENE_DETECT_WAIT_SECONDS="${SCENE_DETECT_WAIT_SECONDS:-30}"
-CHROMA_DIR="$(pwd)/chroma-data"
-PID_DIR="$(pwd)/.run"
+SCENE_HEALTH_TIMEOUT_MS="${SCENE_HEALTH_TIMEOUT_MS:-8000}"
 PROJECT_ROOT="$(pwd)"
+FRONTEND_ROOT="$PROJECT_ROOT/frontend"
+BACKEND_ROOT="$PROJECT_ROOT/backend"
+# .env 中的相对文件路径统一以项目根目录为基准，不能受 `pnpm --dir`
+# 改变子进程工作目录的影响。
+if [ -n "${DATABASE_SSL_CA_PATH:-}" ]; then
+  case "$DATABASE_SSL_CA_PATH" in
+    /*) ;;
+    *) DATABASE_SSL_CA_PATH="$PROJECT_ROOT/${DATABASE_SSL_CA_PATH#./}" ;;
+  esac
+  if [ ! -f "$DATABASE_SSL_CA_PATH" ]; then
+    printf '\033[0;31mMySQL CA 文件不存在：%s\033[0m\n' "$DATABASE_SSL_CA_PATH" >&2
+    exit 1
+  fi
+  export DATABASE_SSL_CA_PATH
+fi
+SCENE_PROJECT_ROOT="${SCENE_DETECT_PROJECT_DIR:-$PROJECT_ROOT/../scene-detect-service}"
+SCENE_WORKSPACE_ROOT="${SCENE_DETECT_WORKSPACE_ROOT:-$PROJECT_ROOT/.run/scene-workspace}"
+SCENE_UV_CACHE_DIR="${SCENE_DETECT_UV_CACHE_DIR:-$PROJECT_ROOT/.run/uv-cache}"
+runtime_dir="${RUNTIME_DIR:-.run}"
+chroma_data_dir="${CHROMA_DATA_DIR:-chroma-data}"
+case "$runtime_dir" in
+  /*) PID_DIR="$runtime_dir" ;;
+  *) PID_DIR="$PROJECT_ROOT/$runtime_dir" ;;
+esac
+case "$chroma_data_dir" in
+  /*) CHROMA_DIR="$chroma_data_dir" ;;
+  *) CHROMA_DIR="$PROJECT_ROOT/$chroma_data_dir" ;;
+esac
 UV_CACHE_DIR="${UV_CACHE_DIR:-$PID_DIR/uv-cache}"
 UV_TOOL_DIR="${UV_TOOL_DIR:-$PID_DIR/uv-tools}"
 export UV_CACHE_DIR UV_TOOL_DIR
+export RUNTIME_DIR="$PID_DIR"
 mkdir -p "$PID_DIR" "$CHROMA_DIR" "$UV_CACHE_DIR" "$UV_TOOL_DIR"
+
+command -v flock >/dev/null 2>&1 || {
+  printf '\033[0;31m未找到 flock，无法保证迁移和 worker 单实例启动。\033[0m\n' >&2
+  exit 1
+}
+exec 9>"$PID_DIR/start.lock"
+flock -n 9 || {
+  printf '\033[0;31m另一个 start.sh 正在执行，请等待其结束。\033[0m\n' >&2
+  exit 1
+}
+
+case "$RUN_DATABASE_MIGRATIONS" in
+  true|false) ;;
+  *)
+    printf '\033[0;31mRUN_DATABASE_MIGRATIONS 只能是 true 或 false。\033[0m\n' >&2
+    exit 1
+    ;;
+esac
+case "$APP_MODE" in
+  dev|prd) ;;
+  *)
+    printf '\033[0;31mAPP_MODE 只能是 dev 或 prd。\033[0m\n' >&2
+    exit 1
+    ;;
+esac
+if ! [[ "$SCENE_HEALTH_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] \
+  || [ "$SCENE_HEALTH_TIMEOUT_MS" -lt 1000 ] \
+  || [ "$SCENE_HEALTH_TIMEOUT_MS" -gt 30000 ]; then
+  printf '\033[0;31mSCENE_HEALTH_TIMEOUT_MS 必须是1000到30000之间的整数。\033[0m\n' >&2
+  exit 1
+fi
+SCENE_HEALTH_TIMEOUT_SECONDS=$(( (SCENE_HEALTH_TIMEOUT_MS + 999) / 1000 ))
+if ! [[ "$PROCESS_STOP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  printf '\033[0;31mPROCESS_STOP_TIMEOUT_SECONDS 必须是正整数。\033[0m\n' >&2
+  exit 1
+fi
+if ! [[ "$WORKER_INSTANCES" =~ ^[1-9][0-9]*$ ]] \
+  || [ "$WORKER_INSTANCES" -gt 16 ]; then
+  printf '\033[0;31mWORKER_INSTANCES 必须是1到16之间的整数。\033[0m\n' >&2
+  exit 1
+fi
+if ! [[ "$WORKER_DATABASE_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] \
+  || [ "$WORKER_DATABASE_POOL_SIZE" -gt 100 ]; then
+  printf '\033[0;31mWORKER_DATABASE_POOL_SIZE 必须是1到100之间的整数。\033[0m\n' >&2
+  exit 1
+fi
+if [ "$BACKEND_HOST" != "127.0.0.1" ] && [ "$BACKEND_HOST" != "localhost" ] && [ "$BACKEND_HOST" != "0.0.0.0" ]; then
+  printf '\033[0;31mBACKEND_HOST 必须是 127.0.0.1、localhost 或 0.0.0.0。\033[0m\n' >&2
+  exit 1
+fi
+case "${BACKEND_URL%/}" in
+  "http://127.0.0.1:$BACKEND_PORT"|"http://localhost:$BACKEND_PORT") ;;
+  *)
+    printf '\033[0;31mBACKEND_URL 必须指向 http://127.0.0.1:BACKEND_PORT 或 localhost。\033[0m\n' >&2
+    exit 1
+    ;;
+esac
+if [ "$PORT" = "$BACKEND_PORT" ] || [ "$PORT" = "$SCENE_DETECT_PORT" ]; then
+  printf '\033[0;31mPORT、BACKEND_PORT、SCENE_DETECT_PORT 必须互不冲突。\033[0m\n' >&2
+  exit 1
+fi
 
 startup_complete=false
 started_chroma=false
 started_scene=false
 started_worker=false
-started_web=false
+STARTED_WORKER_PID_FILES=()
+started_backend=false
+started_frontend=false
 
 c_ok()    { printf '\033[0;32m%s\033[0m\n' "$*"; }
 c_warn()  { printf '\033[0;33m%s\033[0m\n' "$*"; }
 c_err()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 c_info()  { printf '\033[0;36m%s\033[0m\n' "$*"; }
+
+log_sink() {
+  # 日志读取端必须脱离 start.sh 的会话。否则 start.sh 退出后读取端会收到
+  # SIGHUP，业务进程下一次写 stdout 时也会因管道断开而退出。
+  # 它仍会在对应业务进程关闭管道（EOF）后自行退出。
+  exec 9>&-
+  exec setsid env LOG_SERVICE="$1" RUNTIME_DIR="$PID_DIR" \
+    LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}" \
+    LOG_CLEANUP_INTERVAL_SECONDS="${LOG_CLEANUP_INTERVAL_SECONDS:-3600}" \
+    node "$PROJECT_ROOT/scripts/log-pipe.mjs"
+}
 
 pid_from_file() {
   local file="$1" pid
@@ -87,7 +195,7 @@ stop_managed_process() {
     c_info "停止异常的 $name 进程 (PID $pid) ..."
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 "$PROCESS_STOP_TIMEOUT_SECONDS"); do
     if ! managed_pid_running "$pid"; then
       break
     fi
@@ -106,23 +214,33 @@ stop_managed_process() {
 project_worker_groups() {
   local pid pgid arguments cwd
   while read -r pid pgid arguments; do
-    [[ "$arguments" == *"src/worker/index.ts"* ]] || continue
+    [[ "$arguments" == *"src/worker.ts"* || "$arguments" == *"dist/worker.js"* ]] || continue
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
-    [ "$cwd" = "$PROJECT_ROOT" ] || continue
+    [ "$cwd" = "$BACKEND_ROOT" ] || continue
     printf '%s\n' "$pgid"
   done < <(ps -eo pid=,pgid=,args=)
 }
 
 stop_orphan_worker_group() {
   local pgid="$1"
-  c_warn "检测到当前项目未纳入 worker.pid 管理的旧 worker（PGID $pgid），自动清理。"
+  c_warn "检测到当前项目未纳入 worker.pid 管理的 worker（PGID $pgid），自动清理。"
   kill -TERM -- "-$pgid" 2>/dev/null || true
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 "$PROCESS_STOP_TIMEOUT_SECONDS"); do
     kill -0 -- "-$pgid" 2>/dev/null || return
     sleep 1
   done
-  c_warn "旧 worker 未在 10s 内退出，发送 SIGKILL。"
+  c_warn "worker 未在 ${PROCESS_STOP_TIMEOUT_SECONDS}s 内退出，发送 SIGKILL。"
   kill -KILL -- "-$pgid" 2>/dev/null || true
+}
+
+# 失败回滚只停止本次 start 新建的 worker，保留调用前已健康运行的实例。
+cleanup_started_workers() {
+  for pid_file in "${STARTED_WORKER_PID_FILES[@]}"; do
+    worker_index="${pid_file##*/worker-}"
+    worker_index="${worker_index%.pid}"
+    stop_managed_process "$pid_file" "worker-$worker_index"
+    rm -f "$PID_DIR/worker-$worker_index.heartbeat.json"
+  done
 }
 
 # 启动链中任一步失败时，只回收本次调用新建的进程；调用前已经健康运行的
@@ -134,11 +252,11 @@ cleanup_failed_startup() {
   fi
   set +e
   c_warn "启动未完成，清理本次新启动的进程 ..."
-  [ "$started_web" = true ] && stop_managed_process "$PID_DIR/web.pid" "Web"
-  [ "$started_worker" = true ] && stop_managed_process "$PID_DIR/worker.pid" "worker"
+  [ "$started_frontend" = true ] && stop_managed_process "$PID_DIR/frontend.pid" "frontend"
+  [ "$started_backend" = true ] && stop_managed_process "$PID_DIR/backend.pid" "backend"
+  [ "$started_worker" = true ] && cleanup_started_workers
   [ "$started_scene" = true ] && stop_managed_process "$PID_DIR/scene.pid" "分镜服务"
   [ "$started_chroma" = true ] && stop_managed_process "$PID_DIR/chroma.pid" "Chroma"
-  rm -f "$PID_DIR/worker.heartbeat.json"
   exit "$status"
 }
 
@@ -156,6 +274,10 @@ if [ -n "${CHROMA_PORT:-}" ] && [ "$CHROMA_PORT" != "$chroma_url_port" ]; then
   exit 1
 fi
 CHROMA_PORT="${CHROMA_PORT:-$chroma_url_port}"
+if [ "$PORT" = "$CHROMA_PORT" ] || [ "$BACKEND_PORT" = "$CHROMA_PORT" ] || [ "$SCENE_DETECT_PORT" = "$CHROMA_PORT" ]; then
+  c_err "PORT、BACKEND_PORT、CHROMA_PORT、SCENE_DETECT_PORT 必须互不冲突。"
+  exit 1
+fi
 case "$chroma_url" in
   http://127.0.0.1:*|http://localhost:*) ;;
   *)
@@ -180,7 +302,7 @@ show_chroma_failure() {
   else
     c_err "Chroma 未产生日志。"
   fi
-  c_err "启动已中止，不会继续启动数据库迁移、Web 或 worker。"
+  c_err "启动已中止，不会继续启动数据库迁移、backend、frontend 或 worker。"
   exit 1
 }
 
@@ -211,13 +333,13 @@ prepare_chroma_runtime() {
     -u all_proxy -u https_proxy -u http_proxy \
     UV_INDEX_URL="$CHROMA_INDEX_URL" \
     uvx --offline --from "$package" chroma --version \
-    >> "$CHROMA_LOG" 2>&1; then
+    > >(log_sink chroma) 2>&1; then
     return
   fi
 
   c_info "首次准备 Chroma $CHROMA_VERSION（后续启动将复用本机缓存）..."
   if env UV_INDEX_URL="$CHROMA_INDEX_URL" uvx --from "$package" chroma --version \
-    >> "$CHROMA_LOG" 2>&1; then
+    > >(log_sink chroma) 2>&1; then
     return
   fi
 
@@ -226,7 +348,7 @@ prepare_chroma_runtime() {
     if env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
       -u all_proxy -u https_proxy -u http_proxy \
       UV_INDEX_URL="$CHROMA_INDEX_URL" \
-      uvx --from "$package" chroma --version >> "$CHROMA_LOG" 2>&1; then
+      uvx --from "$package" chroma --version > >(log_sink chroma) 2>&1; then
       return
     fi
   fi
@@ -254,7 +376,6 @@ if is_running "$CHROMA_PID_FILE"; then
   c_warn "Chroma 已在运行 (PID $(cat "$CHROMA_PID_FILE"))"
 else
   rm -f "$CHROMA_PID_FILE"
-  : > "$CHROMA_LOG"
   prepare_chroma_runtime
   c_info "启动 Chroma @ 0.0.0.0:$CHROMA_PORT（应用连接 $CHROMA_HEALTH_URL）..."
   nohup setsid env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
@@ -264,7 +385,7 @@ else
     --path "$CHROMA_DIR" \
     --host 0.0.0.0 \
     --port "$CHROMA_PORT" \
-    > "$CHROMA_LOG" 2>&1 &
+    9>&- > >(log_sink chroma) 2>&1 &
   chroma_pid=$!
   echo "$chroma_pid" > "$CHROMA_PID_FILE"
   started_chroma=true
@@ -297,7 +418,7 @@ SCENE_LOG="$PID_DIR/scene.log"
 SCENE_HEALTH_URL="${SCENE_DETECT_BASE_URL%/}/health"
 
 scene_is_ready() {
-  curl -q -fsS -m 2 "$SCENE_HEALTH_URL" >/dev/null 2>&1
+  curl -q -fsS -m "$SCENE_HEALTH_TIMEOUT_SECONDS" "$SCENE_HEALTH_URL" >/dev/null 2>&1
 }
 
 show_scene_failure() {
@@ -307,11 +428,10 @@ show_scene_failure() {
     c_err "分镜服务日志末尾："
     tail -n 30 "$SCENE_LOG" >&2 || true
   fi
-  c_err "启动已中止，不会继续执行数据库迁移、Web 或 worker。"
+  c_err "启动已中止，不会继续执行数据库迁移、backend、frontend 或 worker。"
   exit 1
 }
 
-if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
   case "$SCENE_DETECT_BASE_URL" in
     "http://127.0.0.1:$SCENE_DETECT_PORT"|"http://localhost:$SCENE_DETECT_PORT") ;;
     *)
@@ -335,10 +455,26 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
     c_warn "分镜服务已在运行 (PID $(cat "$SCENE_PID_FILE"))"
   else
     rm -f "$SCENE_PID_FILE"
-    : > "$SCENE_LOG"
+    if [ ! -f "$SCENE_PROJECT_ROOT/pyproject.toml" ] || [ ! -f "$SCENE_PROJECT_ROOT/main.py" ]; then
+      show_scene_failure "未找到分镜项目 $SCENE_PROJECT_ROOT，请设置 SCENE_DETECT_PROJECT_DIR。"
+    fi
+    command -v uv >/dev/null 2>&1 \
+      || show_scene_failure "未找到 uv，无法启动 scene-detect-service。"
+    mkdir -p "$SCENE_WORKSPACE_ROOT" "$SCENE_UV_CACHE_DIR"
     c_info "启动分镜服务 @ 127.0.0.1:$SCENE_DETECT_PORT ..."
-    # 直接执行并由 run-scene-service.sh exec 到 uv，PID 文件可可靠控制服务进程。
-    nohup setsid ./scripts/run-scene-service.sh > "$SCENE_LOG" 2>&1 &
+    # 分镜启动内联在一键脚本中：使用固定回环地址、独立工作区，并清除代理变量。
+    nohup setsid env \
+      -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
+      -u all_proxy -u https_proxy -u http_proxy \
+      UV_CACHE_DIR="$SCENE_UV_CACHE_DIR" \
+      WORKSPACE_ROOT="$SCENE_WORKSPACE_ROOT" \
+      MAX_UPLOAD_BYTES="${MAX_VIDEO_BYTES:-209715200}" \
+      TASK_TTL_SECONDS="${SCENE_DETECT_TASK_TTL_SECONDS:-86400}" \
+      uv run --project "$SCENE_PROJECT_ROOT" \
+      python "$SCENE_PROJECT_ROOT/main.py" \
+      --host 127.0.0.1 \
+      --port "$SCENE_DETECT_PORT" \
+      9>&- > >(log_sink scene) 2>&1 &
     scene_pid=$!
     echo "$scene_pid" > "$SCENE_PID_FILE"
     started_scene=true
@@ -363,160 +499,271 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
         "分镜服务 ${SCENE_DETECT_WAIT_SECONDS}s 内未就绪，已停止启动进程。"
     fi
   fi
-else
-  c_warn "已通过 SCENE_DETECT_ENABLED=false 禁用分镜服务"
-fi
 
 # ---------- 数据库迁移 ----------
 # 远程 MySQL 的迁移账本才是唯一事实来源；本机 marker 会在换库或换机器后误跳过迁移。
-c_info "检查并执行数据库迁移 ..."
-pnpm run db:migrate
-c_ok "数据库迁移完成"
+if [ "$RUN_DATABASE_MIGRATIONS" = "true" ]; then
+  c_info "RUN_DATABASE_MIGRATIONS=true，检查并执行数据库迁移 ..."
+  pnpm --dir "$BACKEND_ROOT" run db:migrate
+  c_ok "数据库迁移完成"
+else
+  c_warn "RUN_DATABASE_MIGRATIONS=false，已跳过数据库迁移"
+fi
 
-# ---------- Web + worker ----------
-WEB_PID_FILE="$PID_DIR/web.pid"
-WORKER_PID_FILE="$PID_DIR/worker.pid"
-LEGACY_APP_PID_FILE="$PID_DIR/app.pid"
-WEB_LOG="$PID_DIR/web.log"
+# ---------- frontend + backend + worker ----------
+FRONTEND_PID_FILE="$PID_DIR/frontend.pid"
+BACKEND_PID_FILE="$PID_DIR/backend.pid"
+FRONTEND_LOG="$PID_DIR/frontend.log"
+BACKEND_LOG="$PID_DIR/backend.log"
 WORKER_LOG="$PID_DIR/worker.log"
-WORKER_HEARTBEAT="$PID_DIR/worker.heartbeat.json"
-HEALTH_URL="http://127.0.0.1:$PORT/health"
+
+# 初始化所有 worker PID 文件路径
+WORKER_PID_FILES=()
+WORKER_HEARTBEAT_FILES=()
+for i in $(seq 1 "$WORKER_INSTANCES"); do
+  WORKER_PID_FILES+=("$PID_DIR/worker-$i.pid")
+  WORKER_HEARTBEAT_FILES+=("$PID_DIR/worker-$i.heartbeat.json")
+done
+FRONTEND_URL="http://127.0.0.1:$PORT"
+public_base_path="${NEXT_PUBLIC_BASE_PATH:-}"
+public_base_path="${public_base_path#/}"
+public_base_path="${public_base_path%/}"
+PUBLIC_BASE_PATH="${public_base_path:+/$public_base_path}"
+FRONTEND_PUBLIC_URL="$FRONTEND_URL$PUBLIC_BASE_PATH"
+FRONTEND_HEALTH_URL="$FRONTEND_PUBLIC_URL/"
+BACKEND_HEALTH_URL="${BACKEND_URL%/}/health"
 APP_WAIT_SECONDS="${APP_WAIT_SECONDS:-90}"
 
-web_is_responding() {
-  # curl 在 HTTP 503 时仍返回 0；这里仅判断端口上的 Web 是否能响应 HTTP。
-  curl -q -sS -m 2 -o /dev/null "$HEALTH_URL" >/dev/null 2>&1
+frontend_is_ready() {
+  curl -q -fsSL -m 3 -o /dev/null "$FRONTEND_HEALTH_URL" >/dev/null 2>&1
 }
 
-application_is_healthy() {
-  curl -q -fsS -m 8 "$HEALTH_URL" >/dev/null 2>&1
+backend_is_ready() {
+  curl -q -fsS -m 8 "$BACKEND_HEALTH_URL" >/dev/null 2>&1
 }
 
 worker_heartbeat_is_fresh() {
+  local heartbeat_file="${1:-$WORKER_HEARTBEAT}"
   local modified now
-  [ -f "$WORKER_HEARTBEAT" ] || return 1
-  modified="$(stat -c %Y "$WORKER_HEARTBEAT" 2>/dev/null)" || return 1
+  [ -f "$heartbeat_file" ] || return 1
+  modified="$(stat -c %Y "$heartbeat_file" 2>/dev/null)" || return 1
   now="$(date +%s)"
   [ $((now - modified)) -le 10 ]
 }
 
 unmanaged_worker_is_alive() {
+  local heartbeat_file="${1:-$WORKER_HEARTBEAT}"
   local heartbeat_pid
-  worker_heartbeat_is_fresh || return 1
-  heartbeat_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$WORKER_HEARTBEAT")"
+  worker_heartbeat_is_fresh "$heartbeat_file" || return 1
+  heartbeat_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$heartbeat_file")"
   [[ "$heartbeat_pid" =~ ^[0-9]+$ ]] && [ "$heartbeat_pid" -gt 1 ] \
     && kill -0 "$heartbeat_pid" 2>/dev/null
 }
 
-# 兼容旧版 start.sh 的 concurrently 进程组；升级后首次启动会先停止旧托管组，
-# 再分别托管 Web 与 worker，健康接口才能准确区分两者。
-if is_running "$LEGACY_APP_PID_FILE"; then
-  c_warn "检测到旧版 Web+worker 进程组，迁移到独立 PID 管理。"
-  stop_managed_process "$LEGACY_APP_PID_FILE" "旧版 Web+worker"
-else
-  rm -f "$LEGACY_APP_PID_FILE"
-fi
+# worker 数量调小时，先停止并清理由旧配置留下的多余实例。
+for pid_file in "$PID_DIR"/worker-*.pid; do
+  [ -f "$pid_file" ] || continue
+  worker_index="${pid_file##*/worker-}"
+  worker_index="${worker_index%.pid}"
+  if ! [[ "$worker_index" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$worker_index" -gt "$WORKER_INSTANCES" ]; then
+    stop_managed_process "$pid_file" "旧 worker-$worker_index"
+    rm -f "$PID_DIR/worker-$worker_index.heartbeat.json"
+  fi
+done
 
-# PID 文件丢失或旧版 concurrently 被外部终止时，其 worker 子进程可能继续运行，
-# 不占端口却会重复消费 MySQL 队列。只清理 cwd 精确等于当前仓库的 worker 进程组。
-managed_worker_pid="$(pid_from_file "$WORKER_PID_FILE" 2>/dev/null || true)"
+# 清理孤儿 worker 进程组
+managed_worker_pids=()
+for pid_file in "${WORKER_PID_FILES[@]}"; do
+  pid="$(pid_from_file "$pid_file" 2>/dev/null || true)"
+  [ -n "$pid" ] && managed_worker_pids+=("$pid")
+done
 while IFS= read -r worker_group; do
   [ -n "$worker_group" ] || continue
-  [ "$worker_group" = "$managed_worker_pid" ] && continue
-  stop_orphan_worker_group "$worker_group"
+  local found=false
+  for managed_pid in "${managed_worker_pids[@]}"; do
+    [ "$worker_group" = "$managed_pid" ] && found=true && break
+  done
+  $found || stop_orphan_worker_group "$worker_group"
 done < <(project_worker_groups | sort -u)
-if [ -z "$managed_worker_pid" ]; then
-  rm -f "$WORKER_HEARTBEAT"
+
+# 检查并清理过期心跳的 worker
+for pid_file in "${WORKER_PID_FILES[@]}"; do
+  worker_index="${pid_file##*/worker-}"
+  worker_index="${worker_index%.pid}"
+  WORKER_HEARTBEAT="$PID_DIR/worker-$worker_index.heartbeat.json"
+  if is_running "$pid_file" && ! worker_heartbeat_is_fresh "$WORKER_HEARTBEAT"; then
+    c_warn "worker-$worker_index PID 存在但心跳已过期，自动清理后重新启动。"
+    stop_managed_process "$pid_file" "worker-$worker_index"
+    rm -f "$WORKER_HEARTBEAT"
+  fi
+done
+
+# 检查未纳入管理但仍在运行的 worker
+for pid_file in "${WORKER_PID_FILES[@]}"; do
+  worker_index="${pid_file##*/worker-}"
+  worker_index="${worker_index%.pid}"
+  WORKER_HEARTBEAT="$PID_DIR/worker-$worker_index.heartbeat.json"
+  if ! is_running "$pid_file" && unmanaged_worker_is_alive "$WORKER_HEARTBEAT"; then
+    c_err "检测到未纳入 worker-$worker_index.pid 管理但仍在更新心跳的 worker。"
+    c_err "请先停止该旧实例，再运行 ./scripts/start.sh，避免重复消费任务。"
+    exit 1
+  fi
+done
+
+if is_running "$BACKEND_PID_FILE" && ! backend_is_ready; then
+  c_warn "backend PID 存在但健康检查失败，自动清理后重新启动。"
+  stop_managed_process "$BACKEND_PID_FILE" "backend"
 fi
 
-if is_running "$WORKER_PID_FILE" && ! worker_heartbeat_is_fresh; then
-  c_warn "worker PID 存在但心跳已过期，自动清理后重新启动。"
-  stop_managed_process "$WORKER_PID_FILE" "worker"
-  rm -f "$WORKER_HEARTBEAT"
-fi
-
-if ! is_running "$WORKER_PID_FILE" && unmanaged_worker_is_alive; then
-  c_err "检测到未纳入 worker.pid 管理但仍在更新心跳的 worker。"
-  c_err "请先停止该旧实例，再运行 ./scripts/start.sh，避免重复消费任务。"
+if ! is_running "$BACKEND_PID_FILE" && backend_is_ready; then
+  c_err "backend 内部端口 $BACKEND_PORT 已被未纳入 PID 文件的服务占用。"
   exit 1
 fi
 
-if is_running "$WEB_PID_FILE" && ! web_is_responding; then
-  c_warn "Web PID 存在但 HTTP 无响应，自动清理后重新启动。"
-  stop_managed_process "$WEB_PID_FILE" "Web"
+if is_running "$FRONTEND_PID_FILE" && ! frontend_is_ready; then
+  c_warn "frontend PID 存在但 HTTP 无响应，自动清理后重新启动。"
+  stop_managed_process "$FRONTEND_PID_FILE" "frontend"
 fi
 
-if ! is_running "$WEB_PID_FILE" && web_is_responding; then
-  c_err "端口 $PORT 已被未纳入当前 PID 文件的 Web 服务占用。"
+if ! is_running "$FRONTEND_PID_FILE" && frontend_is_ready; then
+  c_err "端口 $PORT 已被未纳入当前 PID 文件的 frontend 服务占用。"
   c_err "请先停止该旧实例，确认端口释放后再运行 ./scripts/start.sh。"
   exit 1
 fi
 
-if is_running "$WORKER_PID_FILE"; then
-  c_warn "worker 已在运行 (PID $(cat "$WORKER_PID_FILE"))"
-else
-  rm -f "$WORKER_PID_FILE" "$WORKER_HEARTBEAT"
-  : > "$WORKER_LOG"
-  c_info "启动 worker ..."
-  nohup setsid pnpm run start:worker > "$WORKER_LOG" 2>&1 &
-  worker_pid=$!
-  echo "$worker_pid" > "$WORKER_PID_FILE"
-  started_worker=true
+backend_runtime_needs_build=false
+if ! is_running "$BACKEND_PID_FILE"; then
+  backend_runtime_needs_build=true
 fi
-
-if is_running "$WEB_PID_FILE"; then
-  c_warn "Web 已在运行 (PID $(cat "$WEB_PID_FILE"))"
-else
-  rm -f "$WEB_PID_FILE"
-  : > "$WEB_LOG"
-  if [ "$APP_MODE" = "dev" ]; then
-    c_info "启动 Web [dev/turbopack] (PORT=$PORT) ..."
-    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
-      pnpm exec next dev --turbo > "$WEB_LOG" 2>&1 &
-  else
-    # 每次新启生产 Web 都重新构建，避免残留 .next 与当前源码不一致。
-    c_info "构建生产 Web ..."
-    pnpm run build
-    c_info "启动 Web [prd] (PORT=$PORT) ..."
-    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
-      pnpm run start:web > "$WEB_LOG" 2>&1 &
+for pid_file in "${WORKER_PID_FILES[@]}"; do
+  if ! is_running "$pid_file"; then
+    backend_runtime_needs_build=true
+    break
   fi
-  web_pid=$!
-  echo "$web_pid" > "$WEB_PID_FILE"
-  started_web=true
+done
+if [ "$APP_MODE" = "prd" ] && [ "$backend_runtime_needs_build" = true ]; then
+  c_info "构建生产 backend ..."
+  pnpm --dir "$BACKEND_ROOT" run build
+fi
+if [ "$APP_MODE" = "prd" ] && ! is_running "$FRONTEND_PID_FILE"; then
+  c_info "构建生产 frontend ..."
+  pnpm --dir "$FRONTEND_ROOT" run build
 fi
 
-# 最终就绪条件不是“首页可访问”，而是 /health 确认 Web、worker、MySQL、
-# Chroma、分镜服务和 ZOS 全部可用。
+# 启动多个 worker 实例
+started_worker=false
+for i in $(seq 1 "$WORKER_INSTANCES"); do
+  WORKER_PID_FILE="$PID_DIR/worker-$i.pid"
+  WORKER_HEARTBEAT="$PID_DIR/worker-$i.heartbeat.json"
+
+  if is_running "$WORKER_PID_FILE"; then
+    c_warn "worker-$i 已在运行 (PID $(cat "$WORKER_PID_FILE"))"
+  else
+    rm -f "$WORKER_PID_FILE" "$WORKER_HEARTBEAT"
+    c_info "启动 worker-$i ..."
+    if [ "$APP_MODE" = "dev" ]; then
+      nohup setsid env WORKER_INDEX="$i" WORKER_INSTANCES="$WORKER_INSTANCES" \
+        DATABASE_POOL_SIZE="$WORKER_DATABASE_POOL_SIZE" \
+        pnpm --dir "$BACKEND_ROOT" run start:worker:dev 9>&- > >(log_sink worker) 2>&1 &
+    else
+      nohup setsid env WORKER_INDEX="$i" WORKER_INSTANCES="$WORKER_INSTANCES" \
+        DATABASE_POOL_SIZE="$WORKER_DATABASE_POOL_SIZE" \
+        pnpm --dir "$BACKEND_ROOT" run start:worker 9>&- > >(log_sink worker) 2>&1 &
+    fi
+    worker_pid=$!
+    echo "$worker_pid" > "$WORKER_PID_FILE"
+    STARTED_WORKER_PID_FILES+=("$WORKER_PID_FILE")
+    started_worker=true
+  fi
+done
+
+if is_running "$BACKEND_PID_FILE"; then
+  c_warn "backend 已在运行 (PID $(cat "$BACKEND_PID_FILE"))"
+else
+  rm -f "$BACKEND_PID_FILE"
+  if [ "$APP_MODE" = "dev" ]; then
+    c_info "启动 backend [dev] ($BACKEND_HOST:$BACKEND_PORT) ..."
+    nohup setsid env BACKEND_HOST="$BACKEND_HOST" BACKEND_PORT="$BACKEND_PORT" \
+      pnpm --dir "$BACKEND_ROOT" run start:dev 9>&- > >(log_sink backend) 2>&1 &
+  else
+    c_info "启动 backend [prd] ($BACKEND_HOST:$BACKEND_PORT) ..."
+    nohup setsid env BACKEND_HOST="$BACKEND_HOST" BACKEND_PORT="$BACKEND_PORT" \
+      pnpm --dir "$BACKEND_ROOT" run start 9>&- > >(log_sink backend) 2>&1 &
+  fi
+  backend_pid=$!
+  echo "$backend_pid" > "$BACKEND_PID_FILE"
+  started_backend=true
+fi
+
+if is_running "$FRONTEND_PID_FILE"; then
+  c_warn "frontend 已在运行 (PID $(cat "$FRONTEND_PID_FILE"))"
+else
+  rm -f "$FRONTEND_PID_FILE"
+  if [ "$APP_MODE" = "dev" ]; then
+    c_info "启动 frontend [dev/turbopack] (PORT=$PORT) ..."
+    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 BACKEND_URL="$BACKEND_URL" \
+      pnpm --dir "$FRONTEND_ROOT" run dev 9>&- > >(log_sink frontend) 2>&1 &
+  else
+    c_info "启动 frontend [prd] (PORT=$PORT) ..."
+    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 BACKEND_URL="$BACKEND_URL" \
+      pnpm --dir "$FRONTEND_ROOT" run start 9>&- > >(log_sink frontend) 2>&1 &
+  fi
+  frontend_pid=$!
+  echo "$frontend_pid" > "$FRONTEND_PID_FILE"
+  started_frontend=true
+fi
+
+# 检查所有 worker 是否都在运行
+all_workers_running() {
+  for pid_file in "${WORKER_PID_FILES[@]}"; do
+    is_running "$pid_file" || return 1
+  done
+  return 0
+}
+
+# 检查所有 worker 心跳是否都新鲜
+all_workers_heartbeat_fresh() {
+  for heartbeat_file in "${WORKER_HEARTBEAT_FILES[@]}"; do
+    worker_heartbeat_is_fresh "$heartbeat_file" || return 1
+  done
+  return 0
+}
+
+# 最终就绪条件：frontend 可访问、backend 聚合健康检查通过、所有 worker 心跳新鲜。
 app_ready=false
 app_deadline=$((SECONDS + APP_WAIT_SECONDS))
 while [ "$SECONDS" -lt "$app_deadline" ]; do
-  if application_is_healthy; then
+  if frontend_is_ready && backend_is_ready && all_workers_heartbeat_fresh; then
     app_ready=true
     break
   fi
-  if ! is_running "$WORKER_PID_FILE"; then
-    c_err "worker 启动进程提前退出。日志末尾："
+  if ! all_workers_running; then
+    c_err "某个 worker 启动进程提前退出。日志末尾："
     [ -s "$WORKER_LOG" ] && tail -n 40 "$WORKER_LOG" >&2 || true
     exit 1
   fi
-  if ! is_running "$WEB_PID_FILE"; then
-    c_err "Web 启动进程提前退出。日志末尾："
-    [ -s "$WEB_LOG" ] && tail -n 40 "$WEB_LOG" >&2 || true
+  if ! is_running "$BACKEND_PID_FILE"; then
+    c_err "backend 启动进程提前退出。日志末尾："
+    [ -s "$BACKEND_LOG" ] && tail -n 40 "$BACKEND_LOG" >&2 || true
+    exit 1
+  fi
+  if ! is_running "$FRONTEND_PID_FILE"; then
+    c_err "frontend 启动进程提前退出。日志末尾："
+    [ -s "$FRONTEND_LOG" ] && tail -n 40 "$FRONTEND_LOG" >&2 || true
     exit 1
   fi
   sleep 1
 done
 
 if [ "$app_ready" != true ]; then
-  c_err "应用 ${APP_WAIT_SECONDS}s 内未通过聚合健康检查：$HEALTH_URL"
-  if web_is_responding; then
-    c_err "健康状态（不含密钥和底层异常）："
-    curl -q -sS -m 8 "$HEALTH_URL" >&2 || true
-    echo >&2
-  fi
+  c_err "应用 ${APP_WAIT_SECONDS}s 内未全部就绪。"
+  c_err "backend 健康状态（不含密钥和底层异常）："
+  curl -q -sS -m 8 "$BACKEND_HEALTH_URL" >&2 || true
+  echo >&2
   [ -s "$WORKER_LOG" ] && tail -n 30 "$WORKER_LOG" >&2 || true
-  [ -s "$WEB_LOG" ] && tail -n 30 "$WEB_LOG" >&2 || true
+  [ -s "$BACKEND_LOG" ] && tail -n 30 "$BACKEND_LOG" >&2 || true
+  [ -s "$FRONTEND_LOG" ] && tail -n 30 "$FRONTEND_LOG" >&2 || true
   exit 1
 fi
 
@@ -525,12 +772,12 @@ trap - EXIT
 
 echo
 c_ok "全部就绪。  [mode=$APP_MODE]"
-echo "  Web:     http://127.0.0.1:$PORT"
-echo "  健康:    $HEALTH_URL"
+echo "  应用:    $FRONTEND_PUBLIC_URL"
+echo "  API:     $FRONTEND_PUBLIC_URL/api/v1（同源转发）"
+echo "  backend: $BACKEND_HEALTH_URL（仅回环）"
 echo "  Chroma:  $CHROMA_HEALTH_URL"
-if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
-  echo "  分镜:    $SCENE_HEALTH_URL"
-fi
+echo "  分镜:    $SCENE_HEALTH_URL"
+echo "  worker:  $WORKER_INSTANCES 个（每个连接池 $WORKER_DATABASE_POOL_SIZE）"
 echo "  模式:    $APP_MODE  (改 .env 的 APP_MODE=dev 切开发模式)"
-echo "  日志:    $PID_DIR/{chroma,scene,worker,web}.log"
+echo "  日志:    $PID_DIR/{chroma,scene,worker,backend,frontend}.log"
 echo "  关闭:    ./scripts/stop.sh"

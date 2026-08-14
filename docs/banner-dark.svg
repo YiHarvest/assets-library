@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="素材中枢 Assets Library — 多模态素材流水线">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1200" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="50%" stop-color="#0e1b2c"/>
+      <stop offset="100%" stop-color="#171230"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="560" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="50%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="chip1" x1="0" y1="0" x2="130" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="chip2" x1="0" y1="0" x2="130" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="chip3" x1="0" y1="0" x2="130" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="chip4" x1="0" y1="0" x2="130" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="chip5" x1="0" y1="0" x2="130" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#16a34a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bgGrad)"/>
+
+  <circle cx="1080" cy="50" r="130" fill="#1e3a8a" opacity="0.55"/>
+  <circle cx="50" cy="265" r="110" fill="#134e4a" opacity="0.5"/>
+  <circle cx="1165" cy="250" r="95" fill="#4c1d95" opacity="0.55"/>
+  <circle cx="890" cy="285" r="60" fill="#78350f" opacity="0.35"/>
+
+  <text x="60" y="118" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="62" font-weight="800" fill="url(#titleGrad)">素材中枢</text>
+  <text x="62" y="158" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="20" font-weight="600" letter-spacing="5" fill="#94a3b8">ASSETS LIBRARY · 多模态素材流水线</text>
+
+  <line x1="62" y1="184" x2="430" y2="184" stroke="#334155" stroke-width="2"/>
+
+  <text x="62" y="214" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="16" fill="#94a3b8">上传 · 分析 · 分镜 · 向量检索 · 入库 —— 一条流水线全自动</text>
+
+  <rect x="62" y="238" width="130" height="40" rx="20" fill="url(#chip1)"/>
+  <text x="127" y="263" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="17" font-weight="600" fill="#ffffff">上传</text>
+  <text x="196" y="263" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#475569">→</text>
+
+  <rect x="230" y="238" width="130" height="40" rx="20" fill="url(#chip2)"/>
+  <text x="295" y="263" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="17" font-weight="600" fill="#ffffff">分析</text>
+  <text x="364" y="263" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#475569">→</text>
+
+  <rect x="398" y="238" width="130" height="40" rx="20" fill="url(#chip3)"/>
+  <text x="463" y="263" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="17" font-weight="600" fill="#ffffff">分镜</text>
+  <text x="532" y="263" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#475569">→</text>
+
+  <rect x="566" y="238" width="130" height="40" rx="20" fill="url(#chip4)"/>
+  <text x="631" y="263" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="17" font-weight="600" fill="#ffffff">入库</text>
+  <text x="700" y="263" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#475569">→</text>
+
+  <rect x="734" y="238" width="130" height="40" rx="20" fill="url(#chip5)"/>
+  <text x="799" y="263" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif" font-size="17" font-weight="600" fill="#ffffff">检索</text>
+</svg>

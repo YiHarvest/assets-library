@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  color-scheme: light;
+  --background: #f5f5f7;
+  --foreground: #1d1d1f;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #000000;
+  --foreground: #f5f5f7;
+}
+
+* {
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+body {
+  min-height: 100vh;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", Inter, system-ui,
+    "Segoe UI",
+    sans-serif;
+  font-optical-sizing: auto;
+}
+
+:root[data-theme="dark"] .text-slate-400 {
+  color: #71717a;
+}
+
+:root[data-theme="dark"] .text-slate-500 {
+  color: #a1a1aa;
+}
+
+:root[data-theme="dark"] .text-slate-600,
+:root[data-theme="dark"] .text-slate-700 {
+  color: #d4d4d8;
+}
+
+:root[data-theme="dark"] .border-slate-100,
+:root[data-theme="dark"] .border-slate-200 {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="dark"] .bg-slate-50,
+:root[data-theme="dark"] [class~="bg-slate-50/70"],
+:root[data-theme="dark"] .bg-slate-100 {
+  background-color: #2c2c2e;
+}
+
+:root[data-theme="dark"] [class~="bg-white"],
+:root[data-theme="dark"] [class~="bg-white/80"],
+:root[data-theme="dark"] [class~="bg-white/85"],
+:root[data-theme="dark"] [class~="bg-white/90"] {
+  background-color: #1c1c1e;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

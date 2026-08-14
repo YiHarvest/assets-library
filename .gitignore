@@ -76,6 +76,7 @@ web_modules/
 
 # Next.js build output
 .next
+.next-*
 .next-e2e
 out
 
@@ -154,4 +155,6 @@ vite.config.ts.timestamp-*
 
 # Docker Compose override (local, environment-specific)
 compose.override.yaml
+
+# API and architecture documentation are source files.
 docs/

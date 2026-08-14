@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1786675747818,
+      "tag": "0000_careful_spyke",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1786677246894,
+      "tag": "0001_last_bill_hollister",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1786677725959,
+      "tag": "0002_same_sentinel",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1786678304556,
+      "tag": "0003_narrow_black_panther",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1786685484783,
+      "tag": "0004_aromatic_timeslip",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1786702373696,
+      "tag": "0005_mysterious_dragon_lord",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1786704322221,
+      "tag": "0006_careful_dreaming_celestial",
+      "breakpoints": true
+    }
+  ]
+}

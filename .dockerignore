@@ -1,6 +1,7 @@
 # Dependencies and generated output are installed/built inside Docker.
 node_modules
 .next
+.next-*
 .pnpm-store
 tsconfig.tsbuildinfo
 
@@ -10,10 +11,14 @@ tsconfig.tsbuildinfo
 !.env.example
 data
 media
+.run
+chroma-data
+backend/dist
 
 # Tooling and repository metadata are not needed for the image build.
 .git
 .code-review-graph
+.codegraph
 .agents
 .codex
 coverage

@@ -98,13 +98,13 @@ Drizzle migration、启动 Web 与 worker。任一服务异常会输出 `.run/` 
 
 | 模式 | 数据库 | 内部模型服务 | Web |
 | --- | --- | --- | --- |
-| `APP_MODE=dev` | 将 `DATABASE_URL` 的库名替换为 `DEV_DATABASE_NAME`；名称必须以 `_test` 结尾 | 保留 `.env` 中的远程地址，例如开发机访问 `183.147.142.111` | `next dev --turbo` |
-| `APP_MODE=prd` | 使用 `DATABASE_URL` 中的正式库名；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机改为 `PRD_INTERNAL_SERVICE_HOST`，部署到 183 服务器时即 `127.0.0.1` | `next start` |
+| `APP_MODE=dev` | 将 `DATABASE_URL` 的库名替换为 `DEV_DATABASE_NAME`；名称必须以 `_test` 结尾 | 保留 `.env` 中的远程地址，例如开发机访问 `<INTERNAL_SERVER_IP>` | `next dev --turbo` |
+| `APP_MODE=prd` | 使用 `DATABASE_URL` 中的正式库名；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机改为 `PRD_INTERNAL_SERVICE_HOST`，部署到内网服务器时即 `127.0.0.1` | `next start` |
 
 当前开发配置应得到类似输出：
 
 ```text
-Database target OK: mode=dev target=183.147.142.111:20014/assets_library_dev_test
+Database target OK: mode=dev target=<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
 ```
 
 可以在启动前单独确认，输出不会包含数据库密码：
@@ -126,9 +126,9 @@ pnpm db:check-target
 ```dotenv
 APP_MODE=dev
 PRD_INTERNAL_SERVICE_HOST=127.0.0.1
-DATABASE_URL=mysql://<user>:<url-encoded-password>@183.147.142.111:20014/assets_library
+DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library
 DEV_DATABASE_NAME=assets_library_dev_test
-TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@183.147.142.111:20014/assets_library_dev_test
+TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
 ```
 
 `DATABASE_URL` 可以保留正式库名，因为 dev 解析时会强制替换库名；真正执行增、删、改、查
@@ -173,7 +173,7 @@ Uvicorn 进程，视频级并发由内部 4 个队列 worker 控制；不要再�
 
 ```dotenv
 VLM_PROTOCOL=openai_chat_completions
-VLM_BASE_URL=http://183.147.142.111:30000/v1
+VLM_BASE_URL=http://<INTERNAL_SERVER_IP>:<VLM_PORT>/v1
 VLM_API_KEY=<secret>
 VLM_NAME=<primary-model-id>
 VLM_FALLBACK_NAMES=<fallback-id-1>,<fallback-id-2>
@@ -186,12 +186,12 @@ VLM_FAST_RETRY_WINDOW_MS=5000
 VLM_RETRY_COUNT=1
 VLM_MAX_CONCURRENCY_PER_TARGET=2
 
-EMBEDDING_BASE_URL=http://183.147.142.111:39999/v1
+EMBEDDING_BASE_URL=http://<INTERNAL_SERVER_IP>:<EMBEDDING_PORT>/v1
 EMBEDDING_API_KEY=<secret>
 EMBEDDING_MODEL=<model-id>
 ```
 
-dev 保留上述远程地址。prd 部署到 183 服务器后会自动把 VLM、LLM 和 Embedding 主机
+dev 保留上述远程地址。prd 部署到内网服务器后会自动把 VLM、LLM 和 Embedding 主机
 替换为 `127.0.0.1`，端口和路径保持不变。主模型与 fallback 合计最多 5 个。
 单次视频请求仍有 120 秒保护，但主模型预算为 60 秒、全候选链路总预算为 90 秒；预算从
 素材开始分析时计算，并包含同模型并发排队、首次请求、纯文本格式修复和 fallback。只有

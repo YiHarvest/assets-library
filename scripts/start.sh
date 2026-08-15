@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 启动 assets-library 的所有服务：Chroma + 分镜服务 + Next.js Web + worker
-# 模式由 .env 的 APP_MODE 决定（prd 默认 / dev）
+# 模式由 .env 的 APP_MODE 决定（dev 默认 / prd）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -19,7 +19,7 @@ if [ -f .env ]; then
 fi
 
 PORT="${PORT:-23015}"
-APP_MODE="${APP_MODE:-prd}"
+APP_MODE="${APP_MODE:-dev}"
 CHROMA_VERSION="${CHROMA_VERSION:-1.5.9}"
 CHROMA_INDEX_URL="${CHROMA_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 CHROMA_WAIT_SECONDS="${CHROMA_WAIT_SECONDS:-30}"
@@ -35,6 +35,19 @@ c_ok()    { printf '\033[0;32m%s\033[0m\n' "$*"; }
 c_warn()  { printf '\033[0;33m%s\033[0m\n' "$*"; }
 c_err()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 c_info()  { printf '\033[0;36m%s\033[0m\n' "$*"; }
+
+case "$APP_MODE" in
+  dev|prd) ;;
+  *)
+    c_err "APP_MODE 必须是 dev 或 prd，当前值：$APP_MODE"
+    exit 1
+    ;;
+esac
+
+# 在启动任何依赖、执行任何迁移前，解析并校验最终数据库目标。
+# dev 必须连接以 _test 结尾的数据库；prd 必须连接非测试数据库。
+c_info "校验数据库目标 ..."
+pnpm run db:check-target
 
 pid_from_file() {
   local file="$1" pid

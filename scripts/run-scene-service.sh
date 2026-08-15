@@ -22,6 +22,7 @@ command -v uv >/dev/null 2>&1 || {
 mkdir -p "$scene_workspace" "$uv_cache_dir"
 
 # 仅监听回环地址，分镜 API 不暴露到局域网；主应用通过 127.0.0.1 调用。
+# 硬件加速与队列参数透传；uvicorn 必须单进程（并发由进程内队列控制）。
 exec env \
   -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
   -u all_proxy -u https_proxy -u http_proxy \
@@ -29,7 +30,14 @@ exec env \
   WORKSPACE_ROOT="$scene_workspace" \
   MAX_UPLOAD_BYTES="${MAX_VIDEO_BYTES:-209715200}" \
   TASK_TTL_SECONDS="${SCENE_DETECT_TASK_TTL_SECONDS:-86400}" \
+  FFMPEG_HW_ACCEL="${FFMPEG_HW_ACCEL:-auto}" \
+  FFMPEG_ENCODER_QUALITY="${FFMPEG_ENCODER_QUALITY:-23}" \
+  FFMPEG_ENCODER_PRESET="${FFMPEG_ENCODER_PRESET:-p4}" \
+  QUEUE_WORKER_COUNT="${SCENE_DETECT_WORKERS:-4}" \
+  QUEUE_MAX_SIZE="${SCENE_DETECT_QUEUE_MAX_SIZE:-20}" \
+  QUEUE_MAX_RETRIES="${SCENE_DETECT_QUEUE_MAX_RETRIES:-1}" \
   uv run --project "$scene_project" \
   python "$scene_project/main.py" \
   --host 127.0.0.1 \
-  --port "$scene_port"
+  --port "$scene_port" \
+  --workers 1

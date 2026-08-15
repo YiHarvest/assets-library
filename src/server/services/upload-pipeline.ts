@@ -13,7 +13,11 @@ import {
   videoSources,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
-import { resolveMediaPath } from "@/server/media/storage";
+import {
+  removeAnalysisWorkspace,
+  resolveMediaPath,
+  seedAnalysisVideoFrames,
+} from "@/server/media/storage";
 import { validateMediaFile } from "@/server/media/validate";
 import { prepareSceneBatch, cleanupPreparedSceneBatch } from "@/server/scene/batch";
 import { SceneDetectClient } from "@/server/scene/client";
@@ -54,6 +58,7 @@ function defaultDependencies(): UploadPipelineDependencies {
     sceneClient: new SceneDetectClient({
       baseUrl: config.SCENE_DETECT_BASE_URL,
       timeoutMs: config.SCENE_DETECT_TIMEOUT_MS,
+      pollIntervalMs: config.SCENE_DETECT_POLL_INTERVAL_MS,
     }),
     now: () => new Date(),
   };
@@ -244,26 +249,67 @@ async function processVideo(
     originalFilename: context.item.filename,
     workspaceRoot: dependencies.config.sceneDetectWorkspaceRoot,
     maximumSegmentBytes: dependencies.config.SCENE_SEGMENT_MAX_BYTES,
+    concurrency: dependencies.config.SCENE_SEGMENT_CONCURRENCY,
   });
+  const segmentPlans = new Map(
+    batch.segments.map(
+      (prepared) =>
+        [
+          prepared.index,
+          {
+            prepared,
+            mediaId: crypto.randomUUID(),
+            thumbnailMediaId: crypto.randomUUID(),
+            segmentId: crypto.randomUUID(),
+            assetId: crypto.randomUUID(),
+            analysisJobId: crypto.randomUUID(),
+          },
+        ] as const,
+    ),
+  );
+  const seededAnalysisJobIds = new Set<string>();
+  let databaseCommitted = false;
   try {
     await markTaskItemRunning(context.task.id, context.item.id, "persisting");
     await persistSceneBatch({
       batch,
       storage: dependencies.storage,
+      concurrency: dependencies.config.SCENE_PERSIST_CONCURRENCY,
       now: dependencies.now(),
       commitDatabase: async (persisted) => {
         const now = dependencies.now();
         const sourceId = crypto.randomUUID();
         const parentMediaId = crypto.randomUUID();
-        const segmentRows = persisted.segments.map((segment) => ({
-          segment,
-          mediaId: crypto.randomUUID(),
-          thumbnailMediaId: crypto.randomUUID(),
-          segmentId: crypto.randomUUID(),
-          assetId: crypto.randomUUID(),
-        }));
+        const segmentRows = persisted.segments.map((segment) => {
+          const plan = segmentPlans.get(segment.index);
+          if (!plan) {
+            throw new ScenePipelineError(
+              "scene_persistence_failed",
+              `分镜 ${segment.index} 缺少分析作业规划。`,
+            );
+          }
+          return { segment, ...plan };
+        });
+        // analyze 作业一旦提交即可被其他 worker 领取，所以必须先原子准备好帧种子。
+        const seedResults = await Promise.allSettled(
+          segmentRows.map(async ({ analysisJobId, prepared }) => {
+            await seedAnalysisVideoFrames(
+              analysisJobId,
+              ".mp4",
+              prepared.analysisFramesDirectory,
+              dependencies.config.mediaRoot,
+            );
+            seededAnalysisJobIds.add(analysisJobId);
+          }),
+        );
+        const failedSeed = seedResults.find(
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected",
+        );
+        if (failedSeed) throw failedSeed.reason;
         // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
-        await db.transaction(async (tx) => {
+        try {
+          await db.transaction(async (tx) => {
           await tx.insert(mediaObjects).values([
             mediaObjectValues(
               parentMediaId,
@@ -351,8 +397,8 @@ async function processVideo(
             ),
           );
           await tx.insert(jobs).values(
-            segmentRows.map(({ assetId }) => ({
-              id: crypto.randomUUID(),
+            segmentRows.map(({ assetId, analysisJobId }) => ({
+              id: analysisJobId,
               taskId: context.task.id,
               assetId,
               type: "analyze" as const,
@@ -381,10 +427,29 @@ async function processVideo(
               updatedAt: now,
             })
             .where(eq(taskItems.id, context.item.id));
-        });
+          });
+          databaseCommitted = true;
+        } catch (error) {
+          await Promise.all(
+            [...seededAnalysisJobIds].map((jobId) =>
+              removeAnalysisWorkspace(jobId, dependencies.config.mediaRoot),
+            ),
+          );
+          seededAnalysisJobIds.clear();
+          throw error;
+        }
       },
     });
   } finally {
+    if (!databaseCommitted) {
+      await Promise.all(
+        [...seededAnalysisJobIds].map((jobId) =>
+          removeAnalysisWorkspace(jobId, dependencies.config.mediaRoot),
+        ),
+      ).catch((error) => {
+        console.error("视频批次失败后分析关键帧清理失败。", error);
+      });
+    }
     await cleanupPreparedSceneBatch(batch, dependencies.sceneClient).catch(
       (error) => {
         console.error("视频批次已终止，但本地或分镜服务副本清理失败。", error);

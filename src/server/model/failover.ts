@@ -12,6 +12,8 @@ interface ModelRequestErrorOptions {
   gatewayCode?: string;
   gatewayType?: string;
   retryAfterMs?: number;
+  /** false 表示继续等待同一候选没有收益，应立即尝试下一个 fallback。 */
+  sameCandidateRetryable?: boolean;
   message?: string;
 }
 
@@ -21,6 +23,7 @@ export class ModelRequestError extends Error {
   readonly gatewayCode?: string;
   readonly gatewayType?: string;
   readonly retryAfterMs?: number;
+  readonly sameCandidateRetryable: boolean;
 
   constructor(options: ModelRequestErrorOptions) {
     super(options.message ?? "Model request failed.");
@@ -30,6 +33,7 @@ export class ModelRequestError extends Error {
     this.gatewayCode = options.gatewayCode;
     this.gatewayType = options.gatewayType;
     this.retryAfterMs = options.retryAfterMs;
+    this.sameCandidateRetryable = options.sameCandidateRetryable ?? true;
   }
 }
 
@@ -84,6 +88,7 @@ export async function modelRequestErrorFromResponse(
       return new ModelRequestError({
         kind: failureKindFromStatus(response.status),
         status: response.status,
+        sameCandidateRetryable: response.status !== 408,
         message: "Model error response body could not be read.",
       });
     }
@@ -129,6 +134,7 @@ export async function modelRequestErrorFromResponse(
     gatewayCode,
     gatewayType,
     retryAfterMs: retryAfterMs(response.headers.get("retry-after"), now),
+    sameCandidateRetryable: response.status !== 408,
     message,
   });
 }

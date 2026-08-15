@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -104,6 +104,108 @@ mysqlTest("MySQL 数据层", () => {
   afterAll(async () => {
     if (repositoryPool) await repositoryPool.end();
     if (migrationConnection) await closeDatabase(migrationConnection);
+  });
+
+  async function insertSchedulingTask(id: string, createdAt: Date) {
+    await migrationConnection.db.insert(tasks).values({
+      id,
+      type: "upload",
+      status: "running",
+      phase: "analyzing",
+      createdAt,
+      updatedAt: createdAt,
+    });
+  }
+
+  async function insertSchedulingJob(input: {
+    taskId: string;
+    type: "validate" | "analyze";
+    createdAt: Date;
+  }) {
+    const id = crypto.randomUUID();
+    await migrationConnection.db.insert(jobs).values({
+      id,
+      taskId: input.taskId,
+      type: input.type,
+      availableAt: input.createdAt,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+    });
+    return id;
+  }
+
+  test("validate 作业优先于更早入队的 analyze 作业", async () => {
+    const now = new Date();
+    const analysisTaskId = crypto.randomUUID();
+    const validationTaskId = crypto.randomUUID();
+    await insertSchedulingTask(analysisTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(validationTaskId, new Date(now.getTime() - 1_000));
+    await insertSchedulingJob({
+      taskId: analysisTaskId,
+      type: "analyze",
+      createdAt: new Date(now.getTime() - 2_000),
+    });
+    const validationJobId = await insertSchedulingJob({
+      taskId: validationTaskId,
+      type: "validate",
+      createdAt: new Date(now.getTime() - 1_000),
+    });
+
+    await expect(repository.claimNextJob("priority-test")).resolves.toMatchObject({
+      id: validationJobId,
+      taskId: validationTaskId,
+      type: "validate",
+    });
+  });
+
+  test("并发领取时每个竞争任务最多占用两个分析 worker，独占队列后可突发", async () => {
+    const now = new Date();
+    const firstTaskId = crypto.randomUUID();
+    const secondTaskId = crypto.randomUUID();
+    await insertSchedulingTask(firstTaskId, new Date(now.getTime() - 2_000));
+    await insertSchedulingTask(secondTaskId, new Date(now.getTime() - 1_000));
+    for (let index = 0; index < 3; index += 1) {
+      await insertSchedulingJob({
+        taskId: firstTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 2_000 + index),
+      });
+      await insertSchedulingJob({
+        taskId: secondTaskId,
+        type: "analyze",
+        createdAt: new Date(now.getTime() - 1_000 + index),
+      });
+    }
+
+    const claimed = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        repository.claimNextJob(`fairness-test:${index}`, {
+          analyzeTaskSoftLimit: 2,
+        }),
+      ),
+    );
+    const counts = new Map<string, number>();
+    for (const job of claimed) {
+      expect(job?.type).toBe("analyze");
+      if (job?.taskId) counts.set(job.taskId, (counts.get(job.taskId) ?? 0) + 1);
+    }
+    expect(counts.get(firstTaskId)).toBe(2);
+    expect(counts.get(secondTaskId)).toBe(2);
+    await expect(
+      repository.claimNextJob("fairness-test:blocked", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toBeNull();
+
+    await migrationConnection.db
+      .update(jobs)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(and(eq(jobs.taskId, secondTaskId), eq(jobs.status, "queued")));
+    await expect(
+      repository.claimNextJob("fairness-test:burst", {
+        analyzeTaskSoftLimit: 2,
+      }),
+    ).resolves.toMatchObject({ taskId: firstTaskId, type: "analyze" });
   });
 
   test("迁移生成完整的 MySQL 8 schema，并以 UTC/TLS 建立连接", async () => {

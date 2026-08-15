@@ -9,7 +9,7 @@ const videoAnalysis = {
   kind: "video",
   description: "测试视频",
   topics: ["演示"],
-  tags: { scene: ["室内"], person: [], form: ["讲解"] },
+  tags: { scene: ["城市风貌"], person: [], form: ["讲解"] },
   visualSegments: [{ startSeconds: 0, endSeconds: 3, summary: "展示产品" }],
   keyMoments: [{ seconds: 1, summary: "出现标题" }],
   timeline: [{ startSeconds: 0, endSeconds: 3, summary: "完整片段" }],
@@ -23,7 +23,7 @@ function chatResponse(description: string) {
       kind: "image",
       description,
       tags: {
-        scene: [],
+        scene: ["城市风貌"],
         object: [],
         person: [],
         style: [],
@@ -69,6 +69,30 @@ async function createImageFixture(prefix: string) {
   };
 }
 
+async function createVideoFixture(prefix: string, durationSeconds = 1) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  const assetDirectory = path.join(root, "video");
+  const frameDirectory = path.join(assetDirectory, "frames");
+  await fs.mkdir(frameDirectory, { recursive: true });
+  await fs.writeFile(path.join(frameDirectory, "frame-01.jpg"), "frame");
+  await fs.writeFile(
+    path.join(frameDirectory, "manifest.json"),
+    JSON.stringify({
+      durationSeconds,
+      frames: [{ filename: "frame-01.jpg", timestampSeconds: 0.5 }],
+    }),
+  );
+  return {
+    root,
+    input: {
+      assetId: "video",
+      mediaType: "video" as const,
+      mimeType: "video/mp4",
+      relativePath: "video/original.mp4",
+    },
+  };
+}
+
 describe("model adapter", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -93,7 +117,7 @@ describe("model adapter", () => {
                   kind: "image",
                   description: "测试图片",
                   tags: {
-                    scene: [],
+                    scene: ["城市风貌"],
                     object: [],
                     person: [],
                     style: [],
@@ -127,6 +151,7 @@ describe("model adapter", () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({
       model: "qwen3.7-plus",
       enable_thinking: false,
+      max_tokens: 1_280,
     });
     await fs.rm(root, { recursive: true, force: true });
   });
@@ -158,7 +183,7 @@ describe("model adapter", () => {
                   kind: "image",
                   description: "分组配置测试",
                   tags: {
-                    scene: [],
+                    scene: ["城市风貌"],
                     object: [],
                     person: [],
                     style: [],
@@ -214,7 +239,7 @@ describe("model adapter", () => {
                   kind: "image",
                   description: "终端截图",
                   tags: {
-                    scene: [],
+                    scene: ["城市风貌"],
                     object: [],
                     person: [],
                     style: [],
@@ -251,6 +276,71 @@ describe("model adapter", () => {
     expect(retryBody.messages[0]?.content[0]?.text).toContain(
       "dark_gray_background",
     );
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("repairs mixed-language summaries without resending video frames", async () => {
+    const { root, input } = await createVideoFixture("asset-video-language-", 4);
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_VIDEO_MODE: "frames",
+    });
+    const response = (summary: string) =>
+      chatContentResponse(
+        JSON.stringify({
+          ...videoAnalysis,
+          keyMoments: [{ seconds: 1, summary }],
+        }),
+      );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response("灯光在 wet 路面形成光斑"))
+      .mockResolvedValueOnce(response("灯光在湿润路面形成光斑"));
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("video");
+    if (outcome.result.kind === "video") {
+      expect(outcome.result.keyMoments[0]?.summary).toBe(
+        "灯光在湿润路面形成光斑",
+      );
+    }
+    const repairBody = JSON.parse(
+      String(fetchMock.mock.calls[1]?.[1]?.body),
+    ) as { messages: Array<{ content: Array<{ type: string; text?: string }> }> };
+    expect(repairBody.messages[0]?.content).toHaveLength(1);
+    expect(repairBody.messages[0]?.content[0]?.type).toBe("text");
+    expect(repairBody.messages[0]?.content[0]?.text).toContain("wet 路面");
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("repairs camera-motion claims unsupported by sparse frames", async () => {
+    const { root, input } = await createVideoFixture("asset-video-claims-", 4);
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_VIDEO_MODE: "frames",
+    });
+    const response = (form: string[]) =>
+      chatContentResponse(JSON.stringify({ ...videoAnalysis, tags: {
+        ...videoAnalysis.tags,
+        form,
+      } }));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response(["慢镜头", "夜景摄影"]))
+      .mockResolvedValueOnce(response(["夜景摄影"]));
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("video");
+    if (outcome.result.kind === "video") {
+      expect(outcome.result.tags.form).toEqual(["夜景摄影"]);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -316,6 +406,7 @@ describe("model adapter", () => {
     const request = fetchMock.mock.calls[0]?.[1];
     const body = JSON.parse(String(request?.body)) as {
       enable_thinking?: boolean;
+      max_tokens?: number;
       messages: Array<{
         content: Array<{
           type: string;
@@ -325,6 +416,7 @@ describe("model adapter", () => {
       }>;
     };
     expect(body.enable_thinking).toBe(false);
+    expect(body.max_tokens).toBe(1_280);
     const content = body.messages[0]?.content ?? [];
     expect(content.filter((item) => item.type === "image_url")).toHaveLength(2);
     expect(content[1]?.text).toContain("0.5 秒");
@@ -332,7 +424,60 @@ describe("model adapter", () => {
     expect(content[3]?.text).toContain("1.5 秒");
     expect(content[4]?.image_url?.url).toMatch(/^data:image\/jpeg;base64,/);
     expect(content[0]?.text).toContain("不分析音轨");
+    expect(content[0]?.text).toContain("视频总时长精确为 2 秒");
+    expect(content[0]?.text).toContain("无法判断慢镜头、长镜头");
     expect(result.result).not.toHaveProperty("transcript");
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("derives visual segments from a bounded model timeline", async () => {
+    const { root, input } = await createVideoFixture("asset-video-bounds-", 7);
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_VIDEO_MODE: "frames",
+    });
+    const timeline = Array.from({ length: 7 }, (_, index) => ({
+      startSeconds: index,
+      endSeconds: index + 1,
+      summary: `片段${index + 1}`,
+    }));
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      chatContentResponse(
+        JSON.stringify({
+          kind: "video",
+          description: "边界测试视频",
+          topics: ["测试"],
+          tags: {
+            scene: ["城市风貌", "街道", "行人", "橱窗", "夜景", "雨天"],
+            person: ["行人"],
+            form: ["橱窗"],
+          },
+          keyMoments: Array.from({ length: 5 }, (_, index) => ({
+            seconds: index,
+            summary: `时刻${index + 1}`,
+          })),
+          timeline,
+        }),
+      ),
+    );
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("video");
+    if (outcome.result.kind === "video") {
+      expect(outcome.result.tags.scene).toEqual(["城市风貌", "街道", "夜景"]);
+      expect(outcome.result.tags.scene).not.toContain("行人");
+      expect(outcome.result.tags.scene).not.toContain("橱窗");
+      expect(outcome.result.tags.person).toEqual(["行人"]);
+      expect(outcome.result.tags.form).toEqual(["橱窗"]);
+      expect(outcome.result.keyMoments).toHaveLength(3);
+      expect(outcome.result.timeline).toHaveLength(5);
+      expect(outcome.result.timeline[0]?.startSeconds).toBe(0);
+      expect(outcome.result.timeline.at(-1)?.endSeconds).toBe(7);
+      expect(outcome.result.visualSegments).toEqual(outcome.result.timeline);
+    }
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -397,9 +542,9 @@ describe("model adapter", () => {
         JSON.stringify({
           output_text: JSON.stringify({
             kind: "image",
-            description: "Responses 图片",
+                  description: "响应接口图片",
             tags: {
-              scene: [],
+              scene: ["城市风貌"],
               object: [],
               person: [],
               style: [],
@@ -417,7 +562,7 @@ describe("model adapter", () => {
       mimeType: "image/webp",
       relativePath: "r/original.webp",
     });
-    expect(result.result.description).toBe("Responses 图片");
+    expect(result.result.description).toBe("响应接口图片");
     expect(fetch).toHaveBeenCalledWith(
       "https://proxy.example/v1/responses",
       expect.objectContaining({ method: "POST" }),
@@ -497,6 +642,216 @@ describe("model adapter", () => {
           (JSON.parse(String(call[1]?.body)) as { model: string }).model,
       ),
     ).toEqual(["qwen3.7-plus", "qwen3.7-plus", "kimi-k2.5"]);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("does not retry a transient failure outside the fast retry window", async () => {
+    const { root, input } = await createImageFixture("asset-slow-failure-");
+    let now = 0;
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      VLM_RETRY_COUNT: "1",
+      VLM_FAST_RETRY_WINDOW_MS: "5000",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async () => {
+        now = 5_001;
+        return gatewayError(503, "service_unavailable", "late failure");
+      })
+      .mockResolvedValueOnce(chatResponse("备用模型结果"));
+
+    const outcome = await new OpenAICompatibleAnalyzer(config, {
+      now: () => now,
+    }).analyze(input);
+
+    expect(outcome.model.name).toBe("fallback-model");
+    expect(
+      fetchMock.mock.calls.map(
+        (call) =>
+          (JSON.parse(String(call[1]?.body)) as { model: string }).model,
+      ),
+    ).toEqual(["primary-model", "fallback-model"]);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("uses the primary candidate budget as a hard request deadline", async () => {
+    const { root, input } = await createImageFixture("asset-primary-budget-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      VLM_TIMEOUT_MS: "500",
+      VLM_PRIMARY_BUDGET_MS: "5",
+      VLM_TOTAL_BUDGET_MS: "1000",
+      VLM_RETRY_COUNT: "0",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async (_input, init) => {
+        await new Promise<void>((resolve) => {
+          const signal = init?.signal;
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new DOMException("aborted", "AbortError");
+      })
+      .mockResolvedValueOnce(chatResponse("预算切换成功"));
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.model.name).toBe("fallback-model");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("expires queued primary requests without sending them after the deadline", async () => {
+    const { root, input } = await createImageFixture("asset-queued-budget-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      VLM_MAX_CONCURRENCY_PER_TARGET: "1",
+      VLM_TIMEOUT_MS: "500",
+      VLM_PRIMARY_BUDGET_MS: "20",
+      VLM_TOTAL_BUDGET_MS: "1000",
+      VLM_RETRY_COUNT: "0",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { model: string };
+        if (body.model === "fallback-model") return chatResponse("排队切换成功");
+        await new Promise<void>((resolve) => {
+          const signal = init?.signal;
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new DOMException("aborted", "AbortError");
+      });
+    const analyzer = new OpenAICompatibleAnalyzer(config);
+
+    const outcomes = await Promise.all([
+      analyzer.analyze(input),
+      analyzer.analyze(input),
+    ]);
+
+    expect(outcomes.map((outcome) => outcome.model.name)).toEqual([
+      "fallback-model",
+      "fallback-model",
+    ]);
+    const models = fetchMock.mock.calls.map(
+      (call) =>
+        (JSON.parse(String(call[1]?.body)) as { model: string }).model,
+    );
+    expect(models.filter((model) => model === "primary-model")).toHaveLength(1);
+    expect(models.filter((model) => model === "fallback-model")).toHaveLength(2);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("bounds the complete fallback chain with the total model budget", async () => {
+    const { root, input } = await createImageFixture("asset-total-budget-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      VLM_TIMEOUT_MS: "500",
+      VLM_PRIMARY_BUDGET_MS: "10",
+      VLM_TOTAL_BUDGET_MS: "30",
+      VLM_RETRY_COUNT: "0",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        gatewayError(503, "service_unavailable", "primary unavailable"),
+      )
+      .mockImplementationOnce(async (_input, init) => {
+        await new Promise<void>((resolve) => {
+          const signal = init?.signal;
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new DOMException("aborted", "AbortError");
+      });
+
+    await expect(
+      new OpenAICompatibleAnalyzer(config).analyze(input),
+    ).rejects.toMatchObject({ code: "model_request_failed" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("falls back immediately after a video timeout without retrying the same model", async () => {
+    const { root, input } = await createVideoFixture("asset-video-timeout-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      VLM_VIDEO_MODE: "frames",
+      VLM_VIDEO_TIMEOUT_MS: "5",
+      VLM_RETRY_COUNT: "1",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async (_input, init) => {
+        await new Promise<void>((resolve) => {
+          const signal = init?.signal;
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw new DOMException("aborted", "AbortError");
+      })
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify(videoAnalysis) } }],
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.model.name).toBe("fallback-model");
+    expect(
+      fetchMock.mock.calls.map(
+        (call) =>
+          (JSON.parse(String(call[1]?.body)) as { model: string }).model,
+      ),
+    ).toEqual(["primary-model", "fallback-model"]);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("limits concurrent requests to the same model target", async () => {
+    const { root, input } = await createImageFixture("asset-model-concurrency-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_MAX_CONCURRENCY_PER_TARGET: "2",
+    });
+    let active = 0;
+    let maximumActive = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      active -= 1;
+      return chatResponse("并发限制测试");
+    });
+    const analyzer = new OpenAICompatibleAnalyzer(config);
+
+    await Promise.all(Array.from({ length: 4 }, () => analyzer.analyze(input)));
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(maximumActive).toBe(2);
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -752,7 +1107,96 @@ describe("model adapter", () => {
       "qwen3.7-plus",
       "kimi-k2.5",
     ]);
-    expect(bodies[1]?.messages[0]?.content[0]?.text).toContain("上一次输出无效");
+    expect(bodies[1]?.messages[0]?.content[0]?.text).toContain(
+      "待修复输出：not-json",
+    );
+    expect(
+      bodies[1]?.messages[0]?.content.some(
+        (item) => (item as { type?: string }).type === "image_url",
+      ),
+    ).toBe(false);
+    expect(
+      bodies[2]?.messages[0]?.content.some(
+        (item) => (item as { type?: string }).type === "image_url",
+      ),
+    ).toBe(true);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("rejects a variant primary tag and accepts the exact wording on retry", async () => {
+    const { root, input } = await createImageFixture("asset-primary-tag-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_ENABLE_THINKING: "false",
+    });
+    const response = (scene: string[]) =>
+      chatContentResponse(
+        JSON.stringify({
+          kind: "image",
+          description: "城市照片",
+          tags: {
+            scene,
+            object: [],
+            person: [],
+            style: [],
+            color_composition: [],
+          },
+          ocr: { text: null, unavailableReason: "无文字" },
+        }),
+      );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response(["城市"]))
+      .mockResolvedValueOnce(response(["城市风貌"]));
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("image");
+    if (outcome.result.kind === "image") {
+      expect(outcome.result.tags.scene[0]).toBe("城市风貌");
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retryBody = JSON.parse(
+      String(fetchMock.mock.calls[1]?.[1]?.body),
+    ) as { messages: Array<{ content: Array<{ text?: string }> }> };
+    expect(retryBody.messages[0]?.content[0]?.text).toContain("城市");
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("rejects duplicate primary categories appearing in other tags", async () => {
+    const { root, input } = await createImageFixture("asset-primary-dup-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_ENABLE_THINKING: "false",
+    });
+    // 每次 fetch 都返回新的 Response（避免同一 Response 实例 body 流被二次消费）
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        chatContentResponse(
+          JSON.stringify({
+            kind: "image",
+            description: "建筑照片",
+            tags: {
+              scene: ["建筑"],
+              object: ["城市风貌"],
+              person: [],
+              style: [],
+              color_composition: [],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
+          }),
+        ),
+      );
+
+    await expect(
+      new OpenAICompatibleAnalyzer(config).analyze(input),
+    ).rejects.toMatchObject({ code: "model_response_invalid" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     await fs.rm(root, { recursive: true, force: true });
   });
 });

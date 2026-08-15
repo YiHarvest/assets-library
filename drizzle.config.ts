@@ -1,10 +1,20 @@
 import { defineConfig } from "drizzle-kit";
+import { loadConfig } from "./src/server/config";
+
+try {
+  process.loadEnvFile?.(".env");
+} catch (error) {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code !== "ENOENT") throw error;
+}
+
+const config = loadConfig();
 
 export default defineConfig({
   schema: "./src/server/db/schema.ts",
   out: "./drizzle",
   dialect: "mysql",
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? "mysql://user:password@127.0.0.1:3306/assets_library",
+    url: config.databaseUrl,
   },
 });

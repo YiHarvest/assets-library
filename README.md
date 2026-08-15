@@ -1,91 +1,220 @@
 # 素材中枢
 
-面向内部业务的多模态素材库。项目使用 Next.js 15、TypeScript、MySQL、
-Chroma、电信云 ZOS 和独立分镜服务，提供图片与视频上传、视觉模型分析、
-标签管理、语义检索及用户/公共素材管理。
+<p align="center">
+  <img src="./assets/assets-library-hero.svg" width="100%" alt="素材中枢：多模态素材从上传到语义检索">
+</p>
 
-## 当前架构
+<p align="center">
+  <img src="https://img.shields.io/badge/Next.js-15-000000?style=flat&amp;logo=nextdotjs&amp;logoColor=white" alt="Next.js 15">
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat&amp;logo=react&amp;logoColor=082F49" alt="React 19">
+  <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat&amp;logo=typescript&amp;logoColor=white" alt="TypeScript 5.9">
+  <img src="https://img.shields.io/badge/MySQL-8.4-4479A1?style=flat&amp;logo=mysql&amp;logoColor=white" alt="MySQL 8.4">
+  <img src="https://img.shields.io/badge/FastAPI-Python-009688?style=flat&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI and Python">
+  <img src="https://img.shields.io/badge/FFmpeg-NVENC-007808?style=flat&amp;logo=ffmpeg&amp;logoColor=white" alt="FFmpeg and NVIDIA NVENC">
+</p>
 
-- Web 与 worker 共用远程 MySQL；数据库会话统一使用 UTC，API 时间统一返回
-  ISO 8601 上海时区（`+08:00`）。
-- 上传文件先流式写入 `MEDIA_ROOT/.staging`，不在进程内长期缓存完整文件或分析结果。
-- 图片按文件名扩展名正规化为 JPEG、PNG 或 WebP，再持久化到私有 ZOS。
-- 完整视频先正规化为 H.264/yuv420p MP4，再交给同机
-  `scene-detect-service` 分镜。父视频仅作为内部来源保存，素材库对外只暴露子视频。
-- 父视频及全部子视频通过 ZOS 补偿事务和单个 MySQL 事务整批持久化。任一切片损坏、
-  下载不完整或超过 10 MiB 时，整批不入库。
-- 整批持久化成功后，每个子视频独立提取 1–5 张关键帧并进入现有 VLM 分析流程。
-- 语义向量保存到 Chroma；关系数据、任务状态和分析结果保存到 MySQL。
-- 所有业务 API 使用 `/api/v1` 和 `snake_case`。项目部署于可信内网，接口不做
-  API Key 或登录鉴权；素材可见范围仍由 `user_id` 规则约束。
+<p align="center">
+  面向内部业务的多模态素材库：统一接收图片和视频，自动完成媒体校验、视频分镜、
+  视觉分析、标签提取、对象存储与语义检索。
+</p>
 
-## 环境要求
+项目由 Next.js Web/API、MySQL 作业 worker、Chroma、私有 ZOS，以及内置的
+`scene-detect-service` 分镜子模块组成。默认针对支持 NVIDIA NVENC 的单机部署优化。
 
-- Linux
-- Node.js 22+
-- pnpm 11.3+
-- FFmpeg / ffprobe
-- `uv` / `uvx`
-- 可访问的 MySQL 8.4、私有 ZOS、VLM/embedding 服务
-- 与本仓库同级的 `scene-detect-service` 仓库，或通过
-  `SCENE_DETECT_PROJECT_DIR` 指向它
+## 功能
 
-初始化：
+- 批量上传图片与视频，支持任务状态、逐项进度、失败重试和可靠回调。
+- 图片正规化后写入私有 ZOS；视频先切成独立分镜，再作为素材分析和入库。
+- VLM 自动生成描述与结构化标签，支持主模型及有序 fallback 候选链。
+- MySQL 负责关系数据和可靠作业，Chroma 负责语义向量检索。
+- 支持待审核、发布、修改、删除，以及个人素材与公共素材的作用域管理。
+- 媒体接口支持私有文件代理、下载和 HTTP Range，不向浏览器暴露 ZOS 密钥。
+- `dev`/`prd` 数据库目标硬隔离，启动和 Drizzle CLI 共用同一套安全校验。
+
+## 技术栈
+
+| 层级 | 技术 | 职责 |
+| --- | --- | --- |
+| Web 与 API | Next.js 15、React 19、TypeScript 5.9、Tailwind CSS 4 | 素材管理界面、Route Handlers、OpenAPI 文档 |
+| 数据与作业 | MySQL 8.4、Drizzle ORM、`FOR UPDATE SKIP LOCKED` | 关系数据、migration、可靠异步作业与租约 |
+| 视频分镜 | Python、FastAPI、PySceneDetect、FFmpeg | 异步场景检测、精确切片、状态轮询与崩溃恢复 |
+| GPU 加速 | NVIDIA CUDA / NVENC | 视频硬件解码与 H.264 硬件编码，失败自动回退 CPU |
+| 对象存储 | 电信云 ZOS、AWS S3 SDK | 私有父视频、分片、图片和缩略图存储 |
+| AI 分析 | OpenAI-compatible VLM / Embedding API | 描述生成、结构化标签、模型 fallback |
+| 语义检索 | Chroma | 分析结果向量化与受作用域约束的语义召回 |
+| 工程质量 | Zod、Vitest、Playwright、Pytest、Ruff、ESLint | 配置校验、单元/集成/E2E 与静态检查 |
+
+## 视频处理流程
+
+<p align="center">
+  <img src="./assets/video-pipeline.svg" width="100%" alt="4 个视频 worker、8 路分片与 ZOS 并发的视频处理流水线">
+</p>
+
+```text
+上传 MP4
+  → 本地 staging + 完整媒体校验
+  → scene-detect-service 异步队列（4 个视频 worker）
+  → PySceneDetect + FFmpeg/NVENC 精确分片
+  → 下载、校验、抽取缩略图（每批最多 8 路并发）
+  → 父视频、分片、缩略图上传 ZOS（最多 8 路并发）
+  → 单个 MySQL 事务整批建档
+  → 主应用作业池（4 路）并行调用 VLM
+  → 分析结果写入 MySQL，向量写入 Chroma
+```
+
+分镜接口采用 `POST 202 + GET 轮询`，不会让上传请求一直阻塞。队列有容量上限，
+满载时返回 503；任务状态落盘，服务重启会恢复 `queued`/`processing` 任务。客户端
+超时、取消或失败时会主动删除远端任务目录。
+
+ZOS 和 MySQL 无法共享事务，因此视频入库使用 Saga：所有对象上传完成后才提交一个
+MySQL 事务；任一上传、校验或数据库操作失败，会等待在途上传结束并补偿删除整批对象。
+
+## 快速开始
+
+要求：Linux、Node.js 22+、pnpm 11.3+、FFmpeg/ffprobe、`uv`/`uvx`，以及可访问的
+MySQL 8.4、ZOS 和 OpenAI-compatible 模型服务。
 
 ```bash
 corepack enable
 pnpm install --frozen-lockfile
 cp .env.example .env
+
+./scripts/start.sh
 ```
 
-真实连接串、模型令牌和 ZOS 密钥只能写在未提交的 `.env` 或部署平台的
-Secret 中，不能写入 README、Compose、镜像或 Git 历史。
-
-## 一键启动与停止
-
-本地及同机部署的标准入口是：
+浏览器访问脚本输出的 Web 地址。停止全部托管进程：
 
 ```bash
-./scripts/start.sh
 ./scripts/stop.sh
 ```
 
-`start.sh` 会依次执行：
+`start.sh` 会依次执行数据库目标安全检查、启动并等待 Chroma、启动分镜服务、执行
+Drizzle migration、启动 Web 与 worker。任一服务异常会输出 `.run/` 中对应日志并终止，
+不会继续执行后续步骤。
 
-1. 固定版本启动本地 Chroma，并等待 heartbeat；
-2. 从 `SCENE_DETECT_PROJECT_DIR` 启动仅监听 `127.0.0.1` 的分镜服务；
-3. 通过 Drizzle 的数据库迁移账本幂等执行 MySQL migration；
-4. 启动 Next.js Web 与 worker，并等待 Web 健康检查。
+## dev 与 prd 数据库隔离
 
-任一依赖提前退出或超时，脚本会显示对应日志末尾、清理 PID 并返回非零状态，
-不会误报“全部就绪”。运行日志位于 `.run/`。
+这是启动流程的硬约束，不只是注释约定。
 
-`APP_MODE=dev` 使用 Turbopack 开发模式；`APP_MODE=prd` 使用构建产物。应用监听地址
-由 `PORT` 控制。服务监听可以使用 `0.0.0.0`，但同机客户端连接地址应使用
-`127.0.0.1`，不能把 `0.0.0.0` 当作目标地址。
+| 模式 | 数据库 | 内部模型服务 | Web |
+| --- | --- | --- | --- |
+| `APP_MODE=dev` | 将 `DATABASE_URL` 的库名替换为 `DEV_DATABASE_NAME`；名称必须以 `_test` 结尾 | 保留 `.env` 中的远程地址，例如开发机访问 `183.147.142.111` | `next dev --turbo` |
+| `APP_MODE=prd` | 使用 `DATABASE_URL` 中的正式库名；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机改为 `PRD_INTERNAL_SERVICE_HOST`，部署到 183 服务器时即 `127.0.0.1` | `next start` |
 
-浏览器打开应用即可使用，无登录页。服务间调用 `/api/v1` 也不需要鉴权 Header；
-因此部署边界必须由可信内网、反向代理或防火墙保证，不能直接暴露到公网。
+当前开发配置应得到类似输出：
+
+```text
+Database target OK: mode=dev target=183.147.142.111:20014/assets_library_dev_test
+```
+
+可以在启动前单独确认，输出不会包含数据库密码：
+
+```bash
+pnpm db:check-target
+```
+
+安全边界：
+
+- `dev` 连接非 `_test` 数据库时，应用、migration 和 Drizzle CLI 都会直接拒绝运行。
+- `prd` 连接 `_test` 数据库时同样拒绝运行。
+- `drizzle.config.ts` 不直接读取原始 `DATABASE_URL`，而是调用 `loadConfig()`，因此
+  `pnpm db:generate` 等 Drizzle 命令与 `start.sh` 使用相同的最终目标解析。
+- `start.sh` 在启动依赖和执行 migration 之前先运行 `db:check-target`。
+
+推荐的开发配置：
+
+```dotenv
+APP_MODE=dev
+PRD_INTERNAL_SERVICE_HOST=127.0.0.1
+DATABASE_URL=mysql://<user>:<url-encoded-password>@183.147.142.111:20014/assets_library
+DEV_DATABASE_NAME=assets_library_dev_test
+TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@183.147.142.111:20014/assets_library_dev_test
+```
+
+`DATABASE_URL` 可以保留正式库名，因为 dev 解析时会强制替换库名；真正执行增、删、改、查
+和启动 migration 的目标都是 `assets_library_dev_test`。正式部署必须显式设置
+`APP_MODE=prd`。
 
 ## 关键配置
 
-完整模板见 [.env.example](.env.example)。主要配置包括：
+完整模板见 [.env.example](.env.example)。密钥只写入未提交的 `.env` 或部署平台 Secret，
+不要写进 README、镜像或 Git 历史。
+
+### 并发与分镜
 
 ```dotenv
-DATABASE_URL=mysql://<user>:<url-encoded-password>@<host>:<port>/<database>
-DATABASE_SSL_CA_PATH=./data/mysql-ca.pem
-DATABASE_POOL_SIZE=20
+DATABASE_POOL_SIZE=6
+WORKER_CONCURRENCY=4
+WORKER_ANALYZE_TASK_SOFT_LIMIT=2
+SCENE_DETECT_WORKERS=4
+SCENE_SEGMENT_CONCURRENCY=8
+SCENE_PERSIST_CONCURRENCY=8
+
+SCENE_DETECT_QUEUE_MAX_SIZE=20
+SCENE_DETECT_QUEUE_MAX_RETRIES=1
+SCENE_DETECT_TIMEOUT_MS=600000
+SCENE_DETECT_POLL_INTERVAL_MS=1000
+
+FFMPEG_HW_ACCEL=auto
+FFMPEG_ENCODER_QUALITY=23
+FFMPEG_ENCODER_PRESET=p4
+```
+
+Web 与 worker 是两个独立进程，会各自创建最多 6 条数据库连接。
+数据库作业保持 4 个全局 worker；有多个视频等待分析时，每个任务最多占用 2 个
+分析 worker，只有一个任务等待时可自动使用全部 4 个。新上传文件的 `validate`
+作业优先领取，避免被上一条视频的大量分镜分析作业长时间阻塞。
+
+`auto` 会实际编码一帧探测 NVENC，探测失败时回退 `libx264`。分镜服务固定使用一个
+Uvicorn 进程，视频级并发由内部 4 个队列 worker 控制；不要再通过增加 Uvicorn workers
+复制进程内队列。
+
+### 模型与向量
+
+```dotenv
+VLM_PROTOCOL=openai_chat_completions
+VLM_BASE_URL=http://183.147.142.111:30000/v1
+VLM_API_KEY=<secret>
+VLM_NAME=<primary-model-id>
+VLM_FALLBACK_NAMES=<fallback-id-1>,<fallback-id-2>
+VLM_ENABLE_THINKING=false
+VLM_VIDEO_TIMEOUT_MS=120000
+VLM_MAX_OUTPUT_TOKENS=1280
+VLM_PRIMARY_BUDGET_MS=60000
+VLM_TOTAL_BUDGET_MS=90000
+VLM_FAST_RETRY_WINDOW_MS=5000
+VLM_RETRY_COUNT=1
+VLM_MAX_CONCURRENCY_PER_TARGET=2
+
+EMBEDDING_BASE_URL=http://183.147.142.111:39999/v1
+EMBEDDING_API_KEY=<secret>
+EMBEDDING_MODEL=<model-id>
+```
+
+dev 保留上述远程地址。prd 部署到 183 服务器后会自动把 VLM、LLM 和 Embedding 主机
+替换为 `127.0.0.1`，端口和路径保持不变。主模型与 fallback 合计最多 5 个。
+单次视频请求仍有 120 秒保护，但主模型预算为 60 秒、全候选链路总预算为 90 秒；预算从
+素材开始分析时计算，并包含同模型并发排队、首次请求、纯文本格式修复和 fallback。只有
+5 秒内返回的 HTTP 5xx、429 或短暂网络中断才按 `VLM_RETRY_COUNT` 重试当前候选。模型输出
+最多 1280 tokens，同一模型目标最多并发 2 个请求。
+
+视频切片在分镜校验阶段会同步生成分析关键帧。分析 worker 优先复用这些本地帧，跳过
+从 ZOS 重新下载切片、再次校验视频和 FFmpeg 二次抽帧；关键帧种子缺失时自动回退旧链路，
+不改变 `/api/v1` 请求与响应格式。关键帧保持宽高比且最大宽度为 640px，JPEG 质量为
+`q=4`；不足 10 秒的分镜最多取 3 帧，达到 10 秒后最多取 5 帧。每类标签最多 5 个，
+key moments 最多 3 个、timeline 最多 5 段，visualSegments 在服务端由 timeline 派生。
+模型会收到精确分镜时长，服务端保证 timeline 从 0 连续覆盖到真实结束时间，并按人物、
+形式、场景的语义优先级去除跨分类重复标签。模型返回格式无效、分析文本夹杂英文，或仅凭
+稀疏关键帧推断慢镜头/长镜头等不可靠摄影结论时，第二次请求只发送原始文本进行 JSON
+修复，不会重新发送关键帧。
+
+### 存储与生命周期
+
+```dotenv
 MEDIA_ROOT=./media
-UPLOAD_MAX_ITEMS=100
-UPLOAD_MAX_TOTAL_BYTES=2147483648
+SCENE_SEGMENT_MAX_BYTES=10485760
 STAGING_RETENTION_HOURS=24
 TASK_RETENTION_DAYS=7
-CLEANUP_INTERVAL_SECONDS=3600
-
-SCENE_DETECT_ENABLED=true
-SCENE_DETECT_BASE_URL=http://127.0.0.1:28200
-SCENE_DETECT_PROJECT_DIR=../scene-detect-service
-SCENE_SEGMENT_MAX_BYTES=10485760
 
 ZOS_API_ENDPOINT=<s3-compatible-api-endpoint>
 ZOS_BUCKET=<private-bucket>
@@ -93,117 +222,91 @@ ZOS_ACCESS_KEY_ID=<secret>
 ZOS_SECRET_ACCESS_KEY=<secret>
 ```
 
-远程 MySQL 必须配置 CA。应用连接会验证证书链，禁用明文远程连接。数据库从空库
-开始时执行：
+成功入库后本地 staging、分析下载文件和分镜工作区会立即清理。失败或未封存 staging
+默认保留 24 小时；终态任务记录默认保留 7 天。完整父视频、分片和图片长期保存于 ZOS。
 
-```bash
-pnpm db:migrate
-```
+## API
 
-迁移由 MySQL 中的 Drizzle 迁移表判断，不使用本地 marker。数据库 schema 的唯一来源为
-[schema.ts](src/server/db/schema.ts)，迁移文件位于 `drizzle/`。
-
-## API v1
-
-完整请求/响应、字段类型和错误码见 [API 文档](docs/api.md)；机器可读规范见
-[OpenAPI](spec/contracts/openapi.yaml)，浏览器文档页位于 `/docs`；原 `/api-docs`
-入口继续保留。
-
-主要接口：
+完整文档见 [docs/api.md](docs/api.md)，OpenAPI 文件位于
+[spec/contracts/openapi.yaml](spec/contracts/openapi.yaml)，运行后也可访问 `/docs`。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `POST` | `/api/v1/uploads` | 创建批量上传任务及 item 清单 |
-| `PUT` | `/api/v1/uploads/{task_id}/items/{item_id}` | 逐项流式上传 |
-| `POST` | `/api/v1/uploads/{task_id}` | 封存任务并启动验证、分镜、持久化和分析 |
-| `GET` | `/api/v1/tasks/{task_id}` | 查询上传及所有异步变更任务 |
-| `POST` | `/api/v1/assets/query` | 统一浏览、标签过滤与语义搜索 |
-| `GET` | `/api/v1/assets/{asset_id}` | 获取素材详情 |
-| `PATCH` | `/api/v1/assets/{asset_id}` | 异步修改素材 |
-| `POST` | `/api/v1/assets/{asset_id}/publish` | 异步发布素材 |
-| `POST` | `/api/v1/assets/{asset_id}/retry` | 异步重试失败分析 |
-| `DELETE` | `/api/v1/assets/{asset_id}` | 异步释放个人素材或删除公共素材 |
-| `GET` | `/api/v1/media/{asset_id}` | 私有媒体流、下载和 HTTP Range |
+| `POST` | `/api/v1/uploads` | 创建批量上传任务 |
+| `PUT` | `/api/v1/uploads/{task_id}/items/{item_id}` | 流式上传单个文件 |
+| `POST` | `/api/v1/uploads/{task_id}` | 封存并启动处理 |
+| `GET` | `/api/v1/tasks/{task_id}` | 查询任务和所有 item 状态 |
+| `POST` | `/api/v1/assets/query` | 浏览、标签过滤与语义搜索 |
+| `GET/PATCH/DELETE` | `/api/v1/assets/{asset_id}` | 查询、修改或删除素材 |
+| `POST` | `/api/v1/assets/{asset_id}/publish` | 发布素材 |
+| `POST` | `/api/v1/assets/{asset_id}/retry` | 重试失败分析 |
+| `GET` | `/api/v1/media/{asset_id}` | 私有媒体流与下载 |
 
-上传任务默认最多 100 个文件、总计最多 2 GiB。创建任务后必须上传清单中的每一项，
-再调用封存接口；不存在“从任务中删除 item”的接口。上传中断会释放行级租约、清零该项
-进度并删除不完整临时文件，可以从头重传。相同 item 的并发 PUT 会返回 409。
+所有业务 API 使用 `/api/v1` 和 `snake_case`。当前应用面向可信内网，不提供登录或 API Key
+鉴权；生产入口必须由反向代理、防火墙或上游身份系统限制，不能直接暴露到公网。
 
-任务及 item 的 `status` 仅使用 `queued`、`running`、`done`、`failed`；详细阶段由
-`phase` 表达。创建任务时可选 `callback_url`。没有回调时按 `task_id` 轮询；有回调时
-服务会在终态发送与查询接口同结构的任务摘要，并记录、退避重试投递。回调目标属于内部
-可信配置，服务不会跟随 HTTP 重定向。
+## 项目结构
 
-## 用户与公共素材
+```text
+src/
+  app/                 Next.js 页面与 Route Handlers
+  components/          Web UI 组件
+  server/
+    api/v1/            API 服务层与契约适配
+    db/                Drizzle schema、连接与 migration
+    media/             媒体探测、正规化、抽帧
+    model/             OpenAI-compatible VLM/LLM 客户端
+    repositories/      MySQL 查询与 SKIP LOCKED 作业领取
+    scene/             分镜客户端、下载校验与批次工作区
+    services/          上传、分析、持久化和任务生命周期
+    storage/           ZOS/S3 对象存储
+  worker/              4 路数据库作业循环
 
-`assets.user_id IS NULL` 表示公共素材；非空表示对应用户的个人素材。`user_id` 是由上游
-系统提供的外部字符串，本项目当前不维护 users 表。
+scene-detect-service/
+  app/api/             上传、轮询、下载、删除接口
+  app/services/        队列、状态存储、PySceneDetect/FFmpeg
 
-- 查询不提供用户范围时只返回公共素材；`mode=user` 精确查询一个用户；`all` 和
-  `exclude_user` 必须显式请求。
-- 个人素材删除必须提供匹配的 `user_id`，操作只把 `user_id` 置空，使其转为公共素材，
-  不删除 ZOS 文件、向量或分析结果。
-- 不提供 `user_id` 的删除只针对公共素材，worker 会幂等清理 Chroma、ZOS 与 MySQL。
-- 视频切片可独立删除；同一父视频的最后一个切片删除后，父视频对象自动回收。
-
-本阶段是可信内网、无应用层鉴权模型。调用者可以声明任意 `user_id`，因此生产入口必须由
-内网网关或防火墙限制来源；若未来面向不可信客户端，必须从受信身份令牌派生 user_id。
-
-## 文件与任务生命周期
-
-- 未封存或失败的本地 staging 文件保留 24 小时，每小时扫描一次。
-- 成功写入 ZOS/MySQL 的本地 staging、分析下载文件和分镜工作区立即清理。
-- 任务终态记录默认保留 7 天；长期存在的父视频/素材引用会在任务清理时自动置空，
-  不会级联删除媒体。
-- 完整父视频、切片和图片长期保存于私有 ZOS；媒体 API 负责用户作用域、
-  `Content-Type`、下载文件名及 Range，不向客户端暴露对象存储密钥。
-
-## 模型与候选链
-
-图片以及子视频关键帧使用 VLM。配置主模型和有序候选：
-
-```dotenv
-VLM_PROTOCOL=openai_chat_completions
-VLM_BASE_URL=<openai-compatible-base-url>
-VLM_API_KEY=<secret>
-VLM_NAME=<primary-model-id>
-VLM_FALLBACK_NAMES=<fallback-id-1>,<fallback-id-2>
-VLM_ENABLE_THINKING=false
+drizzle/               版本化 MySQL migration
+scripts/               一键启动、停止及分镜服务入口
+tests/                 unit、integration、e2e
+docs/                  API 与设计文档
+spec/                  OpenAPI、数据模型和验收说明
 ```
-
-主模型与 fallback 合计最多 5 个，精确去重，并共享 protocol、Base URL 和 API Key。
-额度耗尽、模型不存在或明确不支持图片输入时会切换候选；网络、超时、普通限流和 5xx
-先按 `VLM_RETRY_COUNT` 重试。401/403 和普通请求参数错误会立即失败。成功结果保存实际
-使用的模型名与协议。LLM 组已独立配置，但当前业务尚未调用。
-
-设置 `EMBEDDING_MODEL` 后启用 Chroma 语义索引。`POST /api/v1/assets/query` 会先在
-MySQL 中应用 user scope、媒体类型、状态、精确标签和关键词过滤，再用这些候选 ID 查询
-Chroma，防止越权召回。当前语义查询是单页 top-k，不接受 cursor。
 
 ## 测试与构建
 
-所有会修改数据库的集成测试只允许连接名称以 `_test` 结尾的专用 MySQL 数据库：
-
-```dotenv
-TEST_DATABASE_URL=mysql://<test-user>:<password>@<host>:<port>/assets_library_test
-```
-
-执行完整验证：
+不访问数据库的日常验证：
 
 ```bash
 pnpm typecheck
 pnpm lint
-pnpm test
+pnpm test:unit
+uv run --project scene-detect-service pytest -q
+```
+
+数据库集成测试和 E2E 测试会清空 `TEST_DATABASE_URL` 所指 `_test` 库中的业务表：
+
+```bash
+pnpm test:integration
 pnpm test:e2e
 pnpm build
 ```
 
-媒体测试依赖 FFmpeg；MySQL 集成测试会清空 `_test` 库中的业务表，禁止把
-`TEST_DATABASE_URL` 指向生产库。详细人工验收见 [quickstart](spec/quickstart.md)。
+测试入口会拒绝库名不以 `_test` 结尾的连接，但它仍会删除测试库数据。当前 dev 和测试若
+共用 `assets_library_dev_test`，运行集成/E2E 前应确认其中没有需要保留的开发数据。上述测试
+不会、也不允许操作正式 `assets_library`。
 
-## Docker 说明
+## 部署
 
-Dockerfile 仍可用同一镜像分别运行 Web 和 worker，但 MySQL、ZOS、Chroma 与分镜服务属于
-外部依赖。当前推荐的完整同机启动路径仍是 `./scripts/start.sh`；在容器环境中使用前，
-需要单独部署或挂载 `scene-detect-service`，并通过环境变量提供远程 MySQL CA 与 ZOS
-Secret。镜像和 Git 仓库不包含 `.env`、证书、上传文件或数据库数据。
+生产服务器设置 `APP_MODE=prd` 后执行：
+
+```bash
+./scripts/start.sh
+```
+
+首次启动会构建 Next.js，随后复用 `.next`。MySQL migration 以数据库中的 Drizzle
+迁移账本为准并幂等执行；schema 来源为 [src/server/db/schema.ts](src/server/db/schema.ts)。
+服务日志和 PID 位于 `.run/`。
+
+Dockerfile 可将同一镜像分别作为 Web 和 worker 运行，但 Chroma、MySQL、ZOS 与分镜服务
+需要单独部署或挂载。当前完整单机部署的推荐入口仍是 `./scripts/start.sh`。

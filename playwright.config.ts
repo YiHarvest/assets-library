@@ -11,7 +11,7 @@ try {
 
 const databaseUrl =
   process.env.TEST_DATABASE_URL?.trim() ||
-  "mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library_test";
+  "mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library_dev_test";
 const databaseName = decodeURIComponent(
   new URL(databaseUrl).pathname.replace(/^\//, ""),
 );

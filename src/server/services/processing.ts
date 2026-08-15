@@ -18,7 +18,9 @@ import {
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import {
+  analysisRelativePath,
   readVideoFrames,
+  removeAnalysisWorkspace,
   removeAssetFiles,
   resolveMediaPath,
   storeVideoFrames,
@@ -336,7 +338,26 @@ async function hydratedAsset(
   job: ClaimedJob,
   storage?: ObjectStorage,
 ) {
-  if (!asset.mediaObjectId) return { asset, workspace: null };
+  if (asset.mediaType === "video") {
+    const extension = path.extname(asset.originalFilename).toLowerCase() || ".mp4";
+    const relativePath = analysisRelativePath(job.id, extension);
+    try {
+      readVideoFrames(relativePath);
+      const absolutePath = resolveMediaPath(relativePath);
+      return {
+        asset: { ...asset, originalPath: relativePath },
+        workspace: path.dirname(absolutePath),
+        precomputedFrames: true,
+      };
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "video_frames_missing") {
+        throw error;
+      }
+    }
+  }
+  if (!asset.mediaObjectId) {
+    return { asset, workspace: null, precomputedFrames: false };
+  }
   const [object] = await db
     .select()
     .from(mediaObjects)
@@ -345,7 +366,9 @@ async function hydratedAsset(
   if (!object || object.status !== "persisted") {
     throw new AppError("storage_error", "素材的持久化对象不存在。", 500);
   }
-  if (object.provider === "local") return { asset, workspace: null };
+  if (object.provider === "local") {
+    return { asset, workspace: null, precomputedFrames: false };
+  }
   const extension = path.extname(asset.originalFilename).toLowerCase() || ".bin";
   const relativePath = path.posix.join(".analysis", job.id, `original${extension}`);
   const absolutePath = resolveMediaPath(relativePath);
@@ -356,6 +379,7 @@ async function hydratedAsset(
   return {
     asset: { ...asset, originalPath: relativePath },
     workspace: path.dirname(absolutePath),
+    precomputedFrames: false,
   };
 }
 
@@ -420,15 +444,18 @@ async function processAnalysisJob(
   storage?: ObjectStorage,
 ) {
   if (!job.assetId) {
+    await removeAnalysisWorkspace(job.id).catch(() => undefined);
     await failJob(job);
     return;
   }
   const record = await getAssetRecord(job.assetId);
   if (!record) {
+    await removeAnalysisWorkspace(job.id).catch(() => undefined);
     await failJob(job);
     return;
   }
   if (record.reviewStatus === "deleted") {
+    await removeAnalysisWorkspace(job.id).catch(() => undefined);
     await completeJob(job);
     return;
   }
@@ -438,12 +465,16 @@ async function processAnalysisJob(
     const asset = hydrated.asset;
     workspace = hydrated.workspace;
     if (!(await advanceJobAssetStatus(job, "validating"))) return;
-    const prepared = await mediaPreparer(asset);
+    const prepared = hydrated.precomputedFrames
+      ? { mimeType: asset.mimeType, sizeBytes: asset.sizeBytes }
+      : await mediaPreparer(asset);
     await db
       .update(assets)
       .set({ mimeType: prepared.mimeType, sizeBytes: prepared.sizeBytes, updatedAt: new Date() })
       .where(eq(assets.id, asset.id));
-    if (asset.mediaType === "video") await videoFramePreparer(asset);
+    if (asset.mediaType === "video" && !hydrated.precomputedFrames) {
+      await videoFramePreparer(asset);
+    }
     if (!(await advanceJobAssetStatus(job, "analyzing"))) return;
     const outcome = await analyzer.analyze({
       assetId: asset.id,
@@ -491,6 +522,7 @@ export async function processJob(
           new SceneDetectClient({
             baseUrl: config.SCENE_DETECT_BASE_URL,
             timeoutMs: config.SCENE_DETECT_TIMEOUT_MS,
+            pollIntervalMs: config.SCENE_DETECT_POLL_INTERVAL_MS,
           }),
         now: () => new Date(),
       });

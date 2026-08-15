@@ -14,9 +14,12 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
+    "db:check-target": "tsx --env-file=.env src/server/db/check-target.ts",
     "db:migrate": "tsx --env-file=.env src/server/db/migrate.ts"
   },
   "dependencies": {

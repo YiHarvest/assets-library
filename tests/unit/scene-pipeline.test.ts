@@ -101,7 +101,15 @@ describe("scene video pipeline", () => {
       const url = new URL(String(input));
       requested.push(`${init?.method ?? "GET"} ${url.pathname}`);
       if (url.pathname === "/api/v1/videos/split" && init?.method === "POST") {
-        return Response.json(splitManifest);
+        // 异步队列：POST 立即返回任务 ID 与 queued 状态
+        return Response.json({ taskId, status: "queued" }, { status: 202 });
+      }
+      if (url.pathname === `/api/v1/videos/split/${taskId}`) {
+        // 状态轮询：第一次返回 queued，之后返回 done + 清单
+        if (requested.filter((item) => item === `GET ${url.pathname}`).length <= 1) {
+          return Response.json({ taskId, status: "queued" });
+        }
+        return Response.json({ ...splitManifest, status: "done" });
       }
       const match = url.pathname.match(/\/segments\/(\d+)$/);
       if (match) {
@@ -117,6 +125,7 @@ describe("scene video pipeline", () => {
     const client = new SceneDetectClient({
       baseUrl: "http://127.0.0.1:28200",
       timeoutMs: 10_000,
+      pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
     });
 
@@ -142,6 +151,24 @@ describe("scene video pipeline", () => {
         expect([...thumbnail.subarray(0, 2)]).toEqual([0xff, 0xd8]);
       }),
     );
+    await Promise.all(
+      batch.segments.map(async (segment) => {
+        const manifest = JSON.parse(
+          await fs.readFile(
+            path.join(segment.analysisFramesDirectory, "manifest.json"),
+            "utf8",
+          ),
+        ) as { frames: Array<{ filename: string }> };
+        expect(manifest.frames).toHaveLength(1);
+        const frame = await fs.readFile(
+          path.join(
+            segment.analysisFramesDirectory,
+            manifest.frames[0]!.filename,
+          ),
+        );
+        expect([...frame.subarray(0, 2)]).toEqual([0xff, 0xd8]);
+      }),
+    );
     expect(requested).not.toContain(`DELETE /api/v1/videos/split/${taskId}`);
 
     await cleanupPreparedSceneBatch(batch, client);
@@ -153,8 +180,14 @@ describe("scene video pipeline", () => {
     const taskId = "b".repeat(32);
     const fakeFetch = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === "/api/v1/videos/split") {
-        return Response.json(manifest(taskId, [10 * 1024 * 1024 + 1]));
+      if (url.pathname === "/api/v1/videos/split" && init?.method === "POST") {
+        return Response.json({ taskId, status: "queued" }, { status: 202 });
+      }
+      if (url.pathname === `/api/v1/videos/split/${taskId}`) {
+        return Response.json({
+          ...manifest(taskId, [10 * 1024 * 1024 + 1]),
+          status: "done",
+        });
       }
       if (init?.method === "DELETE") return new Response(null, { status: 204 });
       throw new Error("切片不应被下载");
@@ -162,6 +195,7 @@ describe("scene video pipeline", () => {
     const client = new SceneDetectClient({
       baseUrl: "http://127.0.0.1:28200",
       timeoutMs: 10_000,
+      pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
     });
 
@@ -179,7 +213,21 @@ describe("scene video pipeline", () => {
     expect(error.details.segments).toEqual([
       expect.objectContaining({ segmentIndex: 1, maximumBytes: 10 * 1024 * 1024 }),
     ]);
-    expect(fakeFetch).toHaveBeenCalledTimes(2); // POST + compensating DELETE
+    // 新异步流程：POST 入队 + 至少一次 GET 轮询 + 补偿性 DELETE
+    const methodAndPath = fakeFetch.mock.calls.map(([input]) =>
+      new URL(String(input)).pathname,
+    );
+    expect(methodAndPath).toContain("/api/v1/videos/split");
+    expect(
+      fakeFetch.mock.calls.filter(
+        ([, init]) => (init as RequestInit)?.method === "POST",
+      ),
+    ).toHaveLength(1);
+    expect(
+      fakeFetch.mock.calls.filter(
+        ([, init]) => (init as RequestInit)?.method === "DELETE",
+      ),
+    ).toHaveLength(1);
     await expect(fs.stat(path.join(directory, "workspace"))).resolves.toBeTruthy();
     expect(await fs.readdir(path.join(directory, "workspace"))).toEqual([]);
   });
@@ -192,8 +240,14 @@ describe("scene video pipeline", () => {
     const taskId = "c".repeat(32);
     const fakeFetch = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === "/api/v1/videos/split") {
-        return Response.json(manifest(taskId, [valid.length, corrupt.length]));
+      if (url.pathname === "/api/v1/videos/split" && init?.method === "POST") {
+        return Response.json({ taskId, status: "queued" }, { status: 202 });
+      }
+      if (url.pathname === `/api/v1/videos/split/${taskId}`) {
+        return Response.json({
+          ...manifest(taskId, [valid.length, corrupt.length]),
+          status: "done",
+        });
       }
       if (url.pathname.endsWith("/segments/1")) return new Response(valid);
       if (url.pathname.endsWith("/segments/2")) return new Response(corrupt);
@@ -203,6 +257,7 @@ describe("scene video pipeline", () => {
     const client = new SceneDetectClient({
       baseUrl: "http://127.0.0.1:28200",
       timeoutMs: 10_000,
+      pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
     });
 
@@ -226,4 +281,56 @@ describe("scene video pipeline", () => {
     );
     expect(await fs.readdir(path.join(directory, "workspace"))).toEqual([]);
   }, 20_000);
+
+  it("accepts the legacy synchronous 200 manifest during a rolling deployment", async () => {
+    const taskId = "d".repeat(32);
+    const splitManifest = manifest(taskId, [1_024]);
+    const fakeFetch = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(init?.method).toBe("POST");
+      return Response.json(splitManifest, { status: 200 });
+    });
+    const client = new SceneDetectClient({
+      baseUrl: "http://127.0.0.1:28200",
+      timeoutMs: 10_000,
+      fetchImplementation: fakeFetch,
+    });
+
+    await expect(
+      client.splitVideo(parentPath, "parent.mp4"),
+    ).resolves.toEqual(splitManifest);
+    expect(fakeFetch).toHaveBeenCalledOnce();
+  });
+
+  it("deletes an asynchronous remote task when scene processing fails", async () => {
+    const taskId = "e".repeat(32);
+    const requested: string[] = [];
+    const fakeFetch = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      requested.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if (url.pathname.endsWith("/split") && init?.method === "POST") {
+        return Response.json({ taskId, status: "queued" }, { status: 202 });
+      }
+      if (url.pathname.endsWith(taskId) && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({
+        taskId,
+        status: "failed",
+        error: { code: "video_split_failed", message: "ffmpeg failed" },
+      });
+    });
+    const client = new SceneDetectClient({
+      baseUrl: "http://127.0.0.1:28200",
+      timeoutMs: 10_000,
+      pollIntervalMs: 1,
+      fetchImplementation: fakeFetch,
+    });
+
+    const error = await captureSceneError(
+      client.splitVideo(parentPath, "parent.mp4"),
+    );
+
+    expect(error.code).toBe("scene_detection_failed");
+    expect(requested).toContain(`DELETE /api/v1/videos/split/${taskId}`);
+  });
 });

@@ -15,6 +15,14 @@ const MODEL_FAMILY_THINKING_DEFAULTS = [
   { namePattern: /^qwen3\.[5-9]/i, enableThinking: false },
 ] as const;
 const MAX_MODEL_CANDIDATES_PER_ROLE = 5;
+const appModeSchema = z.enum(["dev", "prd"]);
+const internalServiceHostSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((host) => host !== "0.0.0.0" && host !== "::", {
+    message: "客户端连接地址不能使用通配监听地址。",
+  });
 
 export type ModelProtocol = z.infer<typeof modelProtocolSchema>;
 export type ModelRole = "vlm" | "llm";
@@ -50,12 +58,22 @@ function candidateNames(
 
 const envSchema = z
   .object({
+    APP_MODE: appModeSchema.default("dev"),
+    PRD_INTERNAL_SERVICE_HOST: internalServiceHostSchema.default("127.0.0.1"),
     DATABASE_URL: z
       .string()
       .url()
       .default("mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library"),
+    DEV_DATABASE_NAME: z
+      .string()
+      .min(1)
+      .refine((name) => name.endsWith("_test"), {
+        message: "开发模式数据库名必须以 _test 结尾。",
+      })
+      .default("assets_library_dev_test"),
     DATABASE_SSL_CA_PATH: z.string().optional().or(z.literal("")),
-    DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(20),
+    // Web 与 worker 是独立进程，各自持有连接池；默认 6 为 4 个 worker 留出余量。
+    DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(6),
     UPLOAD_MAX_ITEMS: z.coerce.number().int().min(1).max(100).default(100),
     UPLOAD_MAX_TOTAL_BYTES: z.coerce
       .number()
@@ -66,6 +84,17 @@ const envSchema = z
     TASK_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
     CLEANUP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(3_600),
     MEDIA_ROOT: z.string().default("./media"),
+    // auto 优先尝试 NVIDIA 硬解/硬编码并在不可用时回退 CPU。
+    FFMPEG_HW_ACCEL: z.enum(["auto", "cuda", "none"]).default("auto"),
+    // 主应用数据库作业 worker 数；领取使用 SKIP LOCKED，可在同一进程并发运行。
+    WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+    // 多任务竞争时，同一任务最多占用的素材分析 worker 数；无竞争时可突发至全局上限。
+    WORKER_ANALYZE_TASK_SOFT_LIMIT: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(32)
+      .default(2),
     MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
     MAX_VIDEO_BYTES: z.coerce.number().int().positive().default(200 * 1024 * 1024),
     SCENE_DETECT_ENABLED: booleanSchema.default(true),
@@ -73,7 +102,19 @@ const envSchema = z
     SCENE_DETECT_PROJECT_DIR: z.string().default("../scene-detect-service"),
     SCENE_DETECT_WORKSPACE_ROOT: z.string().default("./media/.scene-service"),
     SCENE_DETECT_PORT: z.coerce.number().int().min(1).max(65_535).default(28_200),
-    SCENE_DETECT_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    // 异步队列模式下 POST 立即返回，客户端轮询状态直到完成。
+    // 总预算需覆盖排队时间（并发 worker 数固定，高峰任务会排队），默认 10 分钟。
+    SCENE_DETECT_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+    // 状态轮询间隔
+    SCENE_DETECT_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(1_000),
+    // 分片下载/验证/抽帧的并发上限（父视频切出的分片逐个流水线处理，并发吃满多核）
+    SCENE_SEGMENT_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+    // 父视频、分片和缩略图上传 ZOS 的并发上限。
+    SCENE_PERSIST_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
     SCENE_DETECT_TASK_TTL_SECONDS: z.coerce.number().int().positive().default(86_400),
     SCENE_SEGMENT_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
     ZOS_ACCESS_KEY_ID: z.string().optional(),
@@ -92,8 +133,31 @@ const envSchema = z
     VLM_FALLBACK_NAMES: z.string().optional(),
     VLM_ENABLE_THINKING: optionalBooleanSchema,
     VLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
-    VLM_VIDEO_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    VLM_VIDEO_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+    // 单次生成上限；视频结构化结果通常低于 1k tokens，保留少量安全余量。
+    VLM_MAX_OUTPUT_TOKENS: z.coerce
+      .number()
+      .int()
+      .min(128)
+      .max(32_768)
+      .default(1_280),
+    // 从素材开始分析起计算，包含目标并发排队、请求、文本修复和 fallback。
+    VLM_PRIMARY_BUDGET_MS: z.coerce.number().int().positive().default(60_000),
+    VLM_TOTAL_BUDGET_MS: z.coerce.number().int().positive().default(90_000),
+    // 只有在此窗口内快速失败的网络错误/5xx/429 才允许重试当前候选。
+    VLM_FAST_RETRY_WINDOW_MS: z.coerce
+      .number()
+      .int()
+      .nonnegative()
+      .default(5_000),
     VLM_RETRY_COUNT: z.coerce.number().int().min(0).max(3).default(1),
+    // 同一 VLM 模型目标的进程内请求并发，避免单个模型被全局 worker 突发压满。
+    VLM_MAX_CONCURRENCY_PER_TARGET: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(32)
+      .default(2),
     VLM_FAILOVER_COOLDOWN_MS: z.coerce
       .number()
       .int()
@@ -115,6 +179,20 @@ const envSchema = z
     EMBEDDING_MODEL: z.string().optional(),
   })
   .superRefine((env, context) => {
+    if (env.WORKER_ANALYZE_TASK_SOFT_LIMIT > env.WORKER_CONCURRENCY) {
+      context.addIssue({
+        code: "custom",
+        path: ["WORKER_ANALYZE_TASK_SOFT_LIMIT"],
+        message: "单任务分析软上限不能超过全局 worker 并发数。",
+      });
+    }
+    if (env.VLM_PRIMARY_BUDGET_MS > env.VLM_TOTAL_BUDGET_MS) {
+      context.addIssue({
+        code: "custom",
+        path: ["VLM_PRIMARY_BUDGET_MS"],
+        message: "VLM 主模型预算不能超过全候选链路总预算。",
+      });
+    }
     for (const role of ["VLM", "LLM"] as const) {
       const primaryName = env[`${role}_NAME`];
       const fallbackNames = env[`${role}_FALLBACK_NAMES`];
@@ -140,6 +218,45 @@ export type AppConfig = ReturnType<typeof loadConfig>;
 
 function optionalValue(value: string | undefined) {
   return value?.trim() || undefined;
+}
+
+function internalServiceUrl(
+  value: string | undefined,
+  appMode: z.infer<typeof appModeSchema>,
+  productionHost: string,
+) {
+  const normalizedValue = optionalValue(value);
+  if (!normalizedValue) return undefined;
+  const url = new URL(normalizedValue);
+  if (appMode === "prd") url.hostname = productionHost;
+  return url.toString().replace(/\/$/, "");
+}
+
+export function databaseTarget(url: string) {
+  const parsed = new URL(url);
+  return {
+    hostname: parsed.hostname,
+    port: parsed.port || "3306",
+    database: decodeURIComponent(parsed.pathname.replace(/^\//, "")),
+  };
+}
+
+export function assertDatabaseTargetSafety(
+  appMode: z.infer<typeof appModeSchema>,
+  url: string,
+) {
+  const target = databaseTarget(url);
+  if (appMode === "dev" && !target.database.endsWith("_test")) {
+    throw new Error(
+      `开发模式拒绝连接非测试数据库：${target.hostname}:${target.port}/${target.database}`,
+    );
+  }
+  if (appMode === "prd" && target.database.endsWith("_test")) {
+    throw new Error(
+      `生产模式拒绝连接测试数据库：${target.hostname}:${target.port}/${target.database}`,
+    );
+  }
+  return target;
 }
 
 function defaultThinkingOption(modelName: string | undefined) {
@@ -222,11 +339,32 @@ export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
   const parsed = envSchema.parse(env);
+  const databaseUrl = new URL(parsed.DATABASE_URL);
+  if (parsed.APP_MODE === "dev") {
+    databaseUrl.pathname = `/${encodeURIComponent(parsed.DEV_DATABASE_NAME)}`;
+  } else {
+    databaseUrl.hostname = parsed.PRD_INTERNAL_SERVICE_HOST;
+  }
+  const resolvedDatabaseUrl = databaseUrl.toString();
+  const resolvedDatabaseTarget = assertDatabaseTargetSafety(
+    parsed.APP_MODE,
+    resolvedDatabaseUrl,
+  );
+  const vlmBaseUrl = internalServiceUrl(
+    parsed.VLM_BASE_URL,
+    parsed.APP_MODE,
+    parsed.PRD_INTERNAL_SERVICE_HOST,
+  );
+  const configuredLlmBaseUrl = internalServiceUrl(
+    parsed.LLM_BASE_URL,
+    parsed.APP_MODE,
+    parsed.PRD_INTERNAL_SERVICE_HOST,
+  );
   const databaseSslCaPath = optionalValue(parsed.DATABASE_SSL_CA_PATH);
   const vlm = modelTarget(
     "vlm",
     parsed.VLM_PROTOCOL,
-    parsed.VLM_BASE_URL,
+    vlmBaseUrl,
     parsed.VLM_API_KEY,
     parsed.VLM_NAME,
     parsed.VLM_ENABLE_THINKING,
@@ -234,13 +372,13 @@ export function loadConfig(
   const vlmCandidates = configuredModelCandidates(
     "vlm",
     parsed.VLM_PROTOCOL,
-    parsed.VLM_BASE_URL,
+    vlmBaseUrl,
     parsed.VLM_API_KEY,
     parsed.VLM_NAME,
     parsed.VLM_FALLBACK_NAMES,
     parsed.VLM_ENABLE_THINKING,
   );
-  const llmBaseUrl = parsed.LLM_BASE_URL || vlm.baseUrl;
+  const llmBaseUrl = configuredLlmBaseUrl || vlm.baseUrl;
   const llmApiKey = optionalValue(parsed.LLM_API_KEY) ?? vlm.apiKey;
   const llm = modelTarget(
     "llm",
@@ -264,13 +402,18 @@ export function loadConfig(
     ...llmCandidates,
   ]);
   const embeddingBaseUrl =
-    optionalValue(parsed.EMBEDDING_BASE_URL)?.replace(/\/$/, "") ??
+    internalServiceUrl(
+      parsed.EMBEDDING_BASE_URL,
+      parsed.APP_MODE,
+      parsed.PRD_INTERNAL_SERVICE_HOST,
+    ) ??
     embeddingFallbackTarget?.baseUrl;
   const embeddingApiKey =
     optionalValue(parsed.EMBEDDING_API_KEY) ?? embeddingFallbackTarget?.apiKey;
   return {
     ...parsed,
-    databaseUrl: parsed.DATABASE_URL,
+    databaseUrl: resolvedDatabaseUrl,
+    databaseTarget: resolvedDatabaseTarget,
     databaseSslCaPath: databaseSslCaPath
       ? path.resolve(databaseSslCaPath)
       : undefined,

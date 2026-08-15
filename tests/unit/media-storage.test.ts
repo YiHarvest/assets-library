@@ -3,7 +3,12 @@ import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { storeVideoFrames } from "@/server/media/storage";
+import {
+  readVideoFrames,
+  removeAnalysisWorkspace,
+  seedAnalysisVideoFrames,
+  storeVideoFrames,
+} from "@/server/media/storage";
 
 describe("media storage", () => {
   let directory: string;
@@ -58,5 +63,35 @@ describe("media storage", () => {
         name.startsWith("frames."),
       ),
     ).toBe(false);
+  });
+
+  it("atomically seeds and removes precomputed analysis frames", async () => {
+    const source = path.join(directory, "prepared-frames");
+    await fsPromises.mkdir(source, { recursive: true });
+    await fsPromises.writeFile(path.join(source, "frame-01.jpg"), "frame");
+    await fsPromises.writeFile(
+      path.join(source, "manifest.json"),
+      JSON.stringify({
+        durationSeconds: 1,
+        frames: [{ filename: "frame-01.jpg", timestampSeconds: 0.5 }],
+      }),
+    );
+
+    const seeded = await seedAnalysisVideoFrames(
+      "analysis-job",
+      ".mp4",
+      source,
+      directory,
+    );
+
+    expect(fs.existsSync(path.join(seeded.workspace, "original.mp4"))).toBe(false);
+    expect(readVideoFrames(seeded.relativePath, directory)).toEqual([
+      expect.objectContaining({
+        filename: "frame-01.jpg",
+        timestampSeconds: 0.5,
+      }),
+    ]);
+    await removeAnalysisWorkspace("analysis-job", directory);
+    expect(fs.existsSync(seeded.workspace)).toBe(false);
   });
 });

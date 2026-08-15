@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "@/server/config";
 
 describe("model configuration", () => {
+  it("uses bounded video requests and per-target concurrency by default", () => {
+    const config = loadConfig({});
+
+    expect(config.VLM_VIDEO_TIMEOUT_MS).toBe(120_000);
+    expect(config.VLM_MAX_OUTPUT_TOKENS).toBe(1_280);
+    expect(config.VLM_PRIMARY_BUDGET_MS).toBe(60_000);
+    expect(config.VLM_TOTAL_BUDGET_MS).toBe(90_000);
+    expect(config.VLM_FAST_RETRY_WINDOW_MS).toBe(5_000);
+    expect(config.VLM_RETRY_COUNT).toBe(1);
+    expect(config.VLM_MAX_CONCURRENCY_PER_TARGET).toBe(2);
+  });
+
+  it("rejects a primary model budget larger than the full candidate budget", () => {
+    expect(() =>
+      loadConfig({
+        VLM_PRIMARY_BUDGET_MS: "90001",
+        VLM_TOTAL_BUDGET_MS: "90000",
+      }),
+    ).toThrow(/主模型预算/);
+  });
+
   it("builds the VLM target from the current settings", () => {
     const config = loadConfig({
       VLM_PROTOCOL: "openai_chat_completions",

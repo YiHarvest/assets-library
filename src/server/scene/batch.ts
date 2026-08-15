@@ -2,7 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { validateVideoFile } from "@/server/media/video-validation";
-import { extractVideoFirstFrame } from "@/server/media/video-frames";
+import {
+  extractVideoFirstFrame,
+  extractVideoFramesToDirectory,
+} from "@/server/media/video-frames";
 import type { MediaTargetFormat } from "@/server/media/target-format";
 import { SceneDetectClient } from "./client";
 import {
@@ -22,6 +25,7 @@ export interface PreparedSceneSegment extends SceneSegment {
   sizeBytes: number;
   thumbnailAbsolutePath: string;
   thumbnailSizeBytes: number;
+  analysisFramesDirectory: string;
 }
 
 export interface PreparedSceneBatch {
@@ -39,6 +43,8 @@ export interface PrepareSceneBatchInput {
   originalFilename: string;
   workspaceRoot: string;
   maximumSegmentBytes: number;
+  /** 分片下载/验证/抽帧的并发上限（默认 8）；机器多核时串行会浪费资源 */
+  concurrency?: number;
   signal?: AbortSignal;
 }
 
@@ -53,6 +59,39 @@ function oversizeSegments(
       actualBytes: segment.sizeBytes,
       maximumBytes: maximumSegmentBytes,
     }));
+}
+
+/** 最小信号量：限制并发任务数，超出部分排队等待（不引入外部依赖）。 */
+class Semaphore {
+  private readonly limit: number;
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(limit: number) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new ScenePipelineError(
+        "scene_segment_invalid",
+        "分片并发数必须是大于 0 的整数。",
+        { concurrency: limit },
+      );
+    }
+    this.limit = limit;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    this.active += 1;
+  }
+
+  release(): void {
+    this.active -= 1;
+    const next = this.waiters.shift();
+    if (next) next();
+  }
 }
 
 /**
@@ -78,7 +117,9 @@ export async function prepareSceneBatch(
       input.signal,
     );
 
-    const tooLarge = oversizeSegments(manifest, input.maximumSegmentBytes);
+    // splitVideo 成功后 manifest 必然存在；TS 在闭包内无法自动收窄，这里显式断言
+    const splitManifest = manifest as SceneSplitManifest;
+    const tooLarge = oversizeSegments(splitManifest, input.maximumSegmentBytes);
     if (tooLarge.length > 0) {
       throw new ScenePipelineError(
         "scene_segment_too_large",
@@ -87,55 +128,81 @@ export async function prepareSceneBatch(
       );
     }
 
-    const downloaded: PreparedSceneSegment[] = [];
+    // 分片下载/验证/抽帧并发执行（信号量限流，默认 8），
+    // 任一失败仍按段收集，整批回滚语义不变。
+    const concurrency = input.concurrency ?? 8;
+    const semaphore = new Semaphore(concurrency);
     const invalid: Array<Record<string, unknown>> = [];
-    for (const segment of manifest.segments) {
-      const absolutePath = path.join(
-        segmentsPath,
-        `segment-${String(segment.index).padStart(3, "0")}.mp4`,
-      );
+
+    const processSegment = async (
+      segment: SceneSplitManifest["segments"][number],
+    ): Promise<PreparedSceneSegment | undefined> => {
+      await semaphore.acquire();
       try {
-        const download = await input.client.downloadSegment(
-          manifest,
-          segment,
-          absolutePath,
-          input.maximumSegmentBytes,
-          input.signal,
-        );
-        const validated = await validateVideoFile(
-          absolutePath,
-          mp4Target,
-          download.sizeBytes,
-          input.maximumSegmentBytes,
-        );
-        const thumbnailAbsolutePath = path.join(
+        const absolutePath = path.join(
           segmentsPath,
-          `thumbnail-${String(segment.index).padStart(3, "0")}.jpg`,
+          `segment-${String(segment.index).padStart(3, "0")}.mp4`,
         );
-        const thumbnail = await extractVideoFirstFrame(
-          absolutePath,
-          thumbnailAbsolutePath,
-        );
-        downloaded.push({
-          ...segment,
-          absolutePath,
-          sizeBytes: validated.sizeBytes,
-          thumbnailAbsolutePath,
-          thumbnailSizeBytes: thumbnail.sizeBytes,
-        });
-      } catch (error) {
-        invalid.push({
-          segmentIndex: segment.index,
-          code:
-            error instanceof ScenePipelineError
-              ? error.code
-              : "scene_segment_invalid",
-          message: error instanceof Error ? error.message : "未知切片错误",
-          details:
-            error instanceof ScenePipelineError ? error.details : undefined,
-        });
+        try {
+          const download = await input.client.downloadSegment(
+            splitManifest,
+            segment,
+            absolutePath,
+            input.maximumSegmentBytes,
+            input.signal,
+          );
+          const validated = await validateVideoFile(
+            absolutePath,
+            mp4Target,
+            download.sizeBytes,
+            input.maximumSegmentBytes,
+          );
+          const thumbnailAbsolutePath = path.join(
+            segmentsPath,
+            `thumbnail-${String(segment.index).padStart(3, "0")}.jpg`,
+          );
+          const thumbnail = await extractVideoFirstFrame(
+            absolutePath,
+            thumbnailAbsolutePath,
+          );
+          const analysisFramesDirectory = path.join(
+            segmentsPath,
+            `analysis-frames-${String(segment.index).padStart(3, "0")}`,
+          );
+          await extractVideoFramesToDirectory(
+            absolutePath,
+            analysisFramesDirectory,
+          );
+          return {
+            ...segment,
+            absolutePath,
+            sizeBytes: validated.sizeBytes,
+            thumbnailAbsolutePath,
+            thumbnailSizeBytes: thumbnail.sizeBytes,
+            analysisFramesDirectory,
+          };
+        } catch (error) {
+          invalid.push({
+            segmentIndex: segment.index,
+            code:
+              error instanceof ScenePipelineError
+                ? error.code
+                : "scene_segment_invalid",
+            message: error instanceof Error ? error.message : "未知切片错误",
+            details:
+              error instanceof ScenePipelineError ? error.details : undefined,
+          });
+        }
+      } finally {
+        semaphore.release();
       }
-    }
+    };
+
+    // Promise.all 的结果顺序与输入一致，避免并发完成顺序打乱 segmentIndex。
+    const downloaded = await Promise.all(
+      splitManifest.segments.map(processSegment),
+    );
+
     if (invalid.length > 0) {
       throw new ScenePipelineError(
         "scene_segment_invalid",
@@ -146,11 +213,13 @@ export async function prepareSceneBatch(
 
     return {
       batchId,
-      serviceTaskId: manifest.taskId,
+      serviceTaskId: splitManifest.taskId,
       parentPath: input.normalizedParentPath,
-      durationSeconds: manifest.durationSeconds,
+      durationSeconds: splitManifest.durationSeconds,
       workspacePath,
-      segments: downloaded,
+      segments: downloaded.filter(
+        (segment): segment is PreparedSceneSegment => Boolean(segment),
+      ),
     };
   } catch (error) {
     await fs.rm(workspacePath, { recursive: true, force: true });

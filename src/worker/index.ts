@@ -8,6 +8,7 @@ import { loadConfig } from "@/server/config";
 import { OpenAICompatibleAnalyzer } from "@/server/model/analyzer";
 import { processJob } from "@/server/services/processing";
 import {
+  cleanupExpiredAnalysisWorkspaces,
   cleanupExpiredStaging,
   expireAbandonedUploadTasks,
 } from "@/server/services/staging-cleanup";
@@ -23,6 +24,26 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   stopping = true;
 });
+
+async function workerLoop(
+  workerId: number,
+  analyzer: OpenAICompatibleAnalyzer,
+  analyzeTaskSoftLimit: number,
+) {
+  const leaseOwner = `${process.pid}:${workerId}`;
+  while (!stopping) {
+    try {
+      const job = await claimNextJob(leaseOwner, { analyzeTaskSoftLimit });
+      if (job) {
+        await processJob(job, analyzer);
+        continue;
+      }
+    } catch (error) {
+      console.error(`Worker loop ${workerId} failed; retrying.`, error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+}
 
 async function main() {
   const config = loadConfig();
@@ -47,6 +68,7 @@ async function main() {
   }, recoveryIntervalMs);
   await Promise.all([
     cleanupExpiredStaging(),
+    cleanupExpiredAnalysisWorkspaces(),
     expireAbandonedUploadTasks(),
     deleteExpiredTasks(),
     reconcileActiveTaskLifecycles(),
@@ -54,13 +76,26 @@ async function main() {
   const cleanupTimer = setInterval(() => {
     void Promise.all([
       cleanupExpiredStaging(),
+      cleanupExpiredAnalysisWorkspaces(),
       expireAbandonedUploadTasks(),
       deleteExpiredTasks(),
       reconcileActiveTaskLifecycles(),
     ])
-      .then(([removedFiles, expiredUploads, removedTasks, reconciledTasks]) => {
+      .then(
+        ([
+          removedFiles,
+          removedAnalysisWorkspaces,
+          expiredUploads,
+          removedTasks,
+          reconciledTasks,
+        ]) => {
         if (removedFiles > 0) {
           console.log(`Removed ${removedFiles} expired staging task(s).`);
+        }
+        if (removedAnalysisWorkspaces > 0) {
+          console.log(
+            `Removed ${removedAnalysisWorkspaces} expired analysis workspace(s).`,
+          );
         }
         if (expiredUploads > 0) {
           console.log(`Marked ${expiredUploads} abandoned upload task(s) as failed.`);
@@ -71,7 +106,8 @@ async function main() {
         if (reconciledTasks > 0) {
           console.log(`Reconciled ${reconciledTasks} active task lifecycle(s).`);
         }
-      })
+        },
+      )
       .catch((error) => {
         console.error("Failed to clean expired staging files.", error);
       });
@@ -84,16 +120,17 @@ async function main() {
     config.models.llmCandidates.map((model) => model.name).join(" -> ") ||
     "not configured";
   console.log(
-    `Asset processing worker started (VLM chain: ${vlmChain}, LLM chain: ${llmChain}, VLM protocol: ${config.models.vlm.protocol}).`,
+    `Asset processing worker started (${config.WORKER_CONCURRENCY} concurrent loops, per-task analyze soft limit: ${config.WORKER_ANALYZE_TASK_SOFT_LIMIT}, validate priority enabled, VLM chain: ${vlmChain}, LLM chain: ${llmChain}, VLM protocol: ${config.models.vlm.protocol}).`,
   );
-  while (!stopping) {
-    const job = await claimNextJob();
-    if (job) {
-      await processJob(job, analyzer);
-      continue;
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
+  await Promise.all(
+    Array.from({ length: config.WORKER_CONCURRENCY }, (_, index) =>
+      workerLoop(
+        index + 1,
+        analyzer,
+        config.WORKER_ANALYZE_TASK_SOFT_LIMIT,
+      ),
+    ),
+  );
   clearInterval(recoveryTimer);
   clearInterval(cleanupTimer);
   console.log("Asset processing worker stopped.");

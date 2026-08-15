@@ -21,12 +21,56 @@ export interface PersistedSceneBatch {
 export interface PersistSceneBatchInput {
   batch: PreparedSceneBatch;
   storage: ObjectStorage;
+  /** ZOS 上传并发上限（默认 8）。 */
+  concurrency?: number;
   /**
    * 必须在一个 MySQL 事务内建立父视频与全部子素材，并只在事务提交后返回。
    * 回调抛错时，本函数会补偿删除本批已经上传的所有 ZOS 对象。
    */
   commitDatabase: (batch: PersistedSceneBatch) => Promise<void>;
   now?: Date;
+}
+
+class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new ScenePipelineError(
+        "scene_persistence_failed",
+        "ZOS 上传并发数必须是大于 0 的整数。",
+        { concurrency: limit },
+      );
+    }
+  }
+
+  private async acquire() {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    // release 会把当前许可直接转交给该 waiter，因此恢复后无需再次 +1。
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  private release() {
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    this.active -= 1;
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await operation();
+    } finally {
+      this.release();
+    }
+  }
 }
 
 function objectPrefix(now: Date, batchId: string) {
@@ -49,28 +93,33 @@ export async function persistSceneBatch(
   const prefix = objectPrefix(input.now ?? new Date(), input.batch.batchId);
   const uploaded: StoredObject[] = [];
   try {
-    const parentObject = await input.storage.storeFile({
+    const semaphore = new Semaphore(input.concurrency ?? 8);
+    const storeTracked = async (
+      request: Parameters<ObjectStorage["storeFile"]>[0],
+    ) =>
+      semaphore.run(async () => {
+        const object = await input.storage.storeFile(request);
+        uploaded.push(object);
+        return object;
+      });
+
+    const parentPromise = storeTracked({
       key: `${prefix}/parent.mp4`,
       filePath: input.batch.parentPath,
       contentType: "video/mp4",
     });
-    uploaded.push(parentObject);
-
-    const segments: PersistedSceneSegment[] = [];
-    for (const segment of input.batch.segments) {
-      const object = await input.storage.storeFile({
+    const segmentPromises = input.batch.segments.map(async (segment) => {
+      const object = await storeTracked({
         key: `${prefix}/segments/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.mp4`,
         filePath: segment.absolutePath,
         contentType: "video/mp4",
       });
-      uploaded.push(object);
-      const thumbnailObject = await input.storage.storeFile({
+      const thumbnailObject = await storeTracked({
         key: `${prefix}/thumbnails/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.jpg`,
         filePath: segment.thumbnailAbsolutePath,
         contentType: "image/jpeg",
       });
-      uploaded.push(thumbnailObject);
-      segments.push({
+      return {
         index: segment.index,
         startSeconds: segment.startSeconds,
         endSeconds: segment.endSeconds,
@@ -78,7 +127,29 @@ export async function persistSceneBatch(
         sizeBytes: object.sizeBytes,
         object,
         thumbnailObject,
-      });
+      };
+    });
+
+    // 等待所有已启动上传结束后再补偿删除，避免失败时仍有上传落盘形成孤儿对象。
+    const uploadResults = await Promise.allSettled([
+      parentPromise,
+      ...segmentPromises,
+    ]);
+    const failedUpload = uploadResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failedUpload) throw failedUpload.reason;
+
+    const parentObject = (
+      uploadResults[0] as PromiseFulfilledResult<StoredObject>
+    ).value;
+    const segments = uploadResults.slice(1).map(
+      (result) =>
+        (result as PromiseFulfilledResult<PersistedSceneSegment>).value,
+    );
+
+    if (segments.length !== input.batch.segments.length) {
+      throw new Error("ZOS 分片上传结果不完整。");
     }
 
     const persisted = { parentObject, segments };

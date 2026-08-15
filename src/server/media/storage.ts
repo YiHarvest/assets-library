@@ -22,6 +22,14 @@ export function assetRelativePath(assetId: string, extension: string) {
   return path.join(assetId, `original${extension.toLowerCase()}`);
 }
 
+export function analysisRelativePath(jobId: string, extension: string) {
+  return path.posix.join(
+    ".analysis",
+    jobId,
+    `original${extension.toLowerCase()}`,
+  );
+}
+
 export function resolveMediaPath(
   relativePath: string,
   configuredRoot = loadConfig().mediaRoot,
@@ -82,7 +90,7 @@ export function storeVideoFrames(
   }
 }
 
-export function readVideoFrames(
+export function readVideoFrameSet(
   originalRelativePath: string,
   configuredRoot = loadConfig().mediaRoot,
 ) {
@@ -101,7 +109,7 @@ export function readVideoFrames(
     ) {
       throw new Error("Invalid frame manifest.");
     }
-    return manifest.frames.map((frame) => {
+    const frames = manifest.frames.map((frame) => {
       if (
         !/^frame-\d{2}\.jpg$/.test(frame.filename) ||
         !Number.isFinite(frame.timestampSeconds) ||
@@ -118,9 +126,64 @@ export function readVideoFrames(
       }
       return { ...frame, absolutePath };
     });
+    return { durationSeconds: manifest.durationSeconds, frames };
   } catch {
     throw new AppError("video_frames_missing");
   }
+}
+
+export function readVideoFrames(
+  originalRelativePath: string,
+  configuredRoot = loadConfig().mediaRoot,
+) {
+  return readVideoFrameSet(originalRelativePath, configuredRoot).frames;
+}
+
+/**
+ * 把分镜阶段生成的关键帧原子复制到分析作业工作区。original 文件无需存在；
+ * readVideoFrames 只根据其父目录定位 frames 清单。
+ */
+export async function seedAnalysisVideoFrames(
+  jobId: string,
+  extension: string,
+  sourceFrameDirectory: string,
+  configuredRoot = loadConfig().mediaRoot,
+) {
+  const relativePath = analysisRelativePath(jobId, extension);
+  const originalPath = resolveMediaPath(relativePath, configuredRoot);
+  const workspace = path.dirname(originalPath);
+  const stagingWorkspace = `${workspace}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.promises.mkdir(stagingWorkspace, { recursive: true });
+    await fs.promises.cp(
+      sourceFrameDirectory,
+      path.join(stagingWorkspace, "frames"),
+      { recursive: true, errorOnExist: true },
+    );
+    await fs.promises.rm(workspace, { recursive: true, force: true });
+    await fs.promises.rename(stagingWorkspace, workspace);
+    // 用正式读取路径校验复制后的清单与帧，避免把损坏种子交给 worker。
+    readVideoFrames(relativePath, configuredRoot);
+    return { relativePath, workspace };
+  } catch (error) {
+    await fs.promises.rm(stagingWorkspace, { recursive: true, force: true });
+    await fs.promises.rm(workspace, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function removeAnalysisWorkspace(
+  jobId: string,
+  configuredRoot = loadConfig().mediaRoot,
+) {
+  const originalPath = resolveMediaPath(
+    analysisRelativePath(jobId, ".bin"),
+    configuredRoot,
+  );
+  await fs.promises.rm(path.dirname(originalPath), {
+    recursive: true,
+    force: true,
+  });
 }
 
 export function removeAssetFiles(relativePath: string) {

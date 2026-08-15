@@ -5,9 +5,11 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -27,6 +29,10 @@ import {
   tasks,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import {
+  canClaimAnalyzeTask,
+  DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
+} from "@/server/jobs/scheduling";
 import { searchAnalysis } from "@/server/search/chroma";
 import {
   analysisResultSchema,
@@ -1683,59 +1689,210 @@ export interface ClaimedJob {
   payload: Record<string, unknown> | null;
 }
 
-/**
- * 并发安全领取一个作业。SKIP LOCKED 允许多个 worker 横向扩展且互不阻塞。
- */
-export async function claimNextJob(
-  leaseOwner = `${process.pid}`,
+export interface ClaimNextJobOptions {
+  analyzeTaskSoftLimit?: number;
+}
+
+type JobTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type JobRow = typeof jobs.$inferSelect;
+
+const nonAnalysisClaimableTypes = [
+  "embed",
+  "delete",
+  "cleanup",
+  "callback",
+  "publish",
+  "update",
+  "retry",
+] as const;
+
+async function claimQueuedJob(
+  tx: JobTransaction,
+  row: JobRow,
+  leaseOwner: string,
+  now: Date,
 ): Promise<ClaimedJob | null> {
-  const now = new Date();
-  return db.transaction(
-    async (tx) => {
+  const attempt = row.attempt + 1;
+  const updated = await tx
+    .update(jobs)
+    .set({
+      status: "running",
+      claimedAt: now,
+      leaseOwner,
+      attempt,
+      updatedAt: now,
+    })
+    .where(and(eq(jobs.id, row.id), eq(jobs.status, "queued")));
+  if (affectedRows(updated) !== 1) return null;
+  return {
+    id: row.id,
+    taskId: row.taskId,
+    assetId: row.assetId,
+    type: row.type,
+    attempt,
+    payload: row.payload,
+  };
+}
+
+async function selectPriorityValidationJob(tx: JobTransaction, now: Date) {
+  const [row] = await tx
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.status, "queued"),
+        eq(jobs.type, "validate"),
+        sql`${jobs.availableAt} <= ${now}`,
+      ),
+    )
+    .orderBy(asc(jobs.createdAt))
+    .limit(1)
+    .for("update", { skipLocked: true });
+  return row ?? null;
+}
+
+/**
+ * 为分析作业锁定一个任务行后再计算并发数，确保多个 worker 同时领取时不会共同
+ * 穿透软上限。任务之间按最早等待作业排序；被其他 worker 锁定的任务直接跳过。
+ */
+async function selectFairAnalysisJob(
+  tx: JobTransaction,
+  now: Date,
+  softLimit: number,
+) {
+  const excludedTaskIds: string[] = [];
+  for (;;) {
+    const conditions: SQL[] = [
+      sql`exists (
+        select 1
+          from jobs as queued_analysis
+         where queued_analysis.task_id = ${tasks.id}
+           and queued_analysis.type = 'analyze'
+           and queued_analysis.status = 'queued'
+           and queued_analysis.available_at <= ${now}
+      )`,
+    ];
+    if (excludedTaskIds.length) {
+      conditions.push(notInArray(tasks.id, excludedTaskIds));
+    }
+    const [candidateTask] = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(...conditions))
+      .orderBy(
+        sql`(
+          select min(queued_analysis.created_at)
+            from jobs as queued_analysis
+           where queued_analysis.task_id = ${tasks.id}
+             and queued_analysis.type = 'analyze'
+             and queued_analysis.status = 'queued'
+             and queued_analysis.available_at <= ${now}
+        )`,
+      )
+      .limit(1)
+      .for("update", { skipLocked: true });
+    if (!candidateTask) return null;
+
+    const [runningRow] = await tx
+      .select({ value: sql<number>`count(*)`.mapWith(Number) })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.taskId, candidateTask.id),
+          eq(jobs.type, "analyze"),
+          eq(jobs.status, "running"),
+        ),
+      );
+    const [competingJob] = await tx
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.type, "analyze"),
+          eq(jobs.status, "queued"),
+          sql`${jobs.availableAt} <= ${now}`,
+          isNotNull(jobs.taskId),
+          ne(jobs.taskId, candidateTask.id),
+        ),
+      )
+      .limit(1);
+    if (
+      canClaimAnalyzeTask(
+        runningRow?.value ?? 0,
+        Boolean(competingJob),
+        softLimit,
+      )
+    ) {
       const [row] = await tx
         .select()
         .from(jobs)
         .where(
           and(
+            eq(jobs.taskId, candidateTask.id),
+            eq(jobs.type, "analyze"),
             eq(jobs.status, "queued"),
-            inArray(jobs.type, [
-              "validate",
-              "analyze",
-              "embed",
-              "delete",
-              "cleanup",
-              "callback",
-              "publish",
-              "update",
-              "retry",
-            ]),
             sql`${jobs.availableAt} <= ${now}`,
           ),
         )
         .orderBy(asc(jobs.createdAt))
         .limit(1)
         .for("update", { skipLocked: true });
-      if (!row) return null;
-      const attempt = row.attempt + 1;
-      const updated = await tx
-        .update(jobs)
-        .set({
-          status: "running",
-          claimedAt: now,
-          leaseOwner,
-          attempt,
-          updatedAt: now,
-        })
-        .where(and(eq(jobs.id, row.id), eq(jobs.status, "queued")));
-      if (affectedRows(updated) !== 1) return null;
-      return {
-        id: row.id,
-        taskId: row.taskId,
-        assetId: row.assetId,
-        type: row.type,
-        attempt,
-        payload: row.payload,
-      };
+      if (row) return row;
+    }
+    excludedTaskIds.push(candidateTask.id);
+  }
+}
+
+async function selectOtherQueuedJob(tx: JobTransaction, now: Date) {
+  const [row] = await tx
+    .select()
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.status, "queued"),
+        or(
+          inArray(jobs.type, nonAnalysisClaimableTypes),
+          and(eq(jobs.type, "analyze"), isNull(jobs.taskId)),
+        ),
+        sql`${jobs.availableAt} <= ${now}`,
+      ),
+    )
+    .orderBy(asc(jobs.createdAt))
+    .limit(1)
+    .for("update", { skipLocked: true });
+  return row ?? null;
+}
+
+/**
+ * 并发安全领取一个作业：validate 始终优先；其余类型保持 FIFO；多个任务竞争时，
+ * analyze 按任务执行软并发上限，单任务独占队列时可突发使用全部全局 worker。
+ */
+export async function claimNextJob(
+  leaseOwner = `${process.pid}`,
+  options: ClaimNextJobOptions = {},
+): Promise<ClaimedJob | null> {
+  const now = new Date();
+  const softLimit =
+    options.analyzeTaskSoftLimit ?? DEFAULT_ANALYZE_TASK_SOFT_LIMIT;
+  if (!Number.isInteger(softLimit) || softLimit < 1) {
+    throw new Error("analyzeTaskSoftLimit 必须是大于 0 的整数。");
+  }
+  return db.transaction(
+    async (tx) => {
+      const validation = await selectPriorityValidationJob(tx, now);
+      if (validation) {
+        return claimQueuedJob(tx, validation, leaseOwner, now);
+      }
+
+      const analysis = await selectFairAnalysisJob(tx, now, softLimit);
+      const other = await selectOtherQueuedJob(tx, now);
+      const row =
+        analysis && other
+          ? analysis.createdAt.getTime() <= other.createdAt.getTime()
+            ? analysis
+            : other
+          : (analysis ?? other);
+      return row ? claimQueuedJob(tx, row, leaseOwner, now) : null;
     },
     { isolationLevel: "read committed" },
   );

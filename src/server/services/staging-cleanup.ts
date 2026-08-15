@@ -11,11 +11,10 @@ import {
 
 export const stagingRetentionMs = 24 * 60 * 60 * 1_000;
 
-/** 每小时扫描一次；仅删除超过配置保留期的 staging 文件。 */
-export async function cleanupExpiredStaging(
-  now = Date.now(),
-  root = path.join(loadConfig().mediaRoot, ".staging"),
-  retentionMs = loadConfig().STAGING_RETENTION_HOURS * 60 * 60 * 1_000,
+async function cleanupExpiredDirectories(
+  now: number,
+  root: string,
+  retentionMs: number,
 ) {
   let entries: string[];
   try {
@@ -33,6 +32,27 @@ export async function cleanupExpiredStaging(
     removed += 1;
   }
   return removed;
+}
+
+/** 每小时扫描一次；仅删除超过配置保留期的 staging 文件。 */
+export function cleanupExpiredStaging(
+  now = Date.now(),
+  root = path.join(loadConfig().mediaRoot, ".staging"),
+  retentionMs = loadConfig().STAGING_RETENTION_HOURS * 60 * 60 * 1_000,
+) {
+  return cleanupExpiredDirectories(now, root, retentionMs);
+}
+
+/**
+ * 清理未被正常消费的分析关键帧工作区。正常作业会在完成或失败后立即删除；
+ * 这里兜底处理进程崩溃、作业被取消等情况留下的目录。
+ */
+export function cleanupExpiredAnalysisWorkspaces(
+  now = Date.now(),
+  root = path.join(loadConfig().mediaRoot, ".analysis"),
+  retentionMs = loadConfig().STAGING_RETENTION_HOURS * 60 * 60 * 1_000,
+) {
+  return cleanupExpiredDirectories(now, root, retentionMs);
 }
 
 /**

@@ -98,6 +98,7 @@ function body(bytes: Uint8Array) {
 /** CI 中的 ZOS 替身保存真实媒体字节，并提供与生产适配器相同的下载语义。 */
 class MemoryObjectStorage implements ObjectStorage {
   readonly objects = new Map<string, { bytes: Buffer; contentType: string }>();
+  readonly downloads: string[] = [];
 
   async storeFile(input: StoreFileInput) {
     const bytes = await fs.readFile(input.filePath);
@@ -134,6 +135,7 @@ class MemoryObjectStorage implements ObjectStorage {
   }
 
   async downloadToFile(key: string, destinationPath: string) {
+    this.downloads.push(key);
     const object = this.required(key);
     await fs.mkdir(path.dirname(destinationPath), { recursive: true });
     await fs.writeFile(destinationPath, object.bytes);
@@ -475,7 +477,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(assetRows.every((row) => row.processingStatus === "completed")).toBe(true);
     expect(analysisRows).toHaveLength(2);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);
-    expect(framePreparation).toHaveBeenCalledTimes(2);
+    expect(framePreparation).not.toHaveBeenCalled();
+    expect(storage.downloads).toEqual([]);
     expect(storage.objects.size).toBe(5); // 1 个父对象 + 2 个切片 + 2 张首帧
     for (const asset of assetRows) {
       const [thumbnail] = await database.db

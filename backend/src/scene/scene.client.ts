@@ -30,8 +30,48 @@ const manifestSchema = z.object({
   }
 });
 
+const enqueueSchema = z.object({
+  taskId: z.string().regex(/^[0-9a-f]{32}$/i),
+  status: z.enum(["queued", "processing", "done", "failed", "cancelled"]),
+});
+
+const statusSchema = enqueueSchema.extend({
+  originalFilename: z.string().min(1).nullish(),
+  error: z.object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+    details: z.unknown().optional(),
+  }).nullish(),
+  durationSeconds: z.number().positive().nullish(),
+  sceneCount: z.number().int().positive().nullish(),
+  segments: z.array(sceneSegmentSchema).nullish(),
+});
+
 export type SceneManifest = z.infer<typeof manifestSchema>;
 export type SceneSegment = z.infer<typeof sceneSegmentSchema>;
+
+function requestSignal(timeoutMs: number, externalSignal?: AbortSignal) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return externalSignal ? AbortSignal.any([externalSignal, timeout]) : timeout;
+}
+
+function delay(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal?.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function safeDownloadUrl(raw: string, base: URL) {
   const target = new URL(raw, base);
@@ -46,18 +86,56 @@ export class SceneClient {
   private readonly base = new URL(this.config.SCENE_DETECT_BASE_URL);
 
   async split(bytes: Buffer, filename: string, externalSignal?: AbortSignal) {
+    const deadline = Date.now() + this.config.SCENE_DETECT_TIMEOUT_MS;
     const form = new FormData();
     form.set("file", new Blob([new Uint8Array(bytes)], { type: "video/mp4" }), filename);
-    const response = await fetch(new URL("/api/v1/videos/split", this.base), {
-      method: "POST", body: form, redirect: "manual", signal: externalSignal ? AbortSignal.any([externalSignal, AbortSignal.timeout(this.config.SCENE_DETECT_TIMEOUT_MS)]) : AbortSignal.timeout(this.config.SCENE_DETECT_TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`分镜服务返回 HTTP ${response.status}。`);
-    return manifestSchema.parse(await response.json());
+    let taskId: string | undefined;
+    let completed = false;
+    try {
+      const response = await fetch(new URL("/api/v1/videos/split", this.base), {
+        method: "POST", body: form, redirect: "manual",
+        signal: requestSignal(this.config.SCENE_DETECT_TIMEOUT_MS, externalSignal),
+      });
+      if (!response.ok) throw new Error(`分镜服务提交任务失败：HTTP ${response.status}。`);
+      taskId = enqueueSchema.parse(await response.json()).taskId;
+
+      while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error(`分镜任务 ${taskId} 等待超时。`);
+        const statusResponse = await fetch(new URL(`/api/v1/videos/split/${taskId}`, this.base), {
+          redirect: "manual",
+          signal: requestSignal(Math.min(remaining, 30_000), externalSignal),
+        });
+        if (!statusResponse.ok) throw new Error(`查询分镜任务 ${taskId} 失败：HTTP ${statusResponse.status}。`);
+        const state = statusSchema.parse(await statusResponse.json());
+        if (state.status === "done") {
+          const manifest = manifestSchema.parse({
+            taskId: state.taskId,
+            originalFilename: state.originalFilename ?? undefined,
+            durationSeconds: state.durationSeconds,
+            sceneCount: state.sceneCount,
+            segments: state.segments,
+          });
+          completed = true;
+          return manifest;
+        }
+        if (state.status === "failed") throw new Error(`分镜任务失败：${state.error?.message ?? "未知错误"}`);
+        if (state.status === "cancelled") throw new Error("分镜任务已取消。");
+        await delay(Math.min(this.config.SCENE_DETECT_POLL_INTERVAL_MS, remaining), externalSignal);
+      }
+    } finally {
+      // 上游超时、退出或清单非法时取消远端任务，避免工作区长期遗留半成品。
+      if (taskId && !completed) {
+        await fetch(new URL(`/api/v1/videos/split/${taskId}`, this.base), {
+          method: "DELETE", redirect: "manual", signal: AbortSignal.timeout(5_000),
+        }).catch(() => undefined);
+      }
+    }
   }
 
   async download(segment: SceneManifest["segments"][number], externalSignal?: AbortSignal) {
     if (segment.sizeBytes > this.config.SCENE_SEGMENT_MAX_BYTES) throw new Error(`切片 ${segment.index} 超过大小限制。`);
-    const response = await fetch(safeDownloadUrl(segment.downloadUrl, this.base), { redirect: "manual", signal: externalSignal ? AbortSignal.any([externalSignal, AbortSignal.timeout(this.config.SCENE_DETECT_TIMEOUT_MS)]) : AbortSignal.timeout(this.config.SCENE_DETECT_TIMEOUT_MS) });
+    const response = await fetch(safeDownloadUrl(segment.downloadUrl, this.base), { redirect: "manual", signal: requestSignal(this.config.SCENE_DETECT_TIMEOUT_MS, externalSignal) });
     if (!response.ok) throw new Error(`切片 ${segment.index} 下载失败：HTTP ${response.status}。`);
     const contentLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(contentLength) && contentLength !== segment.sizeBytes) throw new Error(`切片 ${segment.index} Content-Length 不一致。`);

@@ -5,6 +5,18 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import * as schema from "./schema";
 
+export function databasePoolConnectionOptions(poolSize: number) {
+  return {
+    // mysql2 only starts its idle-connection reaper when maxIdle is strictly
+    // smaller than connectionLimit. Without this, a connection closed by the
+    // MySQL server can remain in a quiet pool and fail the next transaction.
+    maxIdle: Math.max(0, poolSize - 1),
+    idleTimeout: 60_000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+  } as const;
+}
+
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
   readonly pool: Pool;
@@ -24,6 +36,7 @@ export class DatabaseService implements OnModuleDestroy {
     this.pool = createPool({
       uri: databaseUrl,
       connectionLimit: poolSize,
+      ...databasePoolConnectionOptions(poolSize),
       timezone: "Z",
       ...(resolvedSslCaPath
         ? { ssl: { ca: readFileSync(resolvedSslCaPath, "utf8"), rejectUnauthorized: true } }

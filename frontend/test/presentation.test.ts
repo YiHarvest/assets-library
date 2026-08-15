@@ -4,6 +4,7 @@ import {
   BACKEND_REQUEST_TIMEOUT_MS,
   friendlyServerApiError,
 } from "../src/lib/api-errors";
+import { apiFailureMessage, decodeApiResponse } from "../src/lib/api-response";
 import { groupDisplayTags } from "../src/lib/asset-tags";
 import { withUserScope } from "../src/lib/user-scope";
 
@@ -43,5 +44,28 @@ test("server API uses the agreed one-minute timeout and friendly errors", () => 
   assert.equal(
     friendlyServerApiError(new DOMException("raw abort", "AbortError")).message,
     "请求已取消，请稍后重试。",
+  );
+});
+
+test("browser API converts a plain-text proxy 500 into a useful error", async () => {
+  const decoded = await decodeApiResponse(new Response("Internal Server Error", {
+    status: 500,
+    headers: { "content-type": "text/plain" },
+  }));
+  assert.equal(decoded.invalidJson, true);
+  assert.equal(
+    apiFailureMessage(decoded.payload, 500, decoded.invalidJson),
+    "后端服务暂时不可用，请稍后重试（HTTP 500）。",
+  );
+});
+
+test("browser API preserves structured backend error messages", async () => {
+  const decoded = await decodeApiResponse(new Response(JSON.stringify({
+    error: { code: "invalid_request", message: "上传清单无效。" },
+  }), { status: 400 }));
+  assert.equal(decoded.invalidJson, false);
+  assert.equal(
+    apiFailureMessage(decoded.payload, 400, decoded.invalidJson),
+    "上传清单无效。",
   );
 });

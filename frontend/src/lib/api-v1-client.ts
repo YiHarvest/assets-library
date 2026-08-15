@@ -1,4 +1,5 @@
 import { PUBLIC_BASE_PATH } from "@/lib/base-path";
+import { apiFailureMessage, decodeApiResponse } from "@/lib/api-response";
 import { reportBrowserEvent } from "@/lib/browser-observability";
 import {
   createOperationId,
@@ -7,10 +8,6 @@ import {
   type TelemetryMetadata,
 } from "@/lib/observability-core";
 import type { TaskAccepted, TaskResponse } from "@/shared/contracts";
-
-interface ApiFailure {
-  error?: { message?: string };
-}
 
 export const UI_API_V1 = `${PUBLIC_BASE_PATH}/api/v1`;
 
@@ -87,7 +84,7 @@ export async function uiApi<T>(path: string, options: UiApiOptions = {}) {
       },
       cache: "no-store",
     });
-    const payload = response.status === 204 ? null : await response.json();
+    const { payload, invalidJson } = await decodeApiResponse(response);
     if (!response.ok) {
       void reportBrowserEvent({
         operationId,
@@ -104,10 +101,10 @@ export async function uiApi<T>(path: string, options: UiApiOptions = {}) {
         },
       });
       failureReported = true;
-      throw new Error(
-        (payload as ApiFailure | null)?.error?.message ??
-          `操作失败（HTTP ${response.status}）。`,
-      );
+      throw new Error(apiFailureMessage(payload, response.status, invalidJson));
+    }
+    if (invalidJson) {
+      throw new Error(`后端返回了无法识别的数据（HTTP ${response.status}）。`);
     }
     void reportBrowserEvent({
       operationId,

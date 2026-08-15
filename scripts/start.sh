@@ -470,10 +470,12 @@ show_scene_failure() {
       WORKSPACE_ROOT="$SCENE_WORKSPACE_ROOT" \
       MAX_UPLOAD_BYTES="${MAX_VIDEO_BYTES:-209715200}" \
       TASK_TTL_SECONDS="${SCENE_DETECT_TASK_TTL_SECONDS:-86400}" \
+      QUEUE_MAX_WORKERS="${SCENE_DETECT_MAX_WORKERS:-2}" \
       uv run --project "$SCENE_PROJECT_ROOT" \
       python "$SCENE_PROJECT_ROOT/main.py" \
       --host 127.0.0.1 \
       --port "$SCENE_DETECT_PORT" \
+      --workers 1 \
       9>&- > >(log_sink scene) 2>&1 &
     scene_pid=$!
     echo "$scene_pid" > "$SCENE_PID_FILE"

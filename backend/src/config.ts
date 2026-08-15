@@ -62,7 +62,9 @@ const envSchema = z.object({
   EMBEDDING_MODEL: z.string().optional(),
   SCENE_DETECT_BASE_URL: z.url().default("http://127.0.0.1:28200"),
   SCENE_HEALTH_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(DEFAULT_SCENE_HEALTH_TIMEOUT_MS),
-  SCENE_DETECT_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  // 异步分镜的总预算包含上传、排队和执行时间。
+  SCENE_DETECT_TIMEOUT_MS: z.coerce.number().int().positive().default(600000),
+  SCENE_DETECT_POLL_INTERVAL_MS: z.coerce.number().int().min(200).max(10000).default(1000),
   SCENE_SEGMENT_MAX_BYTES: z.coerce.number().int().positive().default(DEFAULT_SCENE_SEGMENT_MAX_BYTES),
   FFMPEG_PATH: z.string().default("ffmpeg"),
   FFPROBE_PATH: z.string().default("ffprobe"),

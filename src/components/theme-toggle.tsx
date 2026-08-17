@@ -16,7 +16,11 @@ function applyTheme(mode: ThemeMode) {
     mode === "dark" ||
     (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme = isDark ? "dark" : "light";
-  localStorage.setItem("theme-mode", mode);
+  try {
+    localStorage.setItem("theme-mode", mode);
+  } catch {
+    // 非安全上下文（http + IP）下 localStorage 不可用，忽略。
+  }
 }
 
 export function ThemeToggle() {
@@ -24,7 +28,12 @@ export function ThemeToggle() {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("theme-mode");
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem("theme-mode");
+    } catch {
+      // 非安全上下文（http + IP）下 localStorage 不可用，忽略。
+    }
     const next = saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
     setMode(next);
     applyTheme(next);

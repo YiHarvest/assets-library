@@ -30,12 +30,39 @@ function fileTooLargeError(
   );
 }
 
+function storageError(filePath: string, error: unknown) {
+  const errno = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+  const originalMessage =
+    error instanceof Error ? error.message : String(error ?? "未知错误");
+  return new AppError(
+    "storage_error",
+    undefined,
+    500,
+    { errno, path: filePath, originalMessage },
+    { cause: error },
+  );
+}
+
+/**
+ * 读取文件大小。
+ *
+ * 文件刚经原子落盘（.uploading 临时文件 + fsync + rename）时，存储层瞬时
+ * 抖动会让 stat 短暂报 ENOENT，这里先短重试几次；仍失败时把底层 errno、
+ * 路径和原始信息随 AppError.details 透传，避免再次出现无法定位的诊断黑洞。
+ */
 export async function mediaSize(filePath: string) {
-  try {
-    return (await fs.promises.stat(filePath)).size;
-  } catch {
-    throw new AppError("storage_error");
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return (await fs.promises.stat(filePath)).size;
+    } catch (error) {
+      lastError = error;
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (errno !== "ENOENT" || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
   }
+  throw storageError(filePath, lastError);
 }
 
 export async function mediaSizeOrZero(filePath: string) {

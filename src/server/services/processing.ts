@@ -289,6 +289,7 @@ async function failJobAndMarkAsset(job: ClaimedJob, error: unknown) {
         status: "failed",
         errorCode: appError.code,
         errorMessage: appError.message,
+        errorDetails: appError.details ?? null,
         updatedAt: now,
       })
       .where(

@@ -1981,20 +1981,50 @@ export async function requeueFailedEmbeddingJobs() {
   return affectedRows(result);
 }
 
+/** recoverStaleJobs 单批最多处理的行数，避免单次范围 UPDATE 长时间持锁。 */
+const STALE_JOB_BATCH_SIZE = 50;
+
+/**
+ * 把超时仍处于 running 的作业重置为 queued，供其他 worker 重新领取。
+ *
+ * 原实现用一次范围 UPDATE（status + claimedAt 区间）锁定大批行，与并发的
+ * 作业 INSERT 事务互锁导致偶发死锁（1213/1205）。这里改为在单个事务里用
+ * FOR UPDATE SKIP LOCKED 分批选中要恢复的作业，再按主键逐行 UPDATE，
+ * 锁粒度从索引区间缩小到单行，且 SKIP LOCKED 让已被领取的行直接跳过。
+ */
 export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
   const now = new Date();
   const stale = new Date(now.getTime() - staleAfterMs);
-  const result = await db
-    .update(jobs)
-    .set({
-      status: "queued",
-      claimedAt: null,
-      leaseOwner: null,
-      availableAt: now,
-      updatedAt: now,
-    })
-    .where(and(eq(jobs.status, "running"), lt(jobs.claimedAt, stale)));
-  return affectedRows(result);
+  let recovered = 0;
+  for (;;) {
+    const batch = await db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(and(eq(jobs.status, "running"), lt(jobs.claimedAt, stale)))
+        .orderBy(asc(jobs.claimedAt))
+        .limit(STALE_JOB_BATCH_SIZE)
+        .for("update", { skipLocked: true });
+      let updated = 0;
+      for (const row of rows) {
+        const result = await tx
+          .update(jobs)
+          .set({
+            status: "queued",
+            claimedAt: null,
+            leaseOwner: null,
+            availableAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(jobs.id, row.id), eq(jobs.status, "running")));
+        updated += affectedRows(result);
+      }
+      return updated;
+    });
+    if (batch === 0) break;
+    recovered += batch;
+  }
+  return recovered;
 }
 
 /**

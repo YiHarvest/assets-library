@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { ZodError, type ZodType } from "zod";
 import { ApiV1Error } from "@/server/api/errors";
+import { isDeadlockError } from "@/server/db/retry";
 import type {
   ApiErrorDetail,
   ApiV1ErrorCode,
@@ -64,7 +65,13 @@ export function apiV1ErrorResponse(
             400,
           )
         : inheritedServiceError(error) ??
-          new ApiV1Error("internal_error", "系统处理失败，请稍后重试。", 500);
+          (isDeadlockError(error)
+            ? new ApiV1Error(
+                "conflict",
+                "操作冲突，请稍后重试。",
+                409,
+              )
+            : new ApiV1Error("internal_error", "系统处理失败，请稍后重试。", 500));
   const payload: ApiV1ErrorResponse = {
     error: {
       code: normalized.code,

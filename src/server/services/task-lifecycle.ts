@@ -31,7 +31,11 @@ export function persistedTaskError(error: unknown): PersistedTaskError {
     return { code: error.code, message: error.message, details: error.details };
   }
   if (error instanceof AppError) {
-    return { code: error.code, message: error.message };
+    return {
+      code: error.code,
+      message: error.message,
+      details: error.details,
+    };
   }
   return {
     code: "internal_error",

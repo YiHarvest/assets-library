@@ -120,6 +120,100 @@ async function extractFrame(
   }
 }
 
+/** 探测视频平均帧率（CFR 下与 r_frame_rate 相同；VFR 取平均）。 */
+async function probeFrameRate(inputPath: string): Promise<number> {
+  const { stdout } = await run("ffprobe", [
+    "-v",
+    "error",
+    "-select_streams",
+    "V:0",
+    "-show_entries",
+    "stream=r_frame_rate:stream=avg_frame_rate",
+    "-of",
+    "default=noprint_wrappers=1:nokey=1",
+    inputPath,
+  ]);
+  const parseRate = (value: string) => {
+    const [numerator, denominator] = value.split("/").map(Number);
+    if (!numerator || numerator <= 0) return null;
+    return denominator ? numerator / denominator : numerator;
+  };
+  const [rFrameRate, avgFrameRate] = stdout.trim().split("\n");
+  return parseRate(avgFrameRate) ?? parseRate(rFrameRate) ?? 30;
+}
+
+/**
+ * 用单次 FFmpeg 进程批量抽取关键帧（select 滤镜按帧号挑选），替代逐帧
+ * 启动进程的串行方式。输出文件名按时间戳顺序编号 frame-01.jpg ...。
+ * 允许少量帧号取整误差；调用方需校验输出数量并按数量回退。
+ */
+async function extractFramesBatch(
+  inputPath: string,
+  outputDirectory: string,
+  timestamps: number[],
+): Promise<number[]> {
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  const frameRate = await probeFrameRate(inputPath);
+  const frameNumbers = timestamps.map((timestamp) =>
+    Math.max(0, Math.round(timestamp * frameRate)),
+  );
+  // 帧号去重：select 条件重复只会选中一次，输出数量会少于期望。
+  const uniqueFrameNumbers = [...new Set(frameNumbers)];
+  const selectExpression = uniqueFrameNumbers
+    .map((frame) => `eq(n\\,${frame})`)
+    .join("+");
+  const outputTemplate = path.join(outputDirectory, "frame-%02d.jpg");
+  const commandArguments = (hardwareArguments: string[]) => [
+    "-nostdin",
+    "-v",
+    "error",
+    ...hardwareArguments,
+    "-i",
+    inputPath,
+    "-map",
+    "0:V:0",
+    "-vf",
+    `select='${selectExpression}',scale=w='min(640,iw)':h=-2`,
+    "-vsync",
+    "vfr",
+    "-q:v",
+    "4",
+    "-f",
+    "image2",
+    "-y",
+    outputTemplate,
+  ];
+  try {
+    const hardwareArguments = await cudaDecodeArgs();
+    try {
+      await run("ffmpeg", commandArguments(hardwareArguments));
+    } catch (error) {
+      if (
+        hardwareArguments.length === 0 ||
+        loadConfig().FFMPEG_HW_ACCEL !== "auto"
+      ) {
+        throw error;
+      }
+      cudaDecodeAvailable = false;
+      await run("ffmpeg", commandArguments([]));
+    }
+  } catch (error) {
+    throw error;
+  }
+  const outputSizes: number[] = [];
+  for (let index = 0; index < uniqueFrameNumbers.length; index += 1) {
+    const outputPath = path.join(
+      outputDirectory,
+      `frame-${String(index + 1).padStart(2, "0")}.jpg`,
+    );
+    if (!fs.existsSync(outputPath)) break;
+    const sizeBytes = fs.statSync(outputPath).size;
+    if (sizeBytes <= 0) break;
+    outputSizes.push(sizeBytes);
+  }
+  return outputSizes;
+}
+
 /**
  * 抽取视频的第一张可解码画面，供素材列表缩略图长期持久化。
  *
@@ -176,14 +270,30 @@ export async function extractVideoFramesToDirectory(
   try {
     fs.mkdirSync(stagingDirectory, { recursive: true });
     const frames: VideoFrameManifest["frames"] = [];
-    for (const [index, timestampSeconds] of metadata.timestamps.entries()) {
-      const filename = `frame-${String(index + 1).padStart(2, "0")}.jpg`;
-      await extractFrame(
-        inputPath,
-        path.join(stagingDirectory, filename),
-        timestampSeconds,
-      );
-      frames.push({ filename, timestampSeconds });
+    const batchSizes = await extractFramesBatch(
+      inputPath,
+      stagingDirectory,
+      metadata.timestamps,
+    );
+    if (batchSizes.length === metadata.timestamps.length) {
+      for (const [index, timestampSeconds] of metadata.timestamps.entries()) {
+        frames.push({
+          filename: `frame-${String(index + 1).padStart(2, "0")}.jpg`,
+          timestampSeconds,
+        });
+      }
+    } else {
+      // 批量抽帧输出数量不符（如帧号取整碰撞或滤镜异常），回退逐帧抽帧。
+      for (const [index, timestampSeconds] of metadata.timestamps.entries()) {
+        const filename = `frame-${String(index + 1).padStart(2, "0")}.jpg`;
+        await extractFrame(
+          inputPath,
+          path.join(stagingDirectory, filename),
+          timestampSeconds,
+        );
+        frames.push({ filename, timestampSeconds });
+      }
+      fs.rmSync(path.join(stagingDirectory, "frame-%02d.jpg"), { force: true });
     }
     const manifest = {
       durationSeconds: metadata.durationSeconds,
@@ -208,7 +318,27 @@ export async function extractVideoFrames(inputPath: string): Promise<{
 }> {
   const metadata = await videoFrameMetadata(inputPath);
   const uploads: Array<{ temporaryPath: string; timestampSeconds: number }> = [];
+  const batchDirectory = temporaryUploadPath(crypto.randomUUID());
   try {
+    const batchSizes = await extractFramesBatch(
+      inputPath,
+      batchDirectory,
+      metadata.timestamps,
+    );
+    if (batchSizes.length === metadata.timestamps.length) {
+      for (const [index, timestampSeconds] of metadata.timestamps.entries()) {
+        const temporaryPath = temporaryUploadPath(crypto.randomUUID());
+        fs.renameSync(
+          path.join(batchDirectory, `frame-${String(index + 1).padStart(2, "0")}.jpg`),
+          temporaryPath,
+        );
+        uploads.push({ temporaryPath, timestampSeconds });
+      }
+      fs.rmSync(batchDirectory, { recursive: true, force: true });
+      return { uploads, metadata };
+    }
+    fs.rmSync(batchDirectory, { recursive: true, force: true });
+    // 批量抽帧数量不符时回退逐帧抽帧。
     for (const timestampSeconds of metadata.timestamps) {
       const temporaryPath = temporaryUploadPath(crypto.randomUUID());
       uploads.push({ temporaryPath, timestampSeconds });
@@ -216,6 +346,7 @@ export async function extractVideoFrames(inputPath: string): Promise<{
     }
     return { uploads, metadata };
   } catch (error) {
+    fs.rmSync(batchDirectory, { recursive: true, force: true });
     for (const frame of uploads) {
       try { fs.rmSync(frame.temporaryPath, { force: true }); } catch { /* best effort */ }
     }

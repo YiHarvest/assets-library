@@ -121,9 +121,10 @@ export async function prepareSceneBatch(
     const splitManifest = manifest as SceneSplitManifest;
     const tooLarge = oversizeSegments(splitManifest, input.maximumSegmentBytes);
     if (tooLarge.length > 0) {
+      const limitText = `${Math.round(input.maximumSegmentBytes / 1024 / 1024)} MiB`;
       throw new ScenePipelineError(
         "scene_segment_too_large",
-        `${tooLarge.length} 个视频切片超过 10 MiB 限制，父视频整批不入库。`,
+        `${tooLarge.length} 个视频切片超过 ${limitText} 限制，父视频整批不入库。`,
         { segments: tooLarge },
       );
     }

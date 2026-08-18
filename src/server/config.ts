@@ -126,6 +126,8 @@ const envSchema = z
     ZOS_INTERNAL_URL: z.string().url().optional().or(z.literal("")),
     ZOS_FORCE_PATH_STYLE: booleanSchema.default(true),
     ZOS_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    // 开启后授权删除失败时跳过 ZOS 对象清理，仅回收数据库记录（用于无删除权限的 key 场景）。
+    ZOS_DELETE_BEST_EFFORT: optionalBooleanSchema,
     VLM_PROTOCOL: modelProtocolSchema.default("openai_chat_completions"),
     VLM_BASE_URL: z.string().url().optional().or(z.literal("")),
     VLM_API_KEY: z.string().optional(),

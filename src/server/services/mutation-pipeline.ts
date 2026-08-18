@@ -8,6 +8,7 @@ import {
   tasks,
   videoSources,
 } from "@/server/db/schema";
+import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import {
   completeJob,
@@ -310,6 +311,27 @@ async function finalizePublicAssetDeletion(
   });
 }
 
+/**
+ * 开关 ZOS_DELETE_BEST_EFFORT=true 时，对象删除失败只告警不抛出，
+ * 硬删除仅回收数据库记录；未开启时保持原有的严格删除语义。
+ */
+async function deleteObjectBestEffort(
+  storage: ObjectStorage,
+  key: string | undefined,
+  bestEffort: boolean,
+) {
+  if (!key) return;
+  try {
+    await storage.deleteObject(key);
+  } catch (error) {
+    if (bestEffort) {
+      console.warn(`跳过 ZOS 对象删除（ZOS_DELETE_BEST_EFFORT）：${key}`, error);
+      return;
+    }
+    throw error;
+  }
+}
+
 async function hardDeletePublicAsset(
   assetId: string,
   storage: ObjectStorage,
@@ -318,16 +340,21 @@ async function hardDeletePublicAsset(
   if (record.alreadyGone) {
     return { released_to_public: false, parent_video_reclaimed: false };
   }
+  const bestEffort = loadConfig().ZOS_DELETE_BEST_EFFORT === "true";
 
   // 外部对象先幂等删除；若进程中断，隐藏的 deleted 行可由同一任务重试收尾。
   await deleteAnalysis(assetId);
-  if (record.object) await storage.deleteObject(record.object.objectKey);
-  if (record.thumbnailObject) {
-    await storage.deleteObject(record.thumbnailObject.objectKey);
-  }
-  if (record.parent?.object) {
-    await storage.deleteObject(record.parent.object.objectKey);
-  }
+  await deleteObjectBestEffort(storage, record.object?.objectKey, bestEffort);
+  await deleteObjectBestEffort(
+    storage,
+    record.thumbnailObject?.objectKey,
+    bestEffort,
+  );
+  await deleteObjectBestEffort(
+    storage,
+    record.parent?.object?.objectKey,
+    bestEffort,
+  );
 
   await finalizePublicAssetDeletion(assetId, record);
   return { released_to_public: false, parent_video_reclaimed: Boolean(record.parent) };

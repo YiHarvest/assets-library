@@ -6,7 +6,6 @@ import {
 } from "@/server/api/handler";
 import { getApiV1Service } from "@/server/api/v1/service";
 import { scopeFromRequest } from "@/server/api/v1/scope";
-import { apiV1Path } from "@/lib/paths";
 import {
   mutationContextSchema,
   updateAssetTaskSchema,
@@ -40,7 +39,7 @@ export async function PATCH(request: Request, context: Context) {
     return Response.json(task, {
       status: 202,
       headers: {
-        location: apiV1Path(`/tasks/${task.task_id}`),
+        location: `/api/v1/tasks/${task.task_id}`,
         "cache-control": "no-store",
       },
     });
@@ -58,7 +57,7 @@ export async function DELETE(request: Request, context: Context) {
     return Response.json(task, {
       status: 202,
       headers: {
-        location: apiV1Path(`/tasks/${task.task_id}`),
+        location: `/api/v1/tasks/${task.task_id}`,
         "cache-control": "no-store",
       },
     });

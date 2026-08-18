@@ -1,7 +1,6 @@
 import { ApiV1Error } from "@/server/api/errors";
 import { apiV1ErrorResponse } from "@/server/api/handler";
 import { assertSamePublicOrigin } from "@/server/api/request-origin";
-import { APP_BASE_PATH } from "@/lib/paths";
 
 type FetchWithDuplex = RequestInit & { duplex?: "half" };
 
@@ -22,7 +21,7 @@ function proxyTarget(request: Request, segments: string[]) {
   }
   const source = new URL(request.url);
   const target = new URL(
-    `${APP_BASE_PATH}/api/v1/${segments.map(encodeURIComponent).join("/")}`,
+    `/api/v1/${segments.map(encodeURIComponent).join("/")}`,
     source.origin,
   );
   target.search = source.search;

@@ -1,7 +1,6 @@
 import { ApiV1Error } from "@/server/api/errors";
 import { parseUuid, withApiV1 } from "@/server/api/handler";
 import { getApiV1Service } from "@/server/api/v1/service";
-import { apiV1Path } from "@/lib/paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +38,7 @@ export async function PUT(
     return Response.json(task, {
       status: 202,
       headers: {
-        location: apiV1Path(`/tasks/${task.task_id}`),
+        location: `/api/v1/tasks/${task.task_id}`,
         "cache-control": "no-store",
       },
     });

@@ -1,5 +1,4 @@
 import Script from "next/script";
-import { apiV1Path } from "@/lib/paths";
 
 export const metadata = { title: "API 文档 · 素材库" };
 
@@ -20,7 +19,7 @@ export default function ApiDocsPage() {
           const mount = () => {
             if (!window.SwaggerUIBundle) return window.setTimeout(mount, 50);
             window.SwaggerUIBundle({
-              url: "${apiV1Path("/openapi")}",
+              url: "/api/v1/openapi",
               dom_id: "#swagger-ui",
               deepLinking: true,
               persistAuthorization: true,

@@ -34,6 +34,7 @@ import {
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
 import { searchAnalysis } from "@/server/search/chroma";
+import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
   type AssetDetail,
@@ -572,7 +573,7 @@ function summaryFromRow(
     processingStatus: row.processingStatus,
     reviewStatus: row.reviewStatus,
     tags: tagList,
-    mediaUrl: `/api/v1/media/${row.id}?v=${row.updatedAt.getTime()}`,
+    mediaUrl: `${apiV1Path(`/media/${row.id}`)}?v=${row.updatedAt.getTime()}`,
     createdAt: row.createdAt.toISOString(),
   };
 }

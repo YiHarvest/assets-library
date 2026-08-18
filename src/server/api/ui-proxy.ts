@@ -1,6 +1,7 @@
 import { ApiV1Error } from "@/server/api/errors";
 import { apiV1ErrorResponse } from "@/server/api/handler";
 import { assertSamePublicOrigin } from "@/server/api/request-origin";
+import { loadConfig } from "@/server/config";
 
 type FetchWithDuplex = RequestInit & { duplex?: "half" };
 
@@ -20,9 +21,10 @@ function proxyTarget(request: Request, segments: string[]) {
     throw new ApiV1Error("invalid_request", "UI 代理路径无效。", 400);
   }
   const source = new URL(request.url);
+  const config = loadConfig();
   const target = new URL(
     `/api/v1/${segments.map(encodeURIComponent).join("/")}`,
-    source.origin,
+    `http://${config.PRD_INTERNAL_SERVICE_HOST}:${process.env.PORT || "23015"}`,
   );
   target.search = source.search;
   return target;
@@ -38,6 +40,13 @@ export async function proxyUiApi(request: Request, segments: string[]) {
     const headers = new Headers(request.headers);
     headers.delete("host");
     headers.delete("cookie");
+    headers.delete("connection");
+    headers.delete("upgrade");
+    headers.delete("keep-alive");
+    headers.delete("proxy-connection");
+    headers.delete("transfer-encoding");
+    headers.delete("te");
+    headers.delete("trailer");
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     const response = await fetch(proxyTarget(request, segments), {
       method: request.method,

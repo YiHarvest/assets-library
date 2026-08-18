@@ -14,6 +14,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { UI_API_V1, uiApi } from "@/lib/api-v1-client";
@@ -472,7 +473,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <Link
-                          href={`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`}
+                          href={appUrl(`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1

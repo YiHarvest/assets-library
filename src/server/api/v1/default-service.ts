@@ -12,6 +12,7 @@ import type {
 import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import { mediaResponse } from "@/server/media/response";
+import { apiV1Path } from "@/lib/paths";
 import { targetFormatFromFilename } from "@/server/media/target-format";
 import { writeAll } from "@/server/storage/object-storage";
 import {
@@ -62,7 +63,7 @@ function directMediaUrl(
   variant: "media" | "thumbnail",
 ) {
   const suffix = variant === "thumbnail" ? "/thumbnail" : "";
-  const url = new URL(`/api/v1/media/${assetId}${suffix}`, origin);
+  const url = new URL(apiV1Path(`/media/${assetId}${suffix}`), origin);
   url.searchParams.set("user_id", userId);
   return url.toString();
 }

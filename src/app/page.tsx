@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { getApiV1Service } from "@/server/api/v1/service";
+import { appUrl } from "@/lib/paths";
 import type { UserScope } from "@/shared/contracts";
 
 export const dynamic = "force-dynamic";
@@ -61,7 +62,7 @@ function overviewHref(input: {
   }
   if (input.layout === "list") parameters.set("layout", "list");
   if (input.userId) parameters.set("user_id", input.userId);
-  return `/?${parameters.toString()}`;
+  return appUrl(`/?${parameters.toString()}`);
 }
 
 export default async function OverviewPage({
@@ -105,8 +106,8 @@ export default async function OverviewPage({
   });
   const common = { view, tag: tagQuery, layout, userId };
   const uploadHref = userId
-    ? `/upload?user_id=${encodeURIComponent(userId)}`
-    : "/upload";
+    ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
+    : appUrl("/upload");
   const total = page.tag_statistics?.total_assets ?? page.items.length;
 
   return (

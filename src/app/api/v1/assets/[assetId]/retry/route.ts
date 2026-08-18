@@ -5,6 +5,7 @@ import {
 } from "@/server/api/handler";
 import { getApiV1Service } from "@/server/api/v1/service";
 import { mutationContextSchema } from "@/shared/contracts";
+import { apiV1Path } from "@/lib/paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,7 +24,7 @@ export async function POST(
     return Response.json(task, {
       status: 202,
       headers: {
-        location: `/api/v1/tasks/${task.task_id}`,
+        location: apiV1Path(`/tasks/${task.task_id}`),
         "cache-control": "no-store",
       },
     });

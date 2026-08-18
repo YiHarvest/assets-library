@@ -13,6 +13,8 @@ function preparedBatch() {
     parentPath: "/tmp/parent.mp4",
     durationSeconds: 2,
     workspacePath: "/tmp/batch",
+    resplitCount: 0,
+    resplitDetails: [],
     segments: [
       {
         index: 1,

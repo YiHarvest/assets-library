@@ -8,6 +8,7 @@ import {
 } from "@/server/media/video-frames";
 import type { MediaTargetFormat } from "@/server/media/target-format";
 import { SceneDetectClient } from "./client";
+import { resplitSegment } from "./re-split";
 import {
   ScenePipelineError,
   type SceneSegment,
@@ -34,6 +35,16 @@ export interface PreparedSceneBatch {
   parentPath: string;
   durationSeconds: number;
   workspacePath: string;
+  /** 经本地二次切分（硬切分）产出的子切片数量 */
+  resplitCount: number;
+  /** 二次切分子切片清单（原超限切片的切分结果） */
+  resplitDetails: Array<{
+    segmentIndex: number;
+    startSeconds: number;
+    endSeconds: number;
+    actualBytes: number;
+    maximumBytes: number;
+  }>;
   segments: PreparedSceneSegment[];
 }
 
@@ -48,17 +59,12 @@ export interface PrepareSceneBatchInput {
   signal?: AbortSignal;
 }
 
-function oversizeSegments(
-  manifest: SceneSplitManifest,
-  maximumSegmentBytes: number,
-) {
-  return manifest.segments
-    .filter((segment) => segment.sizeBytes > maximumSegmentBytes)
-    .map((segment) => ({
-      segmentIndex: segment.index,
-      actualBytes: segment.sizeBytes,
-      maximumBytes: maximumSegmentBytes,
-    }));
+/** 未知来源的本地切片（经二次切分产出，未走远端下载）。 */
+interface LocalSceneSegment extends SceneSegment {
+  /** 本地二次切分子切片：不下载远端，切分文件就地位于该路径。 */
+  localPath?: string;
+  /** 远端清单中的原始序号（下载时 URL 校验依赖它，与重排后的 index 分离）。 */
+  remoteIndex: number;
 }
 
 /** 最小信号量：限制并发任务数，超出部分排队等待（不引入外部依赖）。 */
@@ -119,24 +125,53 @@ export async function prepareSceneBatch(
 
     // splitVideo 成功后 manifest 必然存在；TS 在闭包内无法自动收窄，这里显式断言
     const splitManifest = manifest as SceneSplitManifest;
-    const tooLarge = oversizeSegments(splitManifest, input.maximumSegmentBytes);
-    if (tooLarge.length > 0) {
-      const limitText = `${Math.round(input.maximumSegmentBytes / 1024 / 1024)} MiB`;
-      throw new ScenePipelineError(
-        "scene_segment_too_large",
-        `${tooLarge.length} 个视频切片超过 ${limitText} 限制，父视频整批不入库。`,
-        { segments: tooLarge },
-      );
-    }
+    // 超限切片不再整批拒绝：改为以父视频为源做本地二次切分，
+    // 每段不超过上限后继续走统一入库链路。
 
-    // 分片下载/验证/抽帧并发执行（信号量限流，默认 8），
+    // 展开切片清单：超限切片替换为若干本地二次切分子切片
+    // （segment.index 将在下方按展开后的顺序整体重排）。
+    const expanded: LocalSceneSegment[] = [];
+    for (const segment of splitManifest.segments) {
+      if (segment.sizeBytes <= input.maximumSegmentBytes) {
+        expanded.push({ ...segment, remoteIndex: segment.index });
+        continue;
+      }
+      const pieces = await resplitSegment(
+        input.normalizedParentPath,
+        segment.startSeconds,
+        segment.endSeconds,
+        input.maximumSegmentBytes,
+        workspacePath,
+      );
+      for (const piece of pieces) {
+        expanded.push({
+          ...segment,
+          index: -1, // 占位，稍后重排
+          startSeconds: piece.startSeconds,
+          endSeconds: piece.endSeconds,
+          durationSeconds: piece.durationSeconds,
+          sizeBytes: piece.sizeBytes,
+          localPath: piece.temporaryPath,
+          remoteIndex: segment.index,
+        });
+      }
+    }
+    // 重排后序号从 1 开始连续递增（展示与持久化用）；下载仍使用 remoteIndex。
+    expanded.forEach((segment, position) => {
+      segment.index = position + 1;
+    });
+    const resplitCount = expanded.filter(
+      (segment) => segment.localPath,
+    ).length;
+
+    // 下载/验证/抽帧并发执行（信号量限流，默认 8）
     // 任一失败仍按段收集，整批回滚语义不变。
     const concurrency = input.concurrency ?? 8;
     const semaphore = new Semaphore(concurrency);
     const invalid: Array<Record<string, unknown>> = [];
 
     const processSegment = async (
-      segment: SceneSplitManifest["segments"][number],
+      segment: LocalSceneSegment,
     ): Promise<PreparedSceneSegment | undefined> => {
       await semaphore.acquire();
       try {
@@ -145,17 +180,26 @@ export async function prepareSceneBatch(
           `segment-${String(segment.index).padStart(3, "0")}.mp4`,
         );
         try {
-          const download = await input.client.downloadSegment(
-            splitManifest,
-            segment,
-            absolutePath,
-            input.maximumSegmentBytes,
-            input.signal,
-          );
+          let sizeBytes: number;
+          if (segment.localPath) {
+            // 本地二次切分子切片：就地搬移到最终路径，跳过远端下载。
+            await fs.rename(segment.localPath, absolutePath);
+            sizeBytes = (await fs.stat(absolutePath)).size;
+          } else {
+            // 下载与 URL 校验按远端原始序号进行（downloadUrl 指向远端清单路径）。
+            const download = await input.client.downloadSegment(
+              splitManifest,
+              { ...segment, index: segment.remoteIndex },
+              absolutePath,
+              input.maximumSegmentBytes,
+              input.signal,
+            );
+            sizeBytes = download.sizeBytes;
+          }
           const validated = await validateVideoFile(
             absolutePath,
             mp4Target,
-            download.sizeBytes,
+            sizeBytes,
             input.maximumSegmentBytes,
           );
           const thumbnailAbsolutePath = path.join(
@@ -201,8 +245,17 @@ export async function prepareSceneBatch(
 
     // Promise.all 的结果顺序与输入一致，避免并发完成顺序打乱 segmentIndex。
     const downloaded = await Promise.all(
-      splitManifest.segments.map(processSegment),
+      expanded.map(processSegment),
     );
+    const resplitDetails = expanded
+      .filter((segment) => segment.localPath)
+      .map((segment) => ({
+        segmentIndex: segment.index,
+        startSeconds: segment.startSeconds,
+        endSeconds: segment.endSeconds,
+        actualBytes: segment.sizeBytes,
+        maximumBytes: input.maximumSegmentBytes,
+      }));
 
     if (invalid.length > 0) {
       throw new ScenePipelineError(
@@ -218,6 +271,8 @@ export async function prepareSceneBatch(
       parentPath: input.normalizedParentPath,
       durationSeconds: splitManifest.durationSeconds,
       workspacePath,
+      resplitCount,
+      resplitDetails,
       segments: downloaded.filter(
         (segment): segment is PreparedSceneSegment => Boolean(segment),
       ),

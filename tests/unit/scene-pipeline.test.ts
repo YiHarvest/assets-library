@@ -176,7 +176,7 @@ describe("scene video pipeline", () => {
     expect(requested).toContain(`DELETE /api/v1/videos/split/${taskId}`);
   }, 20_000);
 
-  it("rejects an oversized manifest before downloading any segment", async () => {
+  it("re-splits an oversized manifest segment locally from the parent", async () => {
     const taskId = "b".repeat(32);
     const fakeFetch = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input));
@@ -199,38 +199,36 @@ describe("scene video pipeline", () => {
       fetchImplementation: fakeFetch,
     });
 
-    const error = await captureSceneError(
-      prepareSceneBatch({
-        client,
-        normalizedParentPath: parentPath,
-        originalFilename: "parent.mp4",
-        workspaceRoot: path.join(directory, "workspace"),
-        maximumSegmentBytes: 10 * 1024 * 1024,
-      }),
-    );
+    const batch = await prepareSceneBatch({
+      client,
+      normalizedParentPath: parentPath,
+      originalFilename: "parent.mp4",
+      workspaceRoot: path.join(directory, "workspace"),
+      maximumSegmentBytes: 10 * 1024 * 1024,
+    });
 
-    expect(error.code).toBe("scene_segment_too_large");
-    expect(error.details.segments).toEqual([
-      expect.objectContaining({ segmentIndex: 1, maximumBytes: 10 * 1024 * 1024 }),
+    expect(batch.resplitCount).toBe(1);
+    expect(batch.resplitDetails).toEqual([
+      {
+        segmentIndex: 1,
+        startSeconds: 0,
+        endSeconds: 0.3,
+        actualBytes: expect.any(Number),
+        maximumBytes: 10 * 1024 * 1024,
+      },
     ]);
-    // 新异步流程：POST 入队 + 至少一次 GET 轮询 + 补偿性 DELETE
-    const methodAndPath = fakeFetch.mock.calls.map(([input]) =>
-      new URL(String(input)).pathname,
-    );
-    expect(methodAndPath).toContain("/api/v1/videos/split");
+    expect(batch.segments).toHaveLength(1);
+    expect(batch.segments[0]!.sizeBytes).toBeLessThanOrEqual(10 * 1024 * 1024);
+    await expect(fs.stat(batch.segments[0]!.absolutePath)).resolves.toBeTruthy();
     expect(
-      fakeFetch.mock.calls.filter(
-        ([, init]) => (init as RequestInit)?.method === "POST",
+      fakeFetch.mock.calls.filter(([input]) =>
+        String(input).match(/\/segments\/\d+$/),
       ),
-    ).toHaveLength(1);
-    expect(
-      fakeFetch.mock.calls.filter(
-        ([, init]) => (init as RequestInit)?.method === "DELETE",
-      ),
-    ).toHaveLength(1);
-    await expect(fs.stat(path.join(directory, "workspace"))).resolves.toBeTruthy();
-    expect(await fs.readdir(path.join(directory, "workspace"))).toEqual([]);
-  });
+    ).toHaveLength(0);
+
+    await cleanupPreparedSceneBatch(batch, client);
+    await expect(fs.stat(batch.workspacePath)).rejects.toThrow();
+  }, 20_000);
 
   it("removes the complete local batch when any downloaded segment is corrupt", async () => {
     const validPath = path.join(directory, "valid.mp4");

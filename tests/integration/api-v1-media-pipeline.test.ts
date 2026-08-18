@@ -559,7 +559,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(storage.objects.size).toBe(3);
   }, 45_000);
 
-  test("任一切片超过 10 MiB 时整批失败，不创建 asset、父视频或媒体对象记录", async () => {
+  test("任一切片超过 10 MiB 时本地二次切分后正常入库，不下载远端切片", async () => {
     const parentPath = path.join(temporaryRoot, "oversize-parent.mp4");
     await createVideo(parentPath, "black", 0.4);
     const parentBytes = await fs.readFile(parentPath);
@@ -583,30 +583,24 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     await processUntilIdle(client);
     const status = await service.getTask(taskId);
     expect(status).toMatchObject({
-      status: "failed",
+      status: "done",
       phase: "finished",
-      done_items: 0,
-      failed_items: 1,
+      done_items: 1,
+      failed_items: 0,
     });
     expect(status.items[0]).toMatchObject({
-      status: "failed",
-      phase: "finished",
-      asset_ids: [],
-      error: {
-        code: "segment_too_large",
-        details: [
-          expect.objectContaining({
-            segment_index: 1,
-            size_bytes: limit + 1,
-            limit_bytes: limit,
-          }),
-        ],
-      },
+      status: "done",
+      asset_ids: [expect.any(String)],
     });
-    expect(await database.db.select().from(schema.assets)).toHaveLength(0);
-    expect(await database.db.select().from(schema.videoSources)).toHaveLength(0);
-    expect(await database.db.select().from(schema.mediaObjects)).toHaveLength(0);
-    expect(storage.objects.size).toBe(0);
+    const assets = await database.db.select().from(schema.assets);
+    const sources = await database.db.select().from(schema.videoSources);
+    const objects = await database.db.select().from(schema.mediaObjects);
+    expect(assets).toHaveLength(1);
+    expect(sources).toHaveLength(1);
+    expect(objects).toHaveLength(3); // 父视频 + 切分子视频 + 缩略图
+    expect(assets[0]!.sizeBytes).toBeLessThanOrEqual(limit);
+    expect(storage.objects.size).toBe(3);
+    // 二次切分不下载远端超限切片，只下载/校验本地子切片
     expect(
       fake.request.mock.calls.some(([input]) =>
         String(input).includes("/segments/1"),

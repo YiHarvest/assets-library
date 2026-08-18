@@ -1,14 +1,16 @@
 import type { TaskAccepted, TaskStatusResponse } from "@/shared/contracts";
+import { APP_BASE_PATH, apiV1Path } from "@/lib/paths";
 
 interface ApiFailure {
   error?: { message?: string };
 }
 
-export const UI_API_V1 = "/api/ui/v1";
+export const UI_API_V1 = `${APP_BASE_PATH}/api/ui/v1`;
 
 export function browserMediaUrl(url: string) {
-  return url.startsWith("/api/v1/")
-    ? `${UI_API_V1}/${url.slice("/api/v1/".length)}`
+  const apiV1Marker = apiV1Path("/");
+  return url.startsWith(apiV1Marker)
+    ? `${UI_API_V1}/${url.slice(apiV1Marker.length)}`
     : url;
 }
 

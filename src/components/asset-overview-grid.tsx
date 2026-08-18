@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
+import { appUrl } from "@/lib/paths";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,7 +36,7 @@ function detailHref(asset: ApiV1AssetSummary) {
   const query = asset.user_id
     ? `?user_id=${encodeURIComponent(asset.user_id)}`
     : "";
-  return `/assets/${asset.asset_id}${query}`;
+  return appUrl(`/assets/${asset.asset_id}${query}`);
 }
 
 export function AssetOverviewGrid({

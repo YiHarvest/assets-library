@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
 import { Badge } from "@/components/ui/badge";
+import { appUrl } from "@/lib/paths";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -179,7 +180,7 @@ export function AssetEditor({
         body: JSON.stringify({ user_id: asset.user_id }),
       });
       await waitForTask(task);
-      router.push("/");
+      router.push(appUrl("/"));
       router.refresh();
     });
 

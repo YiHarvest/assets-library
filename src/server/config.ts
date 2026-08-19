@@ -71,6 +71,13 @@ const envSchema = z
         message: "开发模式数据库名必须以 _test 结尾。",
       })
       .default("assets_library_dev_test"),
+    PRD_DATABASE_NAME: z
+      .string()
+      .min(1)
+      .refine((name) => !name.endsWith("_test"), {
+        message: "生产模式数据库名不能以 _test 结尾。",
+      })
+      .default("assets_library"),
     DATABASE_SSL_CA_PATH: z.string().optional().or(z.literal("")),
     // Web 与 worker 是独立进程，各自持有连接池；默认 6 为 4 个 worker 留出余量。
     DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(6),
@@ -346,6 +353,7 @@ export function loadConfig(
     databaseUrl.pathname = `/${encodeURIComponent(parsed.DEV_DATABASE_NAME)}`;
   } else {
     databaseUrl.hostname = parsed.PRD_INTERNAL_SERVICE_HOST;
+    databaseUrl.pathname = `/${encodeURIComponent(parsed.PRD_DATABASE_NAME)}`;
   }
   const resolvedDatabaseUrl = databaseUrl.toString();
   const resolvedDatabaseTarget = assertDatabaseTargetSafety(

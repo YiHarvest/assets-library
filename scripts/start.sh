@@ -44,6 +44,11 @@ case "$APP_MODE" in
     ;;
 esac
 
+# prd 缺少页面锁密钥时必须在数据库迁移、worker 和 Web 启动前终止。
+# 中间件仍会在运行时重复校验，防止绕过此标准启动脚本后意外放行。
+c_info "校验 WebUI 页面锁 ..."
+pnpm run webui-lock:check
+
 # 在启动任何依赖、执行任何迁移前，解析并校验最终数据库目标。
 # dev 必须连接以 _test 结尾的数据库；prd 必须连接非测试数据库。
 c_info "校验数据库目标 ..."

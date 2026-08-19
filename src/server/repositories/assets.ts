@@ -81,6 +81,7 @@ export interface CreateMutationTaskInput {
   assetId: string;
   userId?: string | null;
   callbackUrl?: string | null;
+  expiresAt?: Date | null;
   payload?: Record<string, unknown>;
 }
 
@@ -105,6 +106,7 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
       userId: input.userId?.trim() || null,
       callbackUrl: input.callbackUrl?.trim() || null,
       totalItems: 1,
+      expiresAt: input.expiresAt ?? null,
       createdAt: now,
       updatedAt: now,
     });
@@ -171,6 +173,14 @@ export async function getTaskWithItems(taskId: string) {
     .where(eq(taskItems.taskId, taskId))
     .orderBy(asc(taskItems.ordinal));
   return { task, items };
+}
+
+/** 查询任务逐文件对应的素材 ID，供 API 展示层组装任务快照。 */
+export async function listTaskItemAssetIds(taskId: string) {
+  return db
+    .select({ id: assets.id, taskItemId: assets.taskItemId })
+    .from(assets)
+    .where(eq(assets.taskId, taskId));
 }
 
 /**

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
+import { readWebUiLockConfig } from "@/server/auth/webui-lock";
 
 const modelProtocolSchema = z.enum([
   "openai_chat_completions",
@@ -347,6 +348,9 @@ function configuredModelCandidates(
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
+  // Keep production fail-closed even when a process reaches application config
+  // without going through the standard deployment preflight.
+  readWebUiLockConfig(env);
   const parsed = envSchema.parse(env);
   const databaseUrl = new URL(parsed.DATABASE_URL);
   if (parsed.APP_MODE === "dev") {

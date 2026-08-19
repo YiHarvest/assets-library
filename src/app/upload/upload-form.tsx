@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { UI_API_V1, uiApi } from "@/lib/api-v1-client";
+import { API_V1, apiV1 } from "@/lib/api-v1-client";
 import {
   MAX_UPLOAD_TASK_BYTES,
   MAX_UPLOAD_TASK_ITEMS,
@@ -160,7 +160,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
             { once: true },
           );
         });
-        const next = await uiApi<TaskStatusResponse>(`/tasks/${taskId}`, {
+        const next = await apiV1<TaskStatusResponse>(`/tasks/${taskId}`, {
           signal: controller.signal,
         });
         applyTask(next);
@@ -193,7 +193,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     });
     return new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("PUT", `${UI_API_V1}/uploads/${taskId}/items/${itemId}`);
+      xhr.open("PUT", `${API_V1}/uploads/${taskId}/items/${itemId}`);
       xhr.setRequestHeader(
         "content-type",
         item.file.type || "application/octet-stream",
@@ -242,7 +242,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
     setSubmitting(true);
     setError("");
     try {
-      const created = await uiApi<TaskStatusResponse>("/uploads", {
+      const created = await apiV1<TaskStatusResponse>("/uploads", {
         method: "POST",
         body: JSON.stringify({
           user_id: userId,
@@ -267,7 +267,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       for (let index = 0; index < items.length; index += 1) {
         await sendItem(items[index]!, created.task_id, created.items[index]!.item_id);
       }
-      const sealed = await uiApi<TaskStatusResponse>(
+      const sealed = await apiV1<TaskStatusResponse>(
         `/uploads/${created.task_id}`,
         { method: "POST", body: JSON.stringify({}) },
       );

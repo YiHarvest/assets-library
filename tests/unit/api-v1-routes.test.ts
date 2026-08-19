@@ -646,8 +646,12 @@ describe("API v1 contracts and routes", () => {
     });
   });
 
-  it("keeps the OpenAPI specification public without authentication", async () => {
-    const response = await getOpenApi();
+  it("keeps OpenAPI public when the dev WebUI lock is disabled", async () => {
+    vi.stubEnv("APP_MODE", "dev");
+    vi.stubEnv("WEBUI_LOCK_KEY", "");
+    const response = await getOpenApi(
+      new Request("http://localhost/api/v1/openapi"),
+    );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe(
       "application/yaml; charset=utf-8",

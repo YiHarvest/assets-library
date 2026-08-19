@@ -653,6 +653,25 @@ describe("API v1 contracts and routes", () => {
       "application/yaml; charset=utf-8",
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.text()).toContain("openapi: 3.1.0");
+    const specification = await response.text();
+    expect(specification).toContain("openapi: 3.1.0");
+    for (const path of [
+      "/api/v1/uploads:",
+      "/api/v1/uploads/{task_id}/items/{item_id}:",
+      "/api/v1/uploads/{task_id}:",
+      "/api/v1/tasks/{task_id}:",
+      "/api/v1/assets/query:",
+      "/api/v1/assets/{asset_id}:",
+      "/api/v1/assets/{asset_id}/publish:",
+      "/api/v1/assets/{asset_id}/retry:",
+      "/api/v1/media/{asset_id}:",
+      "/api/v1/media/{asset_id}/thumbnail:",
+      "/api/v1/users/{user_id}/media:",
+      "/api/v1/users/{user_id}/storage-usage:",
+      "/api/v1/openapi:",
+    ]) {
+      expect(specification).toContain(path);
+    }
+    expect(specification).not.toContain("/api/ui/v1/");
   });
 });

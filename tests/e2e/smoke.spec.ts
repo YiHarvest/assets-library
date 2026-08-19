@@ -127,10 +127,10 @@ test("submits selected assets through one manifest task", async ({
     finished_at: done ? "2026-08-12T12:00:01+08:00" : null,
     expires_at: null,
   });
-  await page.route("**/api/ui/v1/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === "POST" && pathname === "/api/ui/v1/uploads") {
+    if (request.method() === "POST" && pathname.endsWith("/api/v1/uploads")) {
       manifestCount += 1;
       await route.fulfill({
         status: 201,
@@ -150,7 +150,7 @@ test("submits selected assets through one manifest task", async ({
     }
     if (
       request.method() === "POST" &&
-      pathname === `/api/ui/v1/uploads/${taskId}`
+      pathname.endsWith(`/api/v1/uploads/${taskId}`)
     ) {
       sealed = true;
       await route.fulfill({
@@ -162,7 +162,7 @@ test("submits selected assets through one manifest task", async ({
     }
     if (
       request.method() === "GET" &&
-      pathname === `/api/ui/v1/tasks/${taskId}`
+      pathname.endsWith(`/api/v1/tasks/${taskId}`)
     ) {
       await route.fulfill({
         status: 200,
@@ -230,10 +230,10 @@ test("shows an asynchronous media validation error without requiring hover", asy
     finished_at: failed ? "2026-08-12T12:00:01+08:00" : null,
     expires_at: null,
   });
-  await page.route("**/api/ui/v1/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
-    if (request.method() === "POST" && pathname === "/api/ui/v1/uploads") {
+    if (request.method() === "POST" && pathname.endsWith("/api/v1/uploads")) {
       await route.fulfill({
         status: 201,
         contentType: "application/json",
@@ -251,7 +251,7 @@ test("shows an asynchronous media validation error without requiring hover", asy
     }
     if (
       request.method() === "POST" &&
-      pathname === `/api/ui/v1/uploads/${taskId}`
+      pathname.endsWith(`/api/v1/uploads/${taskId}`)
     ) {
       await route.fulfill({
         status: 202,

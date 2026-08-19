@@ -18,7 +18,7 @@ import { appUrl } from "@/lib/paths";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { browserMediaUrl, uiApi, waitForTask } from "@/lib/api-v1-client";
+import { apiV1, waitForTask } from "@/lib/api-v1-client";
 import type {
   ApiTaskStatus,
   ApiV1AssetSummary,
@@ -87,7 +87,7 @@ export function AssetOverviewGrid({
     setPublishingId(asset.asset_id);
     setMessage("");
     try {
-      const task = await uiApi<TaskAccepted>(
+      const task = await apiV1<TaskAccepted>(
         `/assets/${asset.asset_id}/publish`,
         {
           method: "POST",
@@ -240,7 +240,7 @@ function GalleryCard({
         <div className="aspect-[4/3] overflow-hidden bg-[#e9e9eb]">
           <MediaPreview
             mediaType={asset.media_type}
-            src={browserMediaUrl(asset.media_url)}
+            src={asset.media_url}
             name={asset.name}
             className="transition-transform duration-500 ease-out group-hover:scale-[1.025] motion-reduce:transition-none"
           />
@@ -301,7 +301,7 @@ function ListRow({
       >
         <MediaPreview
           mediaType={asset.media_type}
-          src={browserMediaUrl(asset.media_url)}
+          src={asset.media_url}
           name={asset.name}
         />
       </button>
@@ -405,7 +405,7 @@ function PreviewDialog({
         <div className="relative min-h-0 flex-1 bg-black">
           <MediaPreview
             mediaType={asset.media_type}
-            src={browserMediaUrl(asset.media_url)}
+            src={asset.media_url}
             name={asset.name}
             className="object-contain"
           />

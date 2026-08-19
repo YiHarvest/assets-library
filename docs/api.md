@@ -433,6 +433,16 @@ origin 为主机），不含 base64、密钥、签名或过期时间，可直接
 
 ## 10. OpenAPI
 
-`GET /api/v1/openapi` 公开返回 OpenAPI 3.1 YAML。文档页面可使用该接口加载
-定义；所有业务端点同样无需应用层鉴权。浏览器访问 `/docs` 可打开 Swagger UI，
-原 `/api-docs` 路径继续保留。
+`GET /api/v1/openapi` 返回 OpenAPI 3.1 YAML。启用 WebUI 页面锁后，浏览器需先
+通过 `/lock` 建立 HttpOnly Cookie 会话；curl 或自动同步脚本可发送
+`Authorization: Bearer <WEBUI_LOCK_KEY>`。未认证时只对此规范端点返回 `401`。
+
+```bash
+curl -H "Authorization: Bearer $WEBUI_LOCK_KEY" \
+  "$BASE_URL/api/v1/openapi"
+```
+
+`/api/v1/openapi` 是唯一受页面锁影响的 API。上传、查询、媒体等既有
+`/api/v1/**` 业务端点继续无需该密钥；生产部署的 basePath（例如
+`/feisu/assets-library/api/v1/**`）及请求、响应契约均保持不变。浏览器访问
+`/docs` 可打开 Swagger UI，原 `/api-docs` 路径继续保留。

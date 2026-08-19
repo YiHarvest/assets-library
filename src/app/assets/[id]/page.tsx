@@ -1,5 +1,6 @@
 import { AssetEditor } from "./asset-editor";
-import { getApiV1Service } from "@/server/api/v1/service";
+import { serverApiV1 } from "@/lib/server-api-v1";
+import type { ApiV1AssetDetail } from "@/shared/contracts";
 
 export const dynamic = "force-dynamic";
 
@@ -14,9 +15,11 @@ export default async function AssetDetailPage({
   const query = await searchParams;
   const rawUserId = Array.isArray(query.user_id) ? query.user_id[0] : query.user_id;
   const userId = rawUserId?.trim() || null;
-  const asset = await getApiV1Service().getAsset(
-    id,
-    userId ? { mode: "user", user_id: userId } : { mode: "public" },
+  const queryString = userId
+    ? `?user_id=${encodeURIComponent(userId)}`
+    : "";
+  const asset = await serverApiV1<ApiV1AssetDetail>(
+    `/assets/${encodeURIComponent(id)}${queryString}`,
   );
   return (
     <main className="mx-auto max-w-7xl px-5 py-10">

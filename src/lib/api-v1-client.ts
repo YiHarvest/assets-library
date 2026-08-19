@@ -1,21 +1,14 @@
 import type { TaskAccepted, TaskStatusResponse } from "@/shared/contracts";
-import { APP_BASE_PATH, apiV1Path } from "@/lib/paths";
+import { apiV1Path } from "@/lib/paths";
 
 interface ApiFailure {
   error?: { message?: string };
 }
 
-export const UI_API_V1 = `${APP_BASE_PATH}/api/ui/v1`;
+export const API_V1 = apiV1Path("");
 
-export function browserMediaUrl(url: string) {
-  const apiV1Marker = apiV1Path("/");
-  return url.startsWith(apiV1Marker)
-    ? `${UI_API_V1}/${url.slice(apiV1Marker.length)}`
-    : url;
-}
-
-export async function uiApi<T>(path: string, init?: RequestInit) {
-  const response = await fetch(`${UI_API_V1}${path}`, {
+export async function apiV1<T>(path: string, init?: RequestInit) {
+  const response = await fetch(`${API_V1}${path}`, {
     ...init,
     headers: {
       ...(init?.body instanceof FormData
@@ -41,7 +34,7 @@ export async function waitForTask(
   const intervalMs = options.intervalMs ?? 1_000;
   for (;;) {
     if (options.signal?.aborted) throw new DOMException("已停止轮询。", "AbortError");
-    const status = await uiApi<TaskStatusResponse>(`/tasks/${task.task_id}`, {
+    const status = await apiV1<TaskStatusResponse>(`/tasks/${task.task_id}`, {
       signal: options.signal,
     });
     if (status.status === "done") return status;

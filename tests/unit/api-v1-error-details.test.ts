@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apiTaskErrorPayload } from "@/server/api/v1/default-service";
+import { apiTaskErrorPayload } from "@/server/modules/tasks/task-service";
 
 describe("API v1 task error details", () => {
   it("maps internal scene errors to the public contract and snake_case details", () => {

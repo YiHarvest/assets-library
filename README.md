@@ -99,7 +99,7 @@ Drizzle migration、启动 Web 与 worker。任一服务异常会输出 `.run/` 
 | 模式 | 数据库 | 内部模型服务 | Web |
 | --- | --- | --- | --- |
 | `APP_MODE=dev` | 将 `DATABASE_URL` 的库名替换为 `DEV_DATABASE_NAME`；名称必须以 `_test` 结尾 | 保留 `.env` 中的远程地址，例如开发机访问 `<INTERNAL_SERVER_IP>` | `next dev --turbo` |
-| `APP_MODE=prd` | 使用 `DATABASE_URL` 中的正式库名；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机改为 `PRD_INTERNAL_SERVICE_HOST`，部署到内网服务器时即 `127.0.0.1` | `next start` |
+| `APP_MODE=prd` | 将库名强制替换为 `PRD_DATABASE_NAME`；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机改为 `PRD_INTERNAL_SERVICE_HOST`，部署到内网服务器时即 `127.0.0.1` | `next start` |
 
 当前开发配置应得到类似输出：
 
@@ -126,14 +126,15 @@ pnpm db:check-target
 ```dotenv
 APP_MODE=dev
 PRD_INTERNAL_SERVICE_HOST=127.0.0.1
-DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library
+DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
 DEV_DATABASE_NAME=assets_library_dev_test
+PRD_DATABASE_NAME=assets_library
 TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
 ```
 
-`DATABASE_URL` 可以保留正式库名，因为 dev 解析时会强制替换库名；真正执行增、删、改、查
-和启动 migration 的目标都是 `assets_library_dev_test`。正式部署必须显式设置
-`APP_MODE=prd`。
+`DATABASE_URL` 的主机和认证信息由两种模式共用，库名会被模式专用配置强制替换：dev 使用
+`DEV_DATABASE_NAME`，prd 使用 `PRD_DATABASE_NAME`。当前 dev 的增、删、改、查和 migration
+目标都是 `assets_library_dev_test`；正式部署必须显式设置 `APP_MODE=prd`。
 
 ## 关键配置
 
@@ -244,6 +245,7 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 
 所有业务 API 使用 `/api/v1` 和 `snake_case`。当前应用面向可信内网，不提供登录或 API Key
 鉴权；生产入口必须由反向代理、防火墙或上游身份系统限制，不能直接暴露到公网。
+浏览器组件和 Server Components 都通过 HTTP 调用该 facade，不直接导入数据库或领域服务。
 
 ## 项目结构
 
@@ -252,10 +254,11 @@ src/
   app/                 Next.js 页面与 Route Handlers
   components/          Web UI 组件
   server/
-    api/v1/            API 服务层与契约适配
+    api/v1/            稳定 API facade 与显式组合根
     db/                Drizzle schema、连接与 migration
     media/             媒体探测、正规化、抽帧
     model/             OpenAI-compatible VLM/LLM 客户端
+    modules/           assets/media/tasks/uploads/users 领域服务
     repositories/      MySQL 查询与 SKIP LOCKED 作业领取
     scene/             分镜客户端、下载校验与批次工作区
     services/          上传、分析、持久化和任务生命周期
@@ -304,7 +307,7 @@ pnpm build
 ./scripts/start.sh
 ```
 
-首次启动会构建 Next.js，随后复用 `.next`。MySQL migration 以数据库中的 Drizzle
+首次启动会构建 Next.js，随后复用 `.next`。外部 API 地址前缀由 `NEXT_PUBLIC_BASE_PATH` 环境变量控制，默认为空。MySQL migration 以数据库中的 Drizzle
 迁移账本为准并幂等执行；schema 来源为 [src/server/db/schema.ts](src/server/db/schema.ts)。
 服务日志和 PID 位于 `.run/`。
 

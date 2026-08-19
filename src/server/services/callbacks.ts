@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "@/server/db";
-import { apiTaskErrorPayload } from "@/server/api/v1/default-service";
+import { apiTaskErrorPayload } from "@/server/modules/tasks/task-service";
 import { assets, callbackDeliveries, taskItems, tasks } from "@/server/db/schema";
 import {
   completeJob,

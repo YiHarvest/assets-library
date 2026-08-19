@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeUserMediaCursor,
   encodeUserMediaCursor,
-} from "@/server/api/v1/default-service";
+} from "@/server/modules/users/user-service";
 
 describe("用户媒体 keyset cursor", () => {
   it("往返保留 UTC 毫秒时间和素材 UUID", () => {

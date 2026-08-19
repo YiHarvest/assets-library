@@ -1,8 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "@/server/config";
 
+// 脱敏：测试文件不写死真实内网地址，统一从 env 读取。
+// 需要连真实测试库/模型网关时在环境里设置 TEST_* 变量；缺省回退到占位主机，
+// 与 .env.example 的占位约定（dev-services.example.com / change-me）保持一致。
 const productionDatabaseUrl =
-  "mysql://assets_library_app:password@183.147.142.111:20014/assets_library";
+  process.env.TEST_DATABASE_URL ??
+  "mysql://assets_library_app:change-me@dev-services.example.com:3306/assets_library";
+const vlmBaseUrl = (
+  process.env.TEST_VLM_BASE_URL ??
+  "http://dev-services.example.com:30000/v1"
+).replace(/\/$/, "");
+const embeddingBaseUrl = (
+  process.env.TEST_EMBEDDING_BASE_URL ??
+  "http://dev-services.example.com:39999/v1"
+).replace(/\/$/, "");
+
+// 与 loadConfig 内部一致地替换 URL 的数据库名/主机名，断言随 env 取值自适应。
+function withDatabaseName(url: string, database: string) {
+  const parsed = new URL(url);
+  parsed.pathname = `/${database}`;
+  return parsed.toString();
+}
+
+function withHostname(url: string, hostname: string) {
+  const parsed = new URL(url);
+  parsed.hostname = hostname;
+  return parsed.toString().replace(/\/$/, "");
+}
 
 describe("database configuration", () => {
   it("defaults to four workers and a per-task analyze soft limit of two", () => {
@@ -35,17 +60,25 @@ describe("database configuration", () => {
       PRD_INTERNAL_SERVICE_HOST: "127.0.0.1",
       DATABASE_URL: productionDatabaseUrl,
       DEV_DATABASE_NAME: "assets_library_test",
-      VLM_BASE_URL: "http://183.147.142.111:30000/v1",
+      PRD_DATABASE_NAME: "assets_library",
+      VLM_BASE_URL: vlmBaseUrl,
       VLM_NAME: "vision-model",
-      EMBEDDING_BASE_URL: "http://183.147.142.111:39999/v1",
+      EMBEDDING_BASE_URL: embeddingBaseUrl,
       EMBEDDING_MODEL: "embedding-model",
     });
 
     expect(config.databaseUrl).toBe(
-      "mysql://assets_library_app:password@127.0.0.1:20014/assets_library",
+      withHostname(
+        withDatabaseName(productionDatabaseUrl, "assets_library"),
+        "127.0.0.1",
+      ),
     );
-    expect(config.models.vlm.baseUrl).toBe("http://127.0.0.1:30000/v1");
-    expect(config.embeddingBaseUrl).toBe("http://127.0.0.1:39999/v1");
+    expect(config.models.vlm.baseUrl).toBe(
+      withHostname(vlmBaseUrl, "127.0.0.1"),
+    );
+    expect(config.embeddingBaseUrl).toBe(
+      withHostname(embeddingBaseUrl, "127.0.0.1"),
+    );
   });
 
   it("uses the development database in dev mode", () => {
@@ -54,17 +87,17 @@ describe("database configuration", () => {
       PRD_INTERNAL_SERVICE_HOST: "127.0.0.1",
       DATABASE_URL: productionDatabaseUrl,
       DEV_DATABASE_NAME: "assets_library_test",
-      VLM_BASE_URL: "http://183.147.142.111:30000/v1",
+      VLM_BASE_URL: vlmBaseUrl,
       VLM_NAME: "vision-model",
-      EMBEDDING_BASE_URL: "http://183.147.142.111:39999/v1",
+      EMBEDDING_BASE_URL: embeddingBaseUrl,
       EMBEDDING_MODEL: "embedding-model",
     });
 
     expect(config.databaseUrl).toBe(
-      "mysql://assets_library_app:password@183.147.142.111:20014/assets_library_test",
+      withDatabaseName(productionDatabaseUrl, "assets_library_test"),
     );
-    expect(config.models.vlm.baseUrl).toBe("http://183.147.142.111:30000/v1");
-    expect(config.embeddingBaseUrl).toBe("http://183.147.142.111:39999/v1");
+    expect(config.models.vlm.baseUrl).toBe(vlmBaseUrl);
+    expect(config.embeddingBaseUrl).toBe(embeddingBaseUrl);
   });
 
   it("rejects wildcard listen addresses as production connection targets", () => {
@@ -87,13 +120,13 @@ describe("database configuration", () => {
     ).toThrow(/_test|测试数据库/);
   });
 
-  it("rejects a test database in production mode", () => {
+  it("rejects a test database name in production mode", () => {
     expect(() =>
       loadConfig({
         APP_MODE: "prd",
-        DATABASE_URL:
-          "mysql://assets_library_app:password@183.147.142.111:20014/assets_library_test",
+        DATABASE_URL: productionDatabaseUrl,
+        PRD_DATABASE_NAME: "assets_library_test",
       }),
-    ).toThrow(/生产模式拒绝连接测试数据库/);
+    ).toThrow(/生产模式数据库名|_test/);
   });
 });

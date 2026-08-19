@@ -13,9 +13,9 @@ import { AssetOverviewGrid } from "@/components/asset-overview-grid";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { getApiV1Service } from "@/server/api/v1/service";
+import { serverApiV1 } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
-import type { UserScope } from "@/shared/contracts";
+import type { AssetQueryResponse, UserScope } from "@/shared/contracts";
 
 export const dynamic = "force-dynamic";
 
@@ -92,17 +92,20 @@ export default async function OverviewPage({
   const userScope: UserScope = userId
     ? { mode: "user", user_id: userId }
     : { mode: "public" };
-  const page = await getApiV1Service().queryAssets({
-    ...(tagQuery ? { keywords: [tagQuery] } : {}),
-    filter: {
-      user_scope: userScope,
-      review_statuses: [
-        view === "published" ? "published" : "pending_review",
-      ],
-    },
-    cursor,
-    limit: 8,
-    include_tag_statistics: true,
+  const page = await serverApiV1<AssetQueryResponse>("/assets/query", {
+    method: "POST",
+    body: JSON.stringify({
+      ...(tagQuery ? { keywords: [tagQuery] } : {}),
+      filter: {
+        user_scope: userScope,
+        review_statuses: [
+          view === "published" ? "published" : "pending_review",
+        ],
+      },
+      cursor,
+      limit: 8,
+      include_tag_statistics: true,
+    }),
   });
   const common = { view, tag: tagQuery, layout, userId };
   const uploadHref = userId

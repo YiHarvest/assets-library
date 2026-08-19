@@ -20,8 +20,6 @@ tags:
     description: 支持 Range 的媒体流
   - name: Users
     description: 用户素材空间统计和展示列表
-  - name: UI Proxy
-    description: Web UI 使用的同源代理
   - name: Specification
 paths:
   /api/v1/openapi:
@@ -409,49 +407,6 @@ paths:
               schema: { type: string, format: binary }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
-
-  /api/ui/v1/{path}:
-    parameters:
-      - name: path
-        in: path
-        required: true
-        description: 与 /api/v1/ 后缀相同的多段代理路径
-        schema: { type: string }
-    get:
-      tags: [UI Proxy]
-      operationId: proxyUiApiGet
-      summary: UI 同源代理 GET
-      responses:
-        "200": { description: 透传对应 v1 响应 }
-        "403": { $ref: "#/components/responses/Forbidden" }
-    post:
-      tags: [UI Proxy]
-      operationId: proxyUiApiPost
-      summary: UI 同源代理 POST
-      responses:
-        "200": { description: 透传对应 v1 响应 }
-        "403": { $ref: "#/components/responses/Forbidden" }
-    put:
-      tags: [UI Proxy]
-      operationId: proxyUiApiPut
-      summary: UI 同源代理 PUT
-      responses:
-        "200": { description: 透传对应 v1 响应 }
-        "403": { $ref: "#/components/responses/Forbidden" }
-    patch:
-      tags: [UI Proxy]
-      operationId: proxyUiApiPatch
-      summary: UI 同源代理 PATCH
-      responses:
-        "200": { description: 透传对应 v1 响应 }
-        "403": { $ref: "#/components/responses/Forbidden" }
-    delete:
-      tags: [UI Proxy]
-      operationId: proxyUiApiDelete
-      summary: UI 同源代理 DELETE
-      responses:
-        "200": { description: 透传对应 v1 响应 }
-        "403": { $ref: "#/components/responses/Forbidden" }
 
 components:
   parameters:

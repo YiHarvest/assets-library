@@ -156,3 +156,6 @@ vite.config.ts.timestamp-*
 
 # Docker Compose override (local, environment-specific)
 compose.override.yaml
+
+# 内部部署文档（含真实地址，不上传 GitHub）
+docs/上线api.md

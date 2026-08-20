@@ -15,6 +15,7 @@ const embeddingBaseUrl = (
   process.env.TEST_EMBEDDING_BASE_URL ??
   "http://dev-services.example.com:39999/v1"
 ).replace(/\/$/, "");
+const webUiLockKey = "test-only-webui-lock-key-32-bytes-minimum";
 
 // 与 loadConfig 内部一致地替换 URL 的数据库名/主机名，断言随 env 取值自适应。
 function withDatabaseName(url: string, database: string) {
@@ -57,6 +58,7 @@ describe("database configuration", () => {
   it("uses the formal database in production mode", () => {
     const config = loadConfig({
       APP_MODE: "prd",
+      WEBUI_LOCK_KEY: webUiLockKey,
       PRD_INTERNAL_SERVICE_HOST: "127.0.0.1",
       DATABASE_URL: productionDatabaseUrl,
       DEV_DATABASE_NAME: "assets_library_test",
@@ -104,6 +106,7 @@ describe("database configuration", () => {
     expect(() =>
       loadConfig({
         APP_MODE: "prd",
+        WEBUI_LOCK_KEY: webUiLockKey,
         PRD_INTERNAL_SERVICE_HOST: "0.0.0.0",
         DATABASE_URL: productionDatabaseUrl,
       }),
@@ -124,6 +127,7 @@ describe("database configuration", () => {
     expect(() =>
       loadConfig({
         APP_MODE: "prd",
+        WEBUI_LOCK_KEY: webUiLockKey,
         DATABASE_URL: productionDatabaseUrl,
         PRD_DATABASE_NAME: "assets_library_test",
       }),

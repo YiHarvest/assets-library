@@ -174,7 +174,8 @@ async function extractFramesBatch(
     "0:V:0",
     "-vf",
     `select='${selectExpression}',scale=w='min(640,iw)':h=-2`,
-    "-vsync",
+    // `-vsync` was removed in FFmpeg 9; `-fps_mode` is its output-scoped replacement.
+    "-fps_mode",
     "vfr",
     "-q:v",
     "4",

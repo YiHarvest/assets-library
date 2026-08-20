@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "concurrently -k -n web,worker -c cyan,magenta \"next dev --turbo\" \"tsx watch --env-file=.env src/worker/index.ts\"",
     "build": "next build",
-    "start": "next start",
-    "start:web": "next start",
+    "start": "pnpm run webui-lock:check && next start",
+    "start:web": "pnpm run webui-lock:check && next start",
     "start:worker": "tsx --env-file=.env src/worker/index.ts",
     "start:scene": "./scripts/run-scene-service.sh",
-    "start:all": "concurrently -k -n web,worker -c cyan,magenta \"next start\" \"tsx --env-file=.env src/worker/index.ts\"",
+    "start:all": "pnpm run webui-lock:check && concurrently -k -n web,worker -c cyan,magenta \"next start\" \"tsx --env-file=.env src/worker/index.ts\"",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -20,7 +20,8 @@
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:check-target": "tsx --env-file=.env src/server/db/check-target.ts",
-    "db:migrate": "tsx --env-file=.env src/server/db/migrate.ts"
+    "db:migrate": "tsx --env-file=.env src/server/db/migrate.ts",
+    "webui-lock:check": "tsx --env-file=.env src/server/auth/check-webui-lock.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.883.0",

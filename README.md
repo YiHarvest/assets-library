@@ -231,6 +231,11 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 完整文档见 [docs/api.md](docs/api.md)，OpenAPI 文件位于
 [spec/contracts/openapi.yaml](spec/contracts/openapi.yaml)，运行后也可访问 `/docs`。
 
+管理页面可通过 `WEBUI_LOCK_KEY` 启用可信内网页面锁。浏览器在 `/lock` 解锁后
+使用 12 小时 HttpOnly 签名 Cookie；脚本读取 OpenAPI 时可发送
+`Authorization: Bearer <WEBUI_LOCK_KEY>`。`APP_MODE=prd` 缺少该配置会拒绝启动，
+dev 留空则关闭页面锁。此机制不保护也不改变任何既有 `/api/v1/**` 业务接口。
+
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/v1/uploads` | 创建批量上传任务 |

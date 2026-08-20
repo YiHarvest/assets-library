@@ -52,7 +52,7 @@ describe("OpenAPI and unlock authorization", () => {
     enableLock();
     const body = new URLSearchParams({
       key,
-      next: "/feisu/assets-library/docs",
+      next: "/",
     });
     const response = await unlock(
       new Request("https://media.example.com/feisu/assets-library/api/auth/unlock", {
@@ -63,7 +63,7 @@ describe("OpenAPI and unlock authorization", () => {
     );
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
-      "https://media.example.com/feisu/assets-library/docs",
+      "https://media.example.com/feisu/assets-library/",
     );
     const cookie = response.headers.get("set-cookie")!;
     expect(cookie).toContain(`${WEBUI_LOCK_COOKIE_NAME}=`);

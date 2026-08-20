@@ -21,12 +21,21 @@
     "db:generate": "drizzle-kit generate",
     "db:check-target": "tsx --env-file=.env src/server/db/check-target.ts",
     "db:migrate": "tsx --env-file=.env src/server/db/migrate.ts",
-    "webui-lock:check": "tsx --env-file=.env src/server/auth/check-webui-lock.ts"
+    "webui-lock:check": "tsx --env-file=.env src/server/auth/check-webui-lock.ts",
+    "metabase:config": "./ops/metabase/scripts/metabase.sh config",
+    "metabase:up": "./ops/metabase/scripts/metabase.sh up",
+    "metabase:down": "./ops/metabase/scripts/metabase.sh down",
+    "metabase:status": "./ops/metabase/scripts/metabase.sh status",
+    "metabase:logs": "./ops/metabase/scripts/metabase.sh logs",
+    "metabase:provision-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/provision-reader.mjs",
+    "metabase:verify-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/verify-reader.mjs",
+    "metabase:sync-reporting-metadata": "node --env-file=ops/metabase/.admin.env ops/metabase/scripts/sync-reporting-metadata.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.883.0",
-    "@smithy/node-http-handler": "^4.1.10",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@radix-ui/react-slot": "^1.2.3",
+    "@smithy/node-http-handler": "^4.1.10",
     "busboy": "^1.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

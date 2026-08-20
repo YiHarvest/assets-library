@@ -27,6 +27,7 @@ import {
   tags,
   taskItems,
   tasks,
+  users,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import {
@@ -89,6 +90,7 @@ export interface CreateMutationTaskInput {
 export async function createMutationTask(input: CreateMutationTaskInput) {
   const taskId = input.id ?? crypto.randomUUID();
   const now = new Date();
+  const userId = input.userId?.trim() || null;
   const phase =
     input.type === "delete"
       ? "deleting"
@@ -98,12 +100,26 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           ? "updating"
           : "retrying";
   await db.transaction(async (tx) => {
+    if (userId) {
+      await tx
+        .insert(users)
+        .values({
+          userId,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onDuplicateKeyUpdate({
+          set: { lastSeenAt: now, updatedAt: now },
+        });
+    }
     await tx.insert(tasks).values({
       id: taskId,
       type: input.type,
       status: "queued",
       phase,
-      userId: input.userId?.trim() || null,
+      userId,
       callbackUrl: input.callbackUrl?.trim() || null,
       totalItems: 1,
       expiresAt: input.expiresAt ?? null,
@@ -128,14 +144,29 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
 /** 在一个事务中创建异步任务及文件清单。 */
 export async function createTaskWithItems(manifest: CreateTaskManifest) {
   const now = new Date();
+  const userId = manifest.userId?.trim() || null;
   const items = manifest.items ?? [];
   const totalBytes = items.reduce((sum, item) => sum + item.totalBytes, 0);
   await db.transaction(async (tx) => {
+    if (userId) {
+      await tx
+        .insert(users)
+        .values({
+          userId,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onDuplicateKeyUpdate({
+          set: { lastSeenAt: now, updatedAt: now },
+        });
+    }
     await tx.insert(tasks).values({
       id: manifest.id,
       type: manifest.type,
       phase: manifest.type === "upload" ? "receiving" : "queued",
-      userId: manifest.userId?.trim() || null,
+      userId,
       callbackUrl: manifest.callbackUrl?.trim() || null,
       totalBytes,
       totalItems: items.length,
@@ -862,6 +893,50 @@ export async function listUserMediaPage(
         ? { createdAt: lastItem.createdAt, assetId: lastItem.assetId }
         : null,
   };
+}
+
+export interface RegisteredUserUsage {
+  userId: string;
+  displayName: string | null;
+  email: string | null;
+  department: string | null;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  assetCount: number;
+}
+
+/**
+ * 以 users 注册表为准列出用户资料及当前有效素材数。
+ * LEFT JOIN 保留还没有素材的用户，避免 MCP list_users 漏掉已注册身份。
+ */
+export async function listRegisteredUsers(): Promise<RegisteredUserUsage[]> {
+  return db
+    .select({
+      userId: users.userId,
+      displayName: users.displayName,
+      email: users.email,
+      department: users.department,
+      firstSeenAt: users.firstSeenAt,
+      lastSeenAt: users.lastSeenAt,
+      assetCount: sql<number>`count(${assets.id})`.mapWith(Number),
+    })
+    .from(users)
+    .leftJoin(
+      assets,
+      and(
+        eq(assets.userId, users.userId),
+        ne(assets.reviewStatus, "deleted"),
+      ),
+    )
+    .groupBy(
+      users.userId,
+      users.displayName,
+      users.email,
+      users.department,
+      users.firstSeenAt,
+      users.lastSeenAt,
+    )
+    .orderBy(desc(sql`count(${assets.id})`), asc(users.userId));
 }
 
 function intersectAssetIdSets(sets: ReadonlyArray<ReadonlySet<string>>) {
@@ -1764,7 +1839,8 @@ async function selectPriorityValidationJob(tx: JobTransaction, now: Date) {
 
 /**
  * 为分析作业锁定一个任务行后再计算并发数，确保多个 worker 同时领取时不会共同
- * 穿透软上限。任务之间按最早等待作业排序；被其他 worker 锁定的任务直接跳过。
+ * 穿透软上限。任务之间按最早等待作业排序；并发 worker 等待同一个候选任务的
+ * 短事务提交后重新计算配额，避免把“候选暂时被锁”误判为“队列为空”。
  */
 async function selectFairAnalysisJob(
   tx: JobTransaction,
@@ -1801,7 +1877,7 @@ async function selectFairAnalysisJob(
         )`,
       )
       .limit(1)
-      .for("update", { skipLocked: true });
+      .for("update");
     if (!candidateTask) return null;
 
     const [runningRow] = await tx

@@ -16,6 +16,7 @@ import {
   taskItemSegments,
   taskItems,
   tasks,
+  users,
   videoSources,
 } from "@/server/db/schema";
 import {
@@ -29,6 +30,7 @@ import {
 export const defaultMigrationsFolder = path.resolve(process.cwd(), "drizzle");
 
 const applicationTables = [
+  users,
   tasks,
   taskItems,
   idempotencyRequests,

@@ -35,7 +35,10 @@ export interface ApiV1DomainServices {
     UploadService,
     "createUploadTask" | "receiveUploadItem" | "sealUploadTask"
   >;
-  users: Pick<UserService, "getUserStorageUsage" | "listUserMedia">;
+  users: Pick<
+    UserService,
+    "getUserStorageUsage" | "listUserMedia" | "listUsers"
+  >;
 }
 
 /** 显式组合根：所有领域服务及其基础设施依赖只在这里装配。 */
@@ -72,6 +75,7 @@ export function createApiV1DomainServices(): ApiV1DomainServices {
     }),
     users: new UserService({
       listUserMediaPage: assetRepository.listUserMediaPage,
+      listRegisteredUsers: assetRepository.listRegisteredUsers,
       summarizeUserStorage: assetRepository.summarizeUserStorage,
     }),
     media: new MediaService({
@@ -103,8 +107,8 @@ export class DefaultApiV1Service implements ApiV1Service {
     return this.services.uploads.sealUploadTask(taskId);
   }
 
-  getTask(taskId: string) {
-    return this.services.tasks.getTask(taskId);
+  getTask(taskId: string, expectedUserId?: string) {
+    return this.services.tasks.getTask(taskId, expectedUserId);
   }
 
   queryAssets(input: AssetQuery) {
@@ -121,6 +125,10 @@ export class DefaultApiV1Service implements ApiV1Service {
 
   getAsset(assetId: string, scope: UserScope) {
     return this.services.assets.getAsset(assetId, scope);
+  }
+
+  listUsers() {
+    return this.services.users.listUsers();
   }
 
   updateAsset(assetId: string, input: UpdateAssetTask) {

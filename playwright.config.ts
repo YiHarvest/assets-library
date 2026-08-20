@@ -31,6 +31,13 @@ export default defineConfig({
       DATABASE_URL: databaseUrl,
       DATABASE_SSL_CA_PATH: process.env.DATABASE_SSL_CA_PATH ?? "",
       MEDIA_ROOT: "/tmp/assets-library-e2e/media",
+      // MCP e2e：默认 user_id + 允许切换的白名单（x-request-userid 用例）。
+      MCP_DEFAULT_USER_ID:
+        process.env.MCP_DEFAULT_USER_ID ?? "user_mcp_e2e_default",
+      MCP_ALLOWED_USER_IDS:
+        process.env.MCP_ALLOWED_USER_IDS ?? "user_clip,user_editor",
+      // 任意用户模式测试：允许 x-request-userid 传任意值。
+      MCP_ALLOW_ANY_USER_ID: "true",
     },
     reuseExistingServer: false,
     timeout: 120_000,

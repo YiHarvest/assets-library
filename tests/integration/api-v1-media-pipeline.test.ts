@@ -56,6 +56,7 @@ const applicationTables = [
   "task_item_segments",
   "task_items",
   "tasks",
+  "users",
   "video_sources",
 ] as const;
 
@@ -468,6 +469,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       .where(eq(schema.videoSources.taskId, taskId));
     const analysisRows = await database.db.select().from(schema.analysisResults);
     expect(sourceRows).toHaveLength(1);
+    expect(sourceRows[0]?.generatedSegmentCount).toBe(2);
     expect(assetRows).toHaveLength(2);
     expect(assetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
     expect(assetRows.every((row) => row.sizeBytes <= 10 * 1024 * 1024)).toBe(true);

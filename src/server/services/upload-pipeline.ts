@@ -347,6 +347,7 @@ async function processVideo(
             mimeType: "video/mp4",
             sizeBytes: persisted.parentObject.sizeBytes,
             durationMs: Math.round(batch.durationSeconds * 1_000),
+            generatedSegmentCount: segmentRows.length,
             status: "done",
             createdAt: now,
             updatedAt: now,

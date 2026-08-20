@@ -62,7 +62,8 @@ export function safeWebUiReturnPath(
   value: string | null | undefined,
   env: WebUiLockEnvironment = process.env,
 ) {
-  const fallback = `${normalizeBasePath(env.NEXT_PUBLIC_BASE_PATH)}/` || "/";
+  const basePath = normalizeBasePath(env.NEXT_PUBLIC_BASE_PATH);
+  const fallback = `${basePath}/` || "/";
   if (!value || !value.startsWith("/") || value.startsWith("//")) return fallback;
 
   let url: URL;
@@ -73,9 +74,21 @@ export function safeWebUiReturnPath(
   }
   if (url.origin !== "http://webui.local") return fallback;
   const internalPath = stripAppBasePath(url.pathname, env);
-  return isProtectedWebUiPath(internalPath)
-    ? `${url.pathname}${url.search}`
-    : fallback;
+  if (!isProtectedWebUiPath(internalPath)) return fallback;
+
+  // A session cookie is intentionally scoped to basePath. Normalize legacy or
+  // hand-authored return paths such as `/` and `/upload` into that same scope,
+  // otherwise a successful unlock immediately loses its cookie on redirect.
+  const alreadyPrefixed =
+    !basePath ||
+    url.pathname === basePath ||
+    url.pathname.startsWith(`${basePath}/`);
+  const pathname = alreadyPrefixed
+    ? url.pathname
+    : internalPath === "/"
+      ? `${basePath}/`
+      : `${basePath}${internalPath}`;
+  return `${pathname}${url.search}`;
 }
 
 export function readCookie(cookieHeader: string | null, name: string) {

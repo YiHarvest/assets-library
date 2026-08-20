@@ -66,6 +66,13 @@ describe("WebUI lock primitives", () => {
     expect(
       safeWebUiReturnPath("/feisu/assets-library/docs?view=api", env),
     ).toBe("/feisu/assets-library/docs?view=api");
+    expect(safeWebUiReturnPath("/", env)).toBe("/feisu/assets-library/");
+    expect(safeWebUiReturnPath("/upload?source=lock", env)).toBe(
+      "/feisu/assets-library/upload?source=lock",
+    );
+    expect(safeWebUiReturnPath("/assets/asset-1", env)).toBe(
+      "/feisu/assets-library/assets/asset-1",
+    );
     expect(safeWebUiReturnPath("https://evil.example/", env)).toBe(
       "/feisu/assets-library/",
     );

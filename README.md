@@ -228,7 +228,9 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 
 ## API
 
-完整文档见 [docs/api.md](docs/api.md)，OpenAPI 文件位于
+完整文档见 [docs/api.md](docs/api.md)，MCP（AI 工具）接入见
+[docs/mcp.md](docs/mcp.md)，独立只读 Metabase 部署见
+[ops/metabase/README.md](ops/metabase/README.md)，OpenAPI 文件位于
 [spec/contracts/openapi.yaml](spec/contracts/openapi.yaml)，运行后也可访问 `/docs`。
 
 管理页面可通过 `WEBUI_LOCK_KEY` 启用可信内网页面锁。浏览器在 `/lock` 解锁后

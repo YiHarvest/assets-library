@@ -1,0 +1,70 @@
+name: assets-library-metabase
+
+services:
+  metabase-postgres:
+    image: docker.m.daocloud.io/library/postgres:17.11-bookworm
+    network_mode: host
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - listen_addresses=127.0.0.1
+      - -c
+      - port=25432
+    volumes:
+      - assets-library-metabase-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -p 25432 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  metabase:
+    image: docker.m.daocloud.io/metabase/metabase:v0.63.14
+    network_mode: host
+    hostname: assets-library-metabase
+    extra_hosts:
+      - assets-library-metabase:127.0.0.1
+    environment:
+      MB_JETTY_HOST: ${MB_JETTY_HOST}
+      MB_JETTY_PORT: ${MB_JETTY_PORT}
+      MB_SITE_URL: ${MB_SITE_URL}
+      MB_SITE_NAME: ${MB_SITE_NAME}
+      MB_SITE_LOCALE: ${MB_SITE_LOCALE}
+      JAVA_TIMEZONE: ${JAVA_TIMEZONE}
+      MB_REPORT_TIMEZONE: ${MB_REPORT_TIMEZONE}
+      MB_ANON_TRACKING_ENABLED: ${MB_ANON_TRACKING_ENABLED}
+      MB_DB_TYPE: ${MB_DB_TYPE}
+      MB_DB_HOST: ${MB_DB_HOST}
+      MB_DB_PORT: ${MB_DB_PORT}
+      MB_DB_DBNAME: ${MB_DB_DBNAME}
+      MB_DB_USER: ${MB_DB_USER}
+      MB_DB_PASS: ${MB_DB_PASS}
+      MB_ENCRYPTION_SECRET_KEY: ${MB_ENCRYPTION_SECRET_KEY}
+      MB_JDBC_DATA_WAREHOUSE_MAX_CONNECTION_POOL_SIZE: ${MB_JDBC_DATA_WAREHOUSE_MAX_CONNECTION_POOL_SIZE}
+      MB_UNAGGREGATED_QUERY_ROW_LIMIT: ${MB_UNAGGREGATED_QUERY_ROW_LIMIT}
+      MB_AGGREGATED_QUERY_ROW_LIMIT: ${MB_AGGREGATED_QUERY_ROW_LIMIT}
+    depends_on:
+      metabase-postgres:
+        condition: service_healthy
+    volumes:
+      - ./mysql-ca.pem:/certs/mysql-ca.pem:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent http://127.0.0.1:$${MB_JETTY_PORT}/api/health >/dev/null || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  assets-library-metabase-postgres:

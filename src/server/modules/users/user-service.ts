@@ -10,7 +10,7 @@ import type {
 
 type UserRepository = Pick<
   typeof AssetRepository,
-  "listUserMediaPage" | "summarizeUserStorage"
+  "listRegisteredUsers" | "listUserMediaPage" | "summarizeUserStorage"
 >;
 
 function directMediaUrl(
@@ -75,6 +75,21 @@ export function decodeUserMediaCursor(
 
 export class UserService {
   constructor(private readonly repository: UserRepository) {}
+
+  /** 列出 users 注册表中的用户资料及当前有效素材数（MCP list_users 用）。 */
+  async listUsers() {
+    return this.repository.listRegisteredUsers().then((rows) =>
+      rows.map((row) => ({
+        user_id: row.userId,
+        display_name: row.displayName,
+        email: row.email,
+        department: row.department,
+        first_seen_at: shanghaiIso(row.firstSeenAt)!,
+        last_seen_at: shanghaiIso(row.lastSeenAt)!,
+        asset_count: row.assetCount,
+      })),
+    );
+  }
 
   async getUserStorageUsage(
     userId: string,

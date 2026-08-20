@@ -26,7 +26,7 @@ export interface ApiV1Service {
   createUploadTask(input: CreateUploadTask): Promise<TaskStatusResponse>;
   receiveUploadItem(input: ReceiveUploadItemInput): Promise<TaskStatusResponse>;
   sealUploadTask(taskId: string): Promise<TaskStatusResponse>;
-  getTask(taskId: string): Promise<TaskStatusResponse>;
+  getTask(taskId: string, expectedUserId?: string): Promise<TaskStatusResponse>;
   queryAssets(input: AssetQuery): Promise<AssetQueryResponse>;
   getUserStorageUsage(userId: string): Promise<UserStorageUsageResponse>;
   listUserMedia(
@@ -35,6 +35,17 @@ export interface ApiV1Service {
     origin: string,
   ): Promise<UserMediaListResponse>;
   getAsset(assetId: string, scope: UserScope): Promise<ApiV1AssetDetail>;
+  listUsers(): Promise<
+    Array<{
+      user_id: string;
+      display_name: string | null;
+      email: string | null;
+      department: string | null;
+      first_seen_at: string;
+      last_seen_at: string;
+      asset_count: number;
+    }>
+  >;
   updateAsset(assetId: string, input: UpdateAssetTask): Promise<TaskAccepted>;
   publishAsset(assetId: string, input: MutationContext): Promise<TaskAccepted>;
   retryAsset(assetId: string, input: MutationContext): Promise<TaskAccepted>;

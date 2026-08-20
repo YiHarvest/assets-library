@@ -187,6 +187,17 @@ const envSchema = z
     EMBEDDING_BASE_URL: z.string().url().optional().or(z.literal("")),
     EMBEDDING_API_KEY: z.string().optional(),
     EMBEDDING_MODEL: z.string().optional(),
+    // MCP Streamable HTTP endpoint。token 留空时 MCP 端点关闭（fail-closed）。
+    MCP_ACCESS_TOKEN: z.string().optional(),
+    // 逗号分隔的额外 SSRF 白名单域名（不含端口），用于 upload_from_url 拉取。
+    MCP_ALLOWED_DOMAINS: z.string().optional(),
+    // 服务端注入的默认 user_id；工具参数不暴露 user_id，天然数据隔离。
+    MCP_DEFAULT_USER_ID: z.string().trim().min(1).max(191).optional(),
+    // 逗号分隔的允许 user_id 白名单；x-request-userid 请求头只能在白名单内取值。
+    MCP_ALLOWED_USER_IDS: z.string().optional(),
+    // 开启后 x-request-userid 可传任意值（剪辑 agent 动态访问任意注册用户）。
+    // 默认关闭，保持白名单模式；开启需谨慎（等价于 token 持有者可代理任意用户）。
+    MCP_ALLOW_ANY_USER_ID: booleanSchema.default(false),
   })
   .superRefine((env, context) => {
     if (env.WORKER_ANALYZE_TASK_SOFT_LIMIT > env.WORKER_CONCURRENCY) {
@@ -221,6 +232,14 @@ const envSchema = z
           message: `${role} supports at most ${MAX_MODEL_CANDIDATES_PER_ROLE} model candidates.`,
         });
       }
+    }
+    const mcpToken = env.MCP_ACCESS_TOKEN?.trim();
+    if (mcpToken && mcpToken.length < 32) {
+      context.addIssue({
+        code: "custom",
+        path: ["MCP_ACCESS_TOKEN"],
+        message: "MCP_ACCESS_TOKEN 至少需要 32 个字符。",
+      });
     }
   });
 
@@ -446,5 +465,20 @@ export function loadConfig(
     embeddingBaseUrl,
     embeddingApiKey,
     embeddingConfigured: Boolean(embeddingBaseUrl && parsed.EMBEDDING_MODEL),
+    mcpConfigured: Boolean(optionalValue(parsed.MCP_ACCESS_TOKEN)),
+    mcpAccessToken: optionalValue(parsed.MCP_ACCESS_TOKEN),
+    mcpAllowedDomains: (optionalValue(parsed.MCP_ALLOWED_DOMAINS) ?? "")
+      .split(",")
+      .map((domain) => domain.trim().toLowerCase())
+      .filter(Boolean),
+    mcpDefaultUserId: optionalValue(parsed.MCP_DEFAULT_USER_ID),
+    mcpAllowedUserIds: [
+      optionalValue(parsed.MCP_DEFAULT_USER_ID),
+      ...(optionalValue(parsed.MCP_ALLOWED_USER_IDS) ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ].filter((value, index, array) => array.indexOf(value) === index),
+    mcpAllowAnyUserId: parsed.MCP_ALLOW_ANY_USER_ID,
   };
 }

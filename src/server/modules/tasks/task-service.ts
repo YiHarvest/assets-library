@@ -6,11 +6,13 @@ import type {
   TaskStatusResponse,
 } from "@/shared/contracts";
 import { apiV1ErrorCodeSchema } from "@/shared/contracts";
+import { ApiV1Error } from "@/server/api/errors";
 
 export interface TaskRepository {
   getTaskWithItems(taskId: string): Promise<{
     task: {
       id: string;
+      userId: string | null;
       type: string;
       status: string;
       phase: string;
@@ -165,8 +167,15 @@ export function acceptedTask(response: TaskStatusResponse): TaskAccepted {
 export class TaskService {
   constructor(private readonly repository: TaskRepository) {}
 
-  async getTask(taskId: string): Promise<TaskStatusResponse> {
+  async getTask(
+    taskId: string,
+    expectedUserId?: string,
+  ): Promise<TaskStatusResponse> {
     const { task, items } = await this.repository.getTaskWithItems(taskId);
+    if (expectedUserId !== undefined && task.userId !== expectedUserId) {
+      // 与“不存在”使用相同响应，避免向其他 MCP 用户泄露任务是否存在。
+      throw new ApiV1Error("not_found", "任务不存在。", 404);
+    }
     const assetRows = items.length
       ? await this.repository.listTaskItemAssetIds(taskId)
       : [];

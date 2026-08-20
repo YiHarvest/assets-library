@@ -142,6 +142,26 @@ function fakeService() {
       has_more: false,
     })),
     getAsset: vi.fn(async () => asset),
+    listUsers: vi.fn(async () => [
+      {
+        user_id: "user-7",
+        display_name: null,
+        email: null,
+        department: null,
+        first_seen_at: now,
+        last_seen_at: now,
+        asset_count: 1,
+      },
+      {
+        user_id: "user-8",
+        display_name: "用户 8",
+        email: "user-8@example.com",
+        department: "剪辑",
+        first_seen_at: now,
+        last_seen_at: now,
+        asset_count: 3,
+      },
+    ]),
     updateAsset: vi.fn(async () =>
       task({ task_type: "update", phase: "updating" }),
     ),

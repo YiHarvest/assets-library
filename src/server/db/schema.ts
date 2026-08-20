@@ -20,6 +20,27 @@ const utcDateTime = (name: string) => datetime(name, { mode: "date", fsp: 3 });
 const byteCount = (name: string) => bigint(name, { mode: "number", unsigned: true });
 
 /**
+ * 应用观察到的用户作用域。
+ *
+ * user_id 目前来自 API/MCP 请求，并不等同于已认证身份；姓名、邮箱和部门仅为
+ * 后续接入身份系统预留，未获得可信来源前保持 NULL。
+ */
+export const users = mysqlTable(
+  "users",
+  {
+    userId: varchar("user_id", { length: 191 }).primaryKey(),
+    displayName: varchar("display_name", { length: 255 }),
+    email: varchar("email", { length: 320 }),
+    department: varchar("department", { length: 255 }),
+    firstSeenAt: utcDateTime("first_seen_at").notNull(),
+    lastSeenAt: utcDateTime("last_seen_at").notNull(),
+    createdAt: utcDateTime("created_at").notNull(),
+    updatedAt: utcDateTime("updated_at").notNull(),
+  },
+  (table) => [index("users_last_seen_idx").on(table.lastSeenAt)],
+);
+
+/**
  * 所有异步操作共享的任务主表。
  *
  * 数据库存储 UTC；API 层负责将时间转换成 Asia/Shanghai。任务状态只使用
@@ -175,6 +196,10 @@ export const videoSources = mysqlTable(
     mimeType: varchar("mime_type", { length: 255 }).notNull(),
     sizeBytes: byteCount("size_bytes").notNull(),
     durationMs: bigint("duration_ms", { mode: "number", unsigned: true }),
+    /** 分镜批次首次成功持久化时的切片总数，不随子素材删除或任务清理变化。 */
+    generatedSegmentCount: int("generated_segment_count", { unsigned: true })
+      .notNull()
+      .default(0),
     status: mysqlEnum("status", ["queued", "running", "done", "failed"])
       .notNull()
       .default("queued"),

@@ -40,9 +40,10 @@ function stagingRelativePath(taskId: string, itemId: string, filename: string) {
   return path.posix.join(".staging", taskId, `${itemId}${target.extension}`);
 }
 
-function resolveStagingPath(mediaRoot: string, relativePath: string) {
-  const absolute = path.resolve(mediaRoot, relativePath);
-  if (!absolute.startsWith(`${mediaRoot}${path.sep}`)) {
+export function resolveStagingPath(mediaRoot: string, relativePath: string) {
+  const root = path.resolve(mediaRoot);
+  const absolute = path.resolve(root, relativePath);
+  if (absolute === root || !absolute.startsWith(`${root}${path.sep}`)) {
     throw new ApiV1Error("storage_error", "上传暂存路径无效。", 500);
   }
   return absolute;

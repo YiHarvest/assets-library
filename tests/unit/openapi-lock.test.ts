@@ -73,6 +73,30 @@ describe("OpenAPI and unlock authorization", () => {
     expect(cookie).toContain("Path=/feisu/assets-library");
   });
 
+  it("does not share the fallback rate-limit bucket across user agents", async () => {
+    enableLock();
+    const request = (keyValue: string, userAgent: string) =>
+      unlock(
+        new Request(
+          "https://media.example.com/feisu/assets-library/api/auth/unlock",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              "user-agent": userAgent,
+            },
+            body: new URLSearchParams({ key: keyValue, next: "/" }),
+          },
+        ),
+      );
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await request("wrong", "rate-limit-agent-a")).status).toBe(303);
+    }
+    expect((await request(key, "rate-limit-agent-a")).status).toBe(429);
+    expect((await request(key, "rate-limit-agent-b")).status).toBe(303);
+  });
+
   it("clears the scoped session on logout", () => {
     enableLock();
     const response = logout(

@@ -460,7 +460,7 @@ export function registerTools(
       const detail = await service.getAsset(asset_id, finalScope);
       return textResult({
         asset_id,
-        media_url: detail.media_url,
+        media_url: relativeUrl(detail.media_url),
         original_filename: (detail as { original_filename?: string }).original_filename,
       });
     },

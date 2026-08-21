@@ -210,6 +210,184 @@ mysqlTest("MySQL 数据层", () => {
     ).resolves.toMatchObject({ taskId: firstTaskId, type: "analyze" });
   });
 
+  test("不可分析的 retry 素材会终止任务而不是永久停留在 running", async () => {
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      name: "unavailable retry target",
+      originalFilename: "retry.jpg",
+      originalPath: "/tmp/retry.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    await migrationConnection.db
+      .update(assets)
+      .set({ processingStatus: "failed", reviewStatus: "published" })
+      .where(eq(assets.id, assetId));
+    const created = await repository.createMutationTask({
+      type: "retry",
+      assetId,
+      payload: { userId: null },
+    });
+    const retryJob = await repository.claimNextJob("retry-unavailable");
+    if (!retryJob) throw new Error("retry 作业未被领取。");
+    const { processMutationJob } = await import(
+      "@/server/services/mutation-pipeline"
+    );
+    await processMutationJob(retryJob, {} as ObjectStorage);
+
+    const analysisJob = await repository.claimNextJob("retry-analysis");
+    if (!analysisJob) throw new Error("analysis 作业未被领取。");
+    const analyze = vi.fn();
+    const { processJob } = await import("@/server/services/processing");
+    await processJob(
+      analysisJob,
+      { analyze },
+      async () => {
+        throw new Error("不可分析的素材不应进入媒体准备。");
+      },
+    );
+
+    expect(analyze).not.toHaveBeenCalled();
+    const [storedJob] = await migrationConnection.db
+      .select({ status: jobs.status })
+      .from(jobs)
+      .where(eq(jobs.id, analysisJob.id));
+    const [storedTask] = await migrationConnection.db
+      .select({ status: tasks.status, phase: tasks.phase })
+      .from(tasks)
+      .where(eq(tasks.id, created.task.id));
+    expect(storedJob?.status).toBe("failed");
+    expect(storedTask).toEqual({ status: "failed", phase: "finished" });
+  });
+
+  test("丢失租约的旧 analysis worker 不会覆盖新 attempt 的任务状态", async () => {
+    const taskId = crypto.randomUUID();
+    const assetId = crypto.randomUUID();
+    await insertSchedulingTask(taskId, new Date());
+    await repository.createAsset({
+      assetId,
+      taskId,
+      name: "lease handoff target",
+      originalFilename: "handoff.jpg",
+      originalPath: "/tmp/handoff.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    const jobId = await insertSchedulingJob({
+      taskId,
+      type: "analyze",
+      createdAt: new Date(),
+    });
+    await migrationConnection.db
+      .update(jobs)
+      .set({ assetId })
+      .where(eq(jobs.id, jobId));
+    const staleJob = await repository.claimNextJob("old-worker");
+    if (!staleJob) throw new Error("旧 worker 未领取作业。");
+    await migrationConnection.db
+      .update(jobs)
+      .set({ status: "queued", claimedAt: null, leaseOwner: null })
+      .where(eq(jobs.id, jobId));
+    const currentJob = await repository.claimNextJob("new-worker");
+    expect(currentJob).toMatchObject({ id: jobId, attempt: 2 });
+
+    const analyze = vi.fn();
+    const { processJob } = await import("@/server/services/processing");
+    await processJob(
+      staleJob,
+      { analyze },
+      async () => {
+        throw new Error("丢失租约后不应继续处理媒体。");
+      },
+    );
+
+    expect(analyze).not.toHaveBeenCalled();
+    const [storedJob] = await migrationConnection.db
+      .select({ status: jobs.status, attempt: jobs.attempt })
+      .from(jobs)
+      .where(eq(jobs.id, jobId));
+    const [storedTask] = await migrationConnection.db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(storedJob).toEqual({ status: "running", attempt: 2 });
+    expect(storedTask?.status).toBe("running");
+  });
+
+  test("分析调度与 mutation worker 并发时不会因 task 索引锁顺序死锁", async () => {
+    const now = new Date();
+    for (let taskIndex = 0; taskIndex < 4; taskIndex += 1) {
+      const taskId = crypto.randomUUID();
+      await insertSchedulingTask(taskId, new Date(now.getTime() + taskIndex));
+      for (let jobIndex = 0; jobIndex < 3; jobIndex += 1) {
+        await insertSchedulingJob({
+          taskId,
+          type: "analyze",
+          createdAt: new Date(now.getTime() + taskIndex * 10 + jobIndex),
+        });
+      }
+    }
+
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      name: "concurrent mutation target",
+      originalFilename: "target.jpg",
+      originalPath: "/tmp/target.jpg",
+      mimeType: "image/jpeg",
+      mediaType: "image",
+      sizeBytes: 10,
+      directPublish: false,
+      enqueueAnalysis: false,
+    });
+    const mutationTaskIds: string[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const created = await repository.createMutationTask({
+        type: "update",
+        assetId,
+        payload: {
+          name: `updated-${index}`,
+          description: "concurrency regression",
+          tags: [],
+          userId: null,
+        },
+      });
+      mutationTaskIds.push(created.task.id);
+    }
+
+    const { processMutationJob } = await import(
+      "@/server/services/mutation-pipeline"
+    );
+    const storage = {} as ObjectStorage;
+    await Promise.all(
+      Array.from({ length: 4 }, async (_, index) => {
+        const leaseOwner = `mutation-deadlock:${index}`;
+        for (;;) {
+          const job = await repository.claimNextJob(leaseOwner, {
+            analyzeTaskSoftLimit: 2,
+          });
+          if (!job) return;
+          if (job.type === "update") await processMutationJob(job, storage);
+          else await repository.completeJob(job);
+        }
+      }),
+    );
+
+    const mutationTasks = await migrationConnection.db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(inArray(tasks.id, mutationTaskIds));
+    expect(mutationTasks).toHaveLength(mutationTaskIds.length);
+    expect(mutationTasks.every((task) => task.status === "done")).toBe(true);
+  }, 30_000);
+
   test("迁移生成完整的 MySQL 8 schema，并以 UTC/TLS 建立连接", async () => {
     const [tableRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>

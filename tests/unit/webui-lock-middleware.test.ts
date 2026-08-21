@@ -40,6 +40,17 @@ describe("WebUI lock middleware", () => {
     );
   });
 
+  it("normalizes the configured prefix before building the lock URL", async () => {
+    enableLock();
+    vi.stubEnv("NEXT_PUBLIC_BASE_PATH", "//feisu//assets-library//");
+    const response = await middleware(
+      new NextRequest(`${origin}${basePath}/upload`),
+    );
+    expect(new URL(response.headers.get("location")!).pathname).toBe(
+      `${basePath}/lock`,
+    );
+  });
+
   it("accepts a valid signed session cookie", async () => {
     enableLock();
     const session = await createWebUiSession(key);

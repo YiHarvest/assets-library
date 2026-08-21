@@ -18,6 +18,7 @@ import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { API_V1, apiV1 } from "@/lib/api-v1-client";
+import { createLocalId } from "@/lib/local-id";
 import {
   MAX_UPLOAD_TASK_BYTES,
   MAX_UPLOAD_TASK_ITEMS,
@@ -44,17 +45,6 @@ interface UploadItem {
   progress: number;
   assetIds: string[];
   error: string;
-}
-
-function localId() {
-  const c = globalThis.crypto;
-  if (typeof c?.randomUUID === "function") return c.randomUUID();
-  const bytes = new Uint8Array(16);
-  c.getRandomValues(bytes);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 const phaseLabels: Record<UploadPhase, string> = {
@@ -298,7 +288,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       const previewUrl = URL.createObjectURL(file);
       previewUrlsRef.current.add(previewUrl);
       return {
-        id: localId(),
+        id: createLocalId(),
         serverItemId: null,
         file,
         previewUrl,

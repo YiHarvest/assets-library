@@ -7,7 +7,7 @@ info:
     所有业务字段使用 snake_case。接口部署在可信内网，不做应用层鉴权。
     所有写操作异步执行，并由统一任务接口报告进度。
 servers:
-  - url: https://assets-library.example.internal
+  - url: /
     description: 示例内网地址；部署时替换
 tags:
   - name: Uploads
@@ -50,7 +50,7 @@ paths:
               imageAndVideo:
                 value:
                   user_id: user_123
-                  callback_url: https://callback.example.internal/assets
+                  callback_url: null
                   auto_publish: false
                   items:
                     - filename: product.png

@@ -17,6 +17,7 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
+    "security:scan": "node scripts/check-sensitive-endpoints.mjs",
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:check-target": "tsx --env-file=.env src/server/db/check-target.ts",
@@ -27,7 +28,7 @@
     "metabase:down": "./ops/metabase/scripts/metabase.sh down",
     "metabase:status": "./ops/metabase/scripts/metabase.sh status",
     "metabase:logs": "./ops/metabase/scripts/metabase.sh logs",
-    "metabase:provision-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/provision-reader.mjs",
+    "metabase:provision-reader": "node --env-file=ops/metabase/.reader.env --env-file=ops/metabase/.admin.env ops/metabase/scripts/provision-reader.mjs",
     "metabase:verify-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/verify-reader.mjs",
     "metabase:sync-reporting-metadata": "node --env-file=ops/metabase/.admin.env ops/metabase/scripts/sync-reporting-metadata.mjs"
   },

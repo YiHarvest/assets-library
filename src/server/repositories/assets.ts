@@ -1773,6 +1773,10 @@ export interface ClaimedJob {
   type: typeof jobs.$inferSelect.type;
   attempt: number;
   payload: Record<string, unknown> | null;
+  availableAt?: Date;
+  createdAt?: Date;
+  claimedAt?: Date | null;
+  leaseOwner?: string | null;
 }
 
 export interface ClaimNextJobOptions {
@@ -1817,6 +1821,10 @@ async function claimQueuedJob(
     type: row.type,
     attempt,
     payload: row.payload,
+    availableAt: row.availableAt,
+    createdAt: row.createdAt,
+    claimedAt: now,
+    leaseOwner,
   };
 }
 

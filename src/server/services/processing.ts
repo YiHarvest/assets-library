@@ -52,6 +52,11 @@ import { processValidateJob } from "@/server/services/upload-pipeline";
 import type { ObjectStorage } from "@/server/storage/object-storage";
 import { createZosObjectStorage } from "@/server/storage/zos";
 import {
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+} from "@/server/observability/audit-log";
+import {
   analysisResultSchema,
   type AnalysisResult,
   type FailureCode,
@@ -533,6 +538,23 @@ export async function processJob(
   videoFramePreparer: VideoFramePreparer = prepareVideoFrames,
   storageOrRuntime?: ObjectStorage | ProcessingRuntime,
 ) {
+  const started = process.hrtime.bigint();
+  auditLog("worker_job_started", {
+    job_id: job.id,
+    task_id: job.taskId,
+    asset_id: job.assetId,
+    job_type: job.type,
+    attempt: job.attempt,
+    lease_owner: job.leaseOwner,
+    queue_wait_ms:
+      job.availableAt && job.claimedAt
+        ? Math.max(0, job.claimedAt.getTime() - job.availableAt.getTime())
+        : null,
+    age_before_claim_ms:
+      job.createdAt && job.claimedAt
+        ? Math.max(0, job.claimedAt.getTime() - job.createdAt.getTime())
+        : null,
+  });
   const runtime: ProcessingRuntime =
     storageOrRuntime && isObjectStorage(storageOrRuntime)
       ? { storage: storageOrRuntime }
@@ -540,7 +562,12 @@ export async function processJob(
   const storage = runtime.storage;
   const heartbeat = setInterval(() => {
     void heartbeatJob(job).catch((error) => {
-      console.error("Processing job heartbeat failed.", error);
+      auditLog("worker_job_heartbeat_failed", {
+        job_id: job.id,
+        task_id: job.taskId,
+        job_type: job.type,
+        ...errorAuditFields(error),
+      }, "error");
     });
   }, 30_000);
   heartbeat.unref();
@@ -587,9 +614,25 @@ export async function processJob(
     }
     await failJob(job);
   } catch (error) {
-    console.error(`Job ${job.id} (${job.type}) failed.`, error);
+    auditLog("worker_job_dispatch_failed", {
+      job_id: job.id,
+      task_id: job.taskId,
+      asset_id: job.assetId,
+      job_type: job.type,
+      attempt: job.attempt,
+      duration_ms: elapsedMilliseconds(started),
+      ...errorAuditFields(error),
+    }, "error");
     await failJob(job);
   } finally {
     clearInterval(heartbeat);
+    auditLog("worker_job_dispatch_finished", {
+      job_id: job.id,
+      task_id: job.taskId,
+      asset_id: job.assetId,
+      job_type: job.type,
+      attempt: job.attempt,
+      duration_ms: elapsedMilliseconds(started),
+    });
   }
 }

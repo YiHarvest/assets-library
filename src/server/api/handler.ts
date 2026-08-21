@@ -9,6 +9,14 @@ import type {
 } from "@/shared/contracts";
 import { apiV1ErrorCodeSchema } from "@/shared/contracts";
 import { userIdSchema } from "@/shared/contracts";
+import {
+  addAuditFields,
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+  requestAuditFields,
+  runWithAuditContext,
+} from "@/server/observability/audit-log";
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
@@ -22,6 +30,93 @@ function requestId(request: Request): RequestId {
     )
     ? (supplied as RequestId)
     : crypto.randomUUID();
+}
+
+function apiOperation(request: Request) {
+  const pathname = new URL(request.url).pathname.replace(
+    /^.*\/api\/v1(?=\/|$)/,
+    "/api/v1",
+  );
+  const route = pathname.replace(
+    /\/[0-9a-f]{8}-[0-9a-f-]{27,35}(?=\/|$)/gi,
+    "/:id",
+  );
+  const operations: Record<string, string> = {
+    "POST /api/v1/uploads": "create_upload_task",
+    "PUT /api/v1/uploads/:id/items/:id": "upload_item_bytes",
+    "POST /api/v1/uploads/:id": "seal_upload_task",
+    "GET /api/v1/tasks/:id": "get_task_status",
+    "POST /api/v1/assets/query": "query_assets",
+    "GET /api/v1/assets/:id": "get_asset",
+    "PATCH /api/v1/assets/:id": "update_asset",
+    "DELETE /api/v1/assets/:id": "delete_asset",
+    "POST /api/v1/assets/:id/publish": "publish_asset",
+    "POST /api/v1/assets/:id/retry": "retry_asset",
+    "GET /api/v1/media/:id": "get_media",
+    "GET /api/v1/media/:id/thumbnail": "get_thumbnail",
+  };
+  if (/^\/api\/v1\/users\/[^/]+\/media$/.test(route)) {
+    return "list_user_media";
+  }
+  if (/^\/api\/v1\/users\/[^/]+\/storage-usage$/.test(route)) {
+    return "get_storage_usage";
+  }
+  return operations[`${request.method} ${route}`] ?? `${request.method} ${route}`;
+}
+
+function apiPathFields(request: Request) {
+  const url = new URL(request.url);
+  const pathname = url.pathname.replace(/^.*\/api\/v1(?=\/|$)/, "/api/v1");
+  const fields: Record<string, unknown> = {};
+  const uploadItem = pathname.match(
+    /^\/api\/v1\/uploads\/([^/]+)\/items\/([^/]+)$/,
+  );
+  const uploadTask = pathname.match(/^\/api\/v1\/uploads\/([^/]+)$/);
+  const task = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
+  const asset = pathname.match(
+    /^\/api\/v1\/(?:assets|media)\/([0-9a-f]{8}-[0-9a-f-]{27,35})(?:\/|$)/i,
+  );
+  const user = pathname.match(/^\/api\/v1\/users\/([^/]+)\//);
+  if (uploadItem) {
+    fields.task_id = uploadItem[1];
+    fields.item_id = uploadItem[2];
+  } else if (uploadTask) fields.task_id = uploadTask[1];
+  else if (task) fields.task_id = task[1];
+  if (asset) fields.asset_id = asset[1];
+  if (user) {
+    try {
+      fields.user_id = decodeURIComponent(user[1]!);
+    } catch {
+      fields.user_id = user[1];
+    }
+  }
+  const queryUserId = url.searchParams.get("user_id");
+  if (queryUserId !== null) fields.user_id = queryUserId;
+  return fields;
+}
+
+function addParsedInputAuditFields(value: unknown) {
+  const fields: Record<string, unknown> = { input: value };
+  if (value && typeof value === "object") {
+    const input = value as {
+      user_id?: unknown;
+      items?: unknown;
+      filter?: { user_scope?: unknown };
+    };
+    if ("user_id" in input) fields.user_id = input.user_id ?? null;
+    if (Array.isArray(input.items)) {
+      fields.upload_item_count = input.items.length;
+      fields.upload_total_bytes = input.items.reduce((total, item) => {
+        if (!item || typeof item !== "object") return total;
+        const size = (item as { size_bytes?: unknown }).size_bytes;
+        return total + (typeof size === "number" ? size : 0);
+      }, 0);
+    }
+    if (input.filter?.user_scope) {
+      fields.user_scope = input.filter.user_scope;
+    }
+  }
+  addAuditFields(fields);
 }
 
 function inheritedServiceError(error: unknown): ApiV1Error | null {
@@ -95,19 +190,119 @@ export async function withApiV1(
   authorize: (request: Request) => void = () => undefined,
 ) {
   const id = requestId(request);
-  try {
-    authorize(request);
-    const response = await handler();
-    const headers = new Headers(response.headers);
-    headers.set("x-request-id", id);
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
-  } catch (error) {
-    return apiV1ErrorResponse(error, id);
-  }
+  const started = process.hrtime.bigint();
+  const context = {
+    requestId: id,
+    channel: "api" as const,
+    operation: apiOperation(request),
+    fields: {
+      ...requestAuditFields(request),
+      ...apiPathFields(request),
+    },
+  };
+  return runWithAuditContext(
+    context,
+    async () => {
+      auditLog("api_request_started");
+      try {
+        authorize(request);
+        const response = await handler();
+        const headers = new Headers(response.headers);
+        headers.set("x-request-id", id);
+        const location = headers.get("location");
+        auditLog("api_response_opened", {
+          http_status: response.status,
+          duration_to_headers_ms: elapsedMilliseconds(started),
+          location,
+        });
+        if (!response.body) {
+          auditLog("api_request_completed", {
+            http_status: response.status,
+            duration_ms: elapsedMilliseconds(started),
+            response_streamed: false,
+            location,
+          });
+          return new Response(null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+          });
+        }
+
+        const reader = response.body.getReader();
+        let finalized = false;
+        const logFinal = (
+          event:
+            | "api_request_completed"
+            | "api_request_cancelled"
+            | "api_response_stream_failed",
+          fields: Record<string, unknown> = {},
+          level: "info" | "warn" | "error" = "info",
+        ) => {
+          if (finalized) return;
+          finalized = true;
+          runWithAuditContext(context, () =>
+            auditLog(
+              event,
+              {
+                http_status: response.status,
+                duration_ms: elapsedMilliseconds(started),
+                response_streamed: true,
+                location,
+                ...fields,
+              },
+              level,
+            ),
+          );
+        };
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const chunk = await reader.read();
+              if (chunk.done) {
+                logFinal("api_request_completed");
+                controller.close();
+                return;
+              }
+              controller.enqueue(chunk.value);
+            } catch (error) {
+              logFinal(
+                "api_response_stream_failed",
+                errorAuditFields(error),
+                "error",
+              );
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            await reader.cancel(reason).catch(() => undefined);
+            logFinal(
+              "api_request_cancelled",
+              { cancel_reason: reason instanceof Error ? reason.message : reason },
+              "warn",
+            );
+          },
+        });
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      } catch (error) {
+        const response = apiV1ErrorResponse(error, id);
+        auditLog(
+          "api_request_failed",
+          {
+            http_status: response.status,
+            duration_ms: elapsedMilliseconds(started),
+            ...errorAuditFields(error),
+          },
+          response.status >= 500 ? "error" : "warn",
+        );
+        return response;
+      }
+    },
+  );
 }
 
 export async function parseJson<T>(request: Request, schema: ZodType<T>) {
@@ -134,7 +329,9 @@ export async function parseJson<T>(request: Request, schema: ZodType<T>) {
     if (error instanceof ApiV1Error) throw error;
     throw new ApiV1Error("invalid_request", "请求体必须是有效的 JSON。", 400);
   }
-  return schema.parse(value);
+  const parsed = schema.parse(value);
+  addParsedInputAuditFields(parsed);
+  return parsed;
 }
 
 export async function parseOptionalJson<T>(
@@ -143,7 +340,11 @@ export async function parseOptionalJson<T>(
   emptyValue: unknown = {},
 ) {
   const text = await request.text();
-  if (!text.trim()) return schema.parse(emptyValue);
+  if (!text.trim()) {
+    const parsed = schema.parse(emptyValue);
+    addParsedInputAuditFields(parsed);
+    return parsed;
+  }
   if (Buffer.byteLength(text, "utf8") > MAX_JSON_BODY_BYTES) {
     throw new ApiV1Error(
       "invalid_request",
@@ -152,7 +353,9 @@ export async function parseOptionalJson<T>(
     );
   }
   try {
-    return schema.parse(JSON.parse(text));
+    const parsed = schema.parse(JSON.parse(text));
+    addParsedInputAuditFields(parsed);
+    return parsed;
   } catch (error) {
     if (error instanceof ZodError) throw error;
     throw new ApiV1Error("invalid_request", "请求体必须是有效的 JSON。", 400);

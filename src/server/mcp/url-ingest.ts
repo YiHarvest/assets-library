@@ -119,14 +119,15 @@ async function fetchWithRedirectGuard(
   allowed: Set<string>,
 ): Promise<Response> {
   let current = url;
-  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
+  let redirectCount = 0;
+  for (;;) {
     assertAllowedHost(current, allowed);
     const started = process.hrtime.bigint();
     auditLog("mcp_source_request_started", {
       source_url: safeUrl(current.toString()),
       source_host: current.hostname,
       source_method: method,
-      redirect_hop: hop,
+      redirect_hop: redirectCount,
     });
     let response: Response;
     try {
@@ -138,7 +139,7 @@ async function fetchWithRedirectGuard(
           source_url: safeUrl(current.toString()),
           source_host: current.hostname,
           source_method: method,
-          redirect_hop: hop,
+          redirect_hop: redirectCount,
           duration_ms: elapsedMilliseconds(started),
           ...errorAuditFields(error),
         },
@@ -150,7 +151,7 @@ async function fetchWithRedirectGuard(
       source_url: safeUrl(current.toString()),
       source_host: current.hostname,
       source_method: method,
-      redirect_hop: hop,
+      redirect_hop: redirectCount,
       duration_ms: elapsedMilliseconds(started),
       http_status: response.status,
       content_length: response.headers.get("content-length"),
@@ -165,6 +166,9 @@ async function fetchWithRedirectGuard(
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
       await response.body?.cancel().catch(() => undefined);
+      if (redirectCount >= MAX_REDIRECT_HOPS) {
+        throw new ApiV1Error("invalid_request", "源 URL 重定向次数过多。", 400);
+      }
       if (!location) {
         throw new ApiV1Error(
           "invalid_request",
@@ -182,6 +186,7 @@ async function fetchWithRedirectGuard(
         throw new ApiV1Error("invalid_request", "源 URL 仅支持 HTTP/HTTPS。", 400);
       }
       current = next;
+      redirectCount += 1;
       continue;
     }
     if (!response.ok) {
@@ -193,7 +198,6 @@ async function fetchWithRedirectGuard(
     }
     return response;
   }
-  throw new ApiV1Error("invalid_request", "源 URL 重定向次数过多。", 400);
 }
 
 async function inspectHttpSource(

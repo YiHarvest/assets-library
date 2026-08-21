@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWebUiSession,
   isProtectedWebUiPath,
+  normalizeBasePath,
   readCookie,
   readWebUiLockConfig,
   safeWebUiReturnPath,
@@ -78,6 +79,12 @@ describe("WebUI lock primitives", () => {
     );
     expect(safeWebUiReturnPath("/api/v1/assets/query", env)).toBe(
       "/feisu/assets-library/",
+    );
+  });
+
+  it("normalizes repeated separators in the configured base path", () => {
+    expect(normalizeBasePath(" //feisu//assets-library// ")).toBe(
+      "/feisu/assets-library",
     );
   });
 

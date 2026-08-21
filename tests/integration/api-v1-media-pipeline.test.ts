@@ -432,7 +432,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const fake = fakeSceneClient(manifest, segments);
     const { SceneDetectClient } = await import("@/server/scene/client");
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       fetchImplementation: fake.request,
     });
@@ -573,7 +573,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const fake = fakeSceneClient(manifest, [advertised]);
     const { SceneDetectClient } = await import("@/server/scene/client");
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       fetchImplementation: fake.request,
     });

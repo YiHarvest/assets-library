@@ -8,18 +8,20 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_LISTEN_HOST: ${POSTGRES_LISTEN_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
     command:
       - postgres
       - -c
-      - listen_addresses=127.0.0.1
+      - listen_addresses=${POSTGRES_LISTEN_HOST}
       - -c
-      - port=25432
+      - port=${POSTGRES_PORT}
     volumes:
       - assets-library-metabase-postgres:/var/lib/postgresql/data
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -h 127.0.0.1 -p 25432 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+        - pg_isready -h "$${POSTGRES_LISTEN_HOST}" -p "$${POSTGRES_PORT}" -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
       interval: 10s
       timeout: 5s
       retries: 10
@@ -31,7 +33,7 @@ services:
     network_mode: host
     hostname: assets-library-metabase
     extra_hosts:
-      - assets-library-metabase:127.0.0.1
+      - ${METABASE_EXTRA_HOST}
     environment:
       MB_JETTY_HOST: ${MB_JETTY_HOST}
       MB_JETTY_PORT: ${MB_JETTY_PORT}
@@ -59,7 +61,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - curl --fail --silent http://127.0.0.1:$${MB_JETTY_PORT}/api/health >/dev/null || exit 1
+        - curl --fail --silent ${METABASE_HEALTH_URL} >/dev/null || exit 1
       interval: 15s
       timeout: 5s
       retries: 20

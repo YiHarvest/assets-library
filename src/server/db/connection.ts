@@ -15,7 +15,7 @@ export interface DatabaseOptions {
 }
 
 function isLoopback(hostname: string) {
-  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  return /^(?:127(?:\.\d{1,3}){3}|localhost|::1)$/i.test(hostname);
 }
 
 function connectionOptions(options: DatabaseOptions): PoolOptions {

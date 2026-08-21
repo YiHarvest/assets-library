@@ -4,7 +4,9 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 scene_project="${SCENE_DETECT_PROJECT_DIR:-$project_root/../scene-detect-service}"
-scene_port="${SCENE_DETECT_PORT:-28200}"
+: "${SCENE_DETECT_PORT:?SCENE_DETECT_PORT must be configured in the environment}"
+: "${SCENE_DETECT_LISTEN_HOST:?SCENE_DETECT_LISTEN_HOST must be configured in the environment}"
+scene_port="$SCENE_DETECT_PORT"
 scene_workspace="${SCENE_DETECT_WORKSPACE_ROOT:-$project_root/media/.scene-service}"
 uv_cache_dir="${SCENE_DETECT_UV_CACHE_DIR:-$project_root/.run/uv-cache}"
 
@@ -21,7 +23,7 @@ command -v uv >/dev/null 2>&1 || {
 
 mkdir -p "$scene_workspace" "$uv_cache_dir"
 
-# 仅监听回环地址，分镜 API 不暴露到局域网；主应用通过 127.0.0.1 调用。
+# 监听地址与端口由未提交的环境配置注入。
 # 硬件加速与队列参数透传；uvicorn 必须单进程（并发由进程内队列控制）。
 exec env \
   -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
@@ -38,6 +40,6 @@ exec env \
   QUEUE_MAX_RETRIES="${SCENE_DETECT_QUEUE_MAX_RETRIES:-1}" \
   uv run --project "$scene_project" \
   python "$scene_project/main.py" \
-  --host 127.0.0.1 \
+  --host "$SCENE_DETECT_LISTEN_HOST" \
   --port "$scene_port" \
   --workers 1

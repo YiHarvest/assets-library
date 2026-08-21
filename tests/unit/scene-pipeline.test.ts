@@ -123,7 +123,7 @@ describe("scene video pipeline", () => {
       return new Response(null, { status: 404 });
     });
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
@@ -193,7 +193,7 @@ describe("scene video pipeline", () => {
       throw new Error("切片不应被下载");
     });
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
@@ -253,7 +253,7 @@ describe("scene video pipeline", () => {
       return new Response(null, { status: 404 });
     });
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       pollIntervalMs: 10,
       fetchImplementation: fakeFetch,
@@ -288,7 +288,7 @@ describe("scene video pipeline", () => {
       return Response.json(splitManifest, { status: 200 });
     });
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       fetchImplementation: fakeFetch,
     });
@@ -318,7 +318,7 @@ describe("scene video pipeline", () => {
       });
     });
     const client = new SceneDetectClient({
-      baseUrl: "http://127.0.0.1:28200",
+      baseUrl: "https://your.com",
       timeoutMs: 10_000,
       pollIntervalMs: 1,
       fetchImplementation: fakeFetch,

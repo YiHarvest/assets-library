@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "@/server/config";
+import { loadTestConfig as loadConfig } from "../helpers/config";
 
 describe("model configuration", () => {
   it("uses bounded video requests and per-target concurrency by default", () => {

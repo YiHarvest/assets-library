@@ -18,15 +18,22 @@ if [ -f .env ]; then
   set +a
 fi
 
-PORT="${PORT:-23015}"
 APP_MODE="${APP_MODE:-dev}"
 CHROMA_VERSION="${CHROMA_VERSION:-1.5.9}"
-CHROMA_INDEX_URL="${CHROMA_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 CHROMA_WAIT_SECONDS="${CHROMA_WAIT_SECONDS:-30}"
 SCENE_DETECT_ENABLED="${SCENE_DETECT_ENABLED:-true}"
-SCENE_DETECT_BASE_URL="${SCENE_DETECT_BASE_URL:-http://127.0.0.1:28200}"
-SCENE_DETECT_PORT="${SCENE_DETECT_PORT:-28200}"
 SCENE_DETECT_WAIT_SECONDS="${SCENE_DETECT_WAIT_SECONDS:-30}"
+
+required_env=(PORT API_INTERNAL_ORIGIN WEB_LISTEN_HOST CHROMA_INDEX_URL CHROMA_URL CHROMA_PORT CHROMA_LISTEN_HOST)
+if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
+  required_env+=(SCENE_DETECT_BASE_URL SCENE_DETECT_PORT SCENE_DETECT_LISTEN_HOST)
+fi
+for name in "${required_env[@]}"; do
+  [ -n "${!name:-}" ] || {
+    printf '缺少必需环境变量：%s\n' "$name" >&2
+    exit 1
+  }
+done
 CHROMA_DIR="$(pwd)/chroma-data"
 PID_DIR="$(pwd)/.run"
 mkdir -p "$PID_DIR" "$CHROMA_DIR"
@@ -111,26 +118,19 @@ stop_managed_process() {
   rm -f "$file"
 }
 
-chroma_url="${CHROMA_URL:-http://127.0.0.1:8000}"
+chroma_url="$CHROMA_URL"
 chroma_authority="${chroma_url#*://}"
 chroma_authority="${chroma_authority%%/*}"
 chroma_url_port="${chroma_authority##*:}"
 if [ "$chroma_url_port" = "$chroma_authority" ] || ! [[ "$chroma_url_port" =~ ^[0-9]+$ ]]; then
-  chroma_url_port=80
-fi
-if [ -n "${CHROMA_PORT:-}" ] && [ "$CHROMA_PORT" != "$chroma_url_port" ]; then
-  c_err "CHROMA_PORT=$CHROMA_PORT 与 CHROMA_URL=$chroma_url 端口不一致，请只设置一致的端口。"
+  c_err "CHROMA_URL 必须包含由 CHROMA_PORT 配置的显式端口。"
   exit 1
 fi
-CHROMA_PORT="${CHROMA_PORT:-$chroma_url_port}"
-case "$chroma_url" in
-  http://127.0.0.1:*|http://localhost:*) ;;
-  *)
-    c_err "scripts/start.sh 只负责启动本机 Chroma，CHROMA_URL 必须使用 http://127.0.0.1:<port> 或 http://localhost:<port>。"
-    exit 1
-    ;;
-esac
-CHROMA_HEALTH_URL="http://127.0.0.1:$CHROMA_PORT"
+if [ "$CHROMA_PORT" != "$chroma_url_port" ]; then
+  c_err "CHROMA_PORT 与 CHROMA_URL 中的端口不一致，请保持两者一致。"
+  exit 1
+fi
+CHROMA_HEALTH_URL="${CHROMA_URL%/}"
 
 chroma_is_ready() {
   # -q 必须放在第一个参数，避免用户级 ~/.curlrc 注入额外 URL 或代理。
@@ -161,10 +161,7 @@ uses_loopback_proxy() {
   authority="${authority%%/*}"
   host="${authority%%:*}"
 
-  case "$host" in
-    127.0.0.1|localhost) return 0 ;;
-    *) return 1 ;;
-  esac
+  [ "$host" = "localhost" ] || [[ "$host" =~ ^127\. ]]
 }
 
 prepare_chroma_runtime() {
@@ -212,7 +209,7 @@ if is_running "$CHROMA_PID_FILE" && ! chroma_is_ready; then
 fi
 
 if ! is_running "$CHROMA_PID_FILE" && chroma_is_ready; then
-  c_err "Chroma 端口 $CHROMA_PORT 已被未纳入当前 PID 文件的服务占用。"
+  c_err "Chroma 监听地址已被未纳入当前 PID 文件的服务占用。"
   c_err "请先停止该旧实例，确认端口释放后再运行 ./scripts/start.sh。"
   exit 1
 fi
@@ -223,13 +220,13 @@ else
   rm -f "$CHROMA_PID_FILE"
   : > "$CHROMA_LOG"
   prepare_chroma_runtime
-  c_info "启动 Chroma @ 0.0.0.0:$CHROMA_PORT（应用连接 $CHROMA_HEALTH_URL）..."
+  c_info "启动 Chroma ..."
   nohup setsid env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
     -u all_proxy -u https_proxy -u http_proxy \
     UV_INDEX_URL="$CHROMA_INDEX_URL" \
     uvx --offline --from "chromadb==$CHROMA_VERSION" chroma run \
     --path "$CHROMA_DIR" \
-    --host 0.0.0.0 \
+    --host "$CHROMA_LISTEN_HOST" \
     --port "$CHROMA_PORT" \
     > "$CHROMA_LOG" 2>&1 &
   chroma_pid=$!
@@ -278,13 +275,6 @@ show_scene_failure() {
 }
 
 if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
-  case "$SCENE_DETECT_BASE_URL" in
-    "http://127.0.0.1:$SCENE_DETECT_PORT"|"http://localhost:$SCENE_DETECT_PORT") ;;
-    *)
-      show_scene_failure \
-        "scripts/start.sh 托管的分镜服务必须使用 http://127.0.0.1:$SCENE_DETECT_PORT 或 http://localhost:$SCENE_DETECT_PORT。"
-      ;;
-  esac
 
   if is_running "$SCENE_PID_FILE" && ! scene_is_ready; then
     c_warn "分镜服务 PID 存在但健康检查失败，自动清理后重新启动。"
@@ -292,7 +282,7 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
   fi
 
   if ! is_running "$SCENE_PID_FILE" && scene_is_ready; then
-    c_err "分镜服务端口 $SCENE_DETECT_PORT 已被未纳入当前 PID 文件的服务占用。"
+    c_err "分镜服务监听地址已被未纳入当前 PID 文件的服务占用。"
     c_err "请先停止该旧实例，确认端口释放后再运行 ./scripts/start.sh。"
     exit 1
   fi
@@ -302,7 +292,7 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
   else
     rm -f "$SCENE_PID_FILE"
     : > "$SCENE_LOG"
-    c_info "启动分镜服务 @ 127.0.0.1:$SCENE_DETECT_PORT ..."
+    c_info "启动分镜服务 ..."
     # 直接执行并由 run-scene-service.sh exec 到 uv，PID 文件可可靠控制服务进程。
     nohup setsid ./scripts/run-scene-service.sh > "$SCENE_LOG" 2>&1 &
     scene_pid=$!
@@ -343,7 +333,7 @@ APP_PID_FILE="$PID_DIR/app.pid"
 APP_LOG="$PID_DIR/app.log"
 
 web_is_ready() {
-  curl -q -fsS -m 1 "http://127.0.0.1:$PORT" >/dev/null 2>&1
+  curl -q -fsS -m 1 "$API_INTERNAL_ORIGIN" >/dev/null 2>&1
 }
 
 if is_running "$APP_PID_FILE" \
@@ -355,7 +345,7 @@ fi
 # PID 文件缺失时不能直接覆盖一个已经监听的旧实例，否则新进程会因
 # EADDRINUSE 退出，并把原实例留在重建后的 .next 上造成客户端 chunk 异常。
 if ! is_running "$APP_PID_FILE" && web_is_ready; then
-  c_err "端口 $PORT 已被未纳入当前 PID 文件的 Web 服务占用。"
+  c_err "Web 监听地址已被未纳入当前 PID 文件的服务占用。"
   c_err "请先停止该旧实例，确认端口释放后再运行 ./scripts/start.sh。"
   exit 1
 fi
@@ -364,8 +354,8 @@ if is_running "$APP_PID_FILE"; then
   c_warn "Web+worker 已在运行 (PID $(cat "$APP_PID_FILE"))"
 else
   if [ "$APP_MODE" = "dev" ]; then
-    c_info "启动 Web + worker [dev/turbopack] (PORT=$PORT) ..."
-    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
+    c_info "启动 Web + worker [dev/turbopack] ..."
+    nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
       pnpm run dev > "$APP_LOG" 2>&1 &
   else
     # prd: 确保 build 产物存在
@@ -373,8 +363,8 @@ else
       c_info "生产模式首次启动，执行 build ..."
       pnpm run build
     fi
-    c_info "启动 Web + worker [prd] (PORT=$PORT) ..."
-    nohup setsid env PORT="$PORT" HOSTNAME=0.0.0.0 \
+    c_info "启动 Web + worker [prd] ..."
+    nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
       pnpm run start:all > "$APP_LOG" 2>&1 &
   fi
   app_pid=$!
@@ -383,7 +373,7 @@ else
   app_ready=false
   for i in $(seq 1 60); do
     if web_is_ready; then
-      c_ok "Web 就绪 → http://127.0.0.1:$PORT  [mode=$APP_MODE]"
+      c_ok "Web 就绪 [mode=$APP_MODE]"
       app_ready=true
       break
     fi
@@ -406,11 +396,7 @@ fi
 
 echo
 c_ok "全部就绪。  [mode=$APP_MODE]"
-echo "  Web:     http://127.0.0.1:$PORT"
-echo "  Chroma:  $CHROMA_HEALTH_URL"
-if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
-  echo "  分镜:    $SCENE_HEALTH_URL"
-fi
+echo "  Web、Chroma 与已启用的辅助服务均已就绪。"
 echo "  模式:    $APP_MODE  (改 .env 的 APP_MODE=dev 切开发模式)"
 echo "  日志:    $PID_DIR/{chroma,scene,app}.log"
 echo "  关闭:    ./scripts/stop.sh"

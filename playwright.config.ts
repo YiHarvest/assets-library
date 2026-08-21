@@ -9,9 +9,16 @@ try {
   if (code !== "ENOENT") throw error;
 }
 
-const databaseUrl =
-  process.env.TEST_DATABASE_URL?.trim() ||
-  "mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library_dev_test";
+function requiredEnv(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} must be configured for Playwright.`);
+  return value;
+}
+
+const databaseUrl = requiredEnv("TEST_DATABASE_URL");
+const e2ePort = requiredEnv("E2E_PORT");
+const e2eBaseUrl = requiredEnv("E2E_BASE_URL");
+const e2eServerUrl = requiredEnv("E2E_SERVER_URL");
 const databaseName = decodeURIComponent(
   new URL(databaseUrl).pathname.replace(/^\//, ""),
 );
@@ -21,14 +28,16 @@ if (!databaseName.endsWith("_test")) {
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  use: { baseURL: "http://localhost:3100" },
+  use: { baseURL: e2eBaseUrl },
   webServer: {
     command: "./scripts/run-e2e-web.sh",
     // 在 Linux 上 localhost 可能优先解析到 ::1，而 Next 的测试进程只监听
     // IPv4；固定回环地址也让健康检查与浏览器访问使用同一端点。
-    url: "http://127.0.0.1:3100/",
+    url: e2eServerUrl,
     env: {
       DATABASE_URL: databaseUrl,
+      E2E_PORT: e2ePort,
+      API_INTERNAL_ORIGIN: e2eServerUrl,
       DATABASE_SSL_CA_PATH: process.env.DATABASE_SSL_CA_PATH ?? "",
       MEDIA_ROOT: "/tmp/assets-library-e2e/media",
       // MCP e2e：默认 user_id + 允许切换的白名单（x-request-userid 用例）。

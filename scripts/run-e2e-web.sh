@@ -6,4 +6,5 @@ set -Eeuo pipefail
 # 交出进程所有权，确保 stdout、退出信号和子进程生命周期都能被可靠管理。
 pnpm db:migrate
 export NEXT_DIST_DIR="${NEXT_DIST_DIR:-.next-e2e}"
-exec pnpm exec next dev -p "${E2E_PORT:-3100}"
+: "${E2E_PORT:?E2E_PORT must be configured in the environment}"
+exec pnpm exec next dev -p "$E2E_PORT"

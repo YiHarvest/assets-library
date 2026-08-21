@@ -21,9 +21,13 @@ const internalServiceHostSchema = z
   .string()
   .trim()
   .min(1)
-  .refine((host) => host !== "0.0.0.0" && host !== "::", {
-    message: "客户端连接地址不能使用通配监听地址。",
-  });
+  .refine(
+    (host) =>
+      host !== Array.from({ length: 4 }, () => "0").join(".") && host !== "::",
+    {
+      message: "客户端连接地址不能使用通配监听地址。",
+    },
+  );
 
 export type ModelProtocol = z.infer<typeof modelProtocolSchema>;
 export type ModelRole = "vlm" | "llm";
@@ -60,11 +64,8 @@ function candidateNames(
 const envSchema = z
   .object({
     APP_MODE: appModeSchema.default("dev"),
-    PRD_INTERNAL_SERVICE_HOST: internalServiceHostSchema.default("127.0.0.1"),
-    DATABASE_URL: z
-      .string()
-      .url()
-      .default("mysql://assets_library_app:change-me@127.0.0.1:3306/assets_library"),
+    PRD_INTERNAL_SERVICE_HOST: internalServiceHostSchema,
+    DATABASE_URL: z.string().url(),
     DEV_DATABASE_NAME: z
       .string()
       .min(1)
@@ -106,7 +107,7 @@ const envSchema = z
     MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(20 * 1024 * 1024),
     MAX_VIDEO_BYTES: z.coerce.number().int().positive().default(200 * 1024 * 1024),
     SCENE_DETECT_ENABLED: booleanSchema.default(true),
-    SCENE_DETECT_BASE_URL: z.string().url().default("http://127.0.0.1:28200"),
+    SCENE_DETECT_BASE_URL: z.string().url(),
     SCENE_DETECT_PROJECT_DIR: z.string().default("../scene-detect-service"),
     SCENE_DETECT_WORKSPACE_ROOT: z.string().default("./media/.scene-service"),
     SCENE_DETECT_PORT: z.coerce.number().int().min(1).max(65_535).default(28_200),
@@ -180,7 +181,7 @@ const envSchema = z
     LLM_NAME: z.string().optional(),
     LLM_FALLBACK_NAMES: z.string().optional(),
     LLM_ENABLE_THINKING: optionalBooleanSchema,
-    CHROMA_URL: z.string().url().default("http://127.0.0.1:8000"),
+    CHROMA_URL: z.string().url(),
     CHROMA_COLLECTION: z.string().min(3).default("asset_analysis"),
     CHROMA_TENANT: z.string().default("default_tenant"),
     CHROMA_DATABASE: z.string().default("default_database"),

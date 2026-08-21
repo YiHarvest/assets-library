@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig } from "@/server/config";
+import { loadTestConfig as loadConfig } from "../helpers/config";
 import { OpenAICompatibleAnalyzer } from "@/server/model/analyzer";
 
 const videoAnalysis = {

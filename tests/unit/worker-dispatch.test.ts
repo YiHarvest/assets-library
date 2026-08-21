@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/server/config", () => ({
   loadConfig: () => ({
-    SCENE_DETECT_BASE_URL: "http://127.0.0.1:28200",
+    SCENE_DETECT_BASE_URL: "https://your.com",
     SCENE_DETECT_TIMEOUT_MS: 1_000,
   }),
 }));

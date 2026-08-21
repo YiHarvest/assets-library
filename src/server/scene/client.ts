@@ -187,6 +187,75 @@ export class SceneDetectClient {
     }
   }
 
+  private manifestFromStatus(
+    status: z.infer<typeof statusSchema>,
+    taskId: string,
+  ) {
+    return parseManifest(
+      {
+        taskId: status.taskId,
+        originalFilename: status.originalFilename,
+        durationSeconds: status.durationSeconds,
+        sceneCount: status.sceneCount,
+        segments: status.segments,
+      },
+      taskId,
+    );
+  }
+
+  private async pollUntilDone(taskId: string, signal?: AbortSignal) {
+    const deadline = Date.now() + this.timeoutMs;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new ScenePipelineError(
+          "scene_detection_failed",
+          `分镜服务在 ${Math.round(this.timeoutMs / 1000)}s 内未完成处理。`,
+          { taskId },
+        );
+      }
+
+      let status: z.infer<typeof statusSchema>;
+      try {
+        const response = await this.request(
+          new URL(`api/v1/videos/split/${taskId}`, this.baseUrl),
+          { signal: timeoutSignal(Math.min(remaining, this.timeoutMs), signal) },
+        );
+        if (!response.ok) throw await responseError(response);
+        status = statusSchema.parse(await response.json());
+      } catch (error) {
+        if (error instanceof ScenePipelineError) throw error;
+        throw new ScenePipelineError(
+          "scene_detection_failed",
+          "轮询分镜任务状态失败。",
+          { taskId },
+          { cause: error },
+        );
+      }
+
+      if (status.status === "done") {
+        return this.manifestFromStatus(status, taskId);
+      }
+      if (status.status === "failed") {
+        throw new ScenePipelineError(
+          "scene_detection_failed",
+          `分镜服务处理失败：${status.error?.message ?? "未知错误"}`,
+          { taskId, remoteCode: status.error?.code },
+        );
+      }
+      if (status.status === "cancelled") {
+        throw new ScenePipelineError(
+          "scene_detection_failed",
+          "分镜任务已被取消。",
+          { taskId },
+        );
+      }
+
+      // queued / processing：等待后继续轮询；外部取消会立刻中断等待。
+      await sleep(Math.min(this.pollIntervalMs, remaining), signal);
+    }
+  }
+
   async splitVideo(
     inputPath: string,
     originalFilename: string,
@@ -234,65 +303,9 @@ export class SceneDetectClient {
       );
     }
 
-    // 2. 轮询任务状态直到 done/failed。总预算需覆盖排队时间（worker 池有界，
-    //    高峰时任务排队），timeoutMs 默认 10 分钟。
-    const deadline = Date.now() + this.timeoutMs;
+    // 2. 轮询任务状态直到 done/failed。总预算需覆盖排队时间。
     try {
-      while (true) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          throw new ScenePipelineError(
-            "scene_detection_failed",
-            `分镜服务在 ${Math.round(this.timeoutMs / 1000)}s 内未完成处理。`,
-            { taskId },
-          );
-        }
-
-        let status: z.infer<typeof statusSchema>;
-        try {
-          const response = await this.request(
-            new URL(`api/v1/videos/split/${taskId}`, this.baseUrl),
-            { signal: timeoutSignal(Math.min(remaining, this.timeoutMs), signal) },
-          );
-          if (!response.ok) throw await responseError(response);
-          status = statusSchema.parse(await response.json());
-        } catch (error) {
-          if (error instanceof ScenePipelineError) throw error;
-          throw new ScenePipelineError(
-            "scene_detection_failed",
-            "轮询分镜任务状态失败。",
-            { taskId },
-            { cause: error },
-          );
-        }
-
-        if (status.status === "done") {
-          return parseManifest({
-            taskId: status.taskId,
-            originalFilename: status.originalFilename,
-            durationSeconds: status.durationSeconds,
-            sceneCount: status.sceneCount,
-            segments: status.segments,
-          }, taskId);
-        }
-        if (status.status === "failed") {
-          throw new ScenePipelineError(
-            "scene_detection_failed",
-            `分镜服务处理失败：${status.error?.message ?? "未知错误"}`,
-            { taskId, remoteCode: status.error?.code },
-          );
-        }
-        if (status.status === "cancelled") {
-          throw new ScenePipelineError(
-            "scene_detection_failed",
-            "分镜任务已被取消。",
-            { taskId },
-          );
-        }
-
-        // queued / processing：等待后继续轮询；外部取消会立刻中断等待。
-        await sleep(Math.min(this.pollIntervalMs, remaining), signal);
-      }
+      return await this.pollUntilDone(taskId, signal);
     } catch (error) {
       // 任务已经创建但未成功交付 manifest 时主动取消，避免服务端源视频和
       // 分片目录一直占用磁盘。清理使用独立超时，不复用可能已 abort 的信号。

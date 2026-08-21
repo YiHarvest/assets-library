@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   isProtectedWebUiPath,
+  normalizeBasePath,
   readWebUiLockConfig,
   safeWebUiReturnPath,
   stripAppBasePath,
@@ -42,7 +43,7 @@ export async function middleware(request: NextRequest) {
   }
 
   const lockUrl = request.nextUrl.clone();
-  lockUrl.pathname = `${process.env.NEXT_PUBLIC_BASE_PATH || ""}/lock`;
+  lockUrl.pathname = `${normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH)}/lock`;
   lockUrl.search = "";
   const returnPath = `${request.nextUrl.pathname}${request.nextUrl.search}`;
   lockUrl.searchParams.set("next", safeWebUiReturnPath(returnPath));

@@ -177,4 +177,26 @@ describe("MCP tool registry", () => {
     expect(queryAssets).not.toHaveBeenCalled();
     await client.close();
   });
+
+  it("returns get_media_url as an origin-independent relative URL", async () => {
+    const assetId = "00000000-0000-4000-8000-000000000001";
+    const getAsset = vi.fn(async () => ({
+      media_url: `https://internal.example.test/api/v1/media/${assetId}?user_id=user-a`,
+      original_filename: "clip.mp4",
+    }));
+    const service = { getAsset } as unknown as ApiV1Service;
+    const client = await connectedClient(testConfig(), service);
+
+    const result = await client.callTool({
+      name: "get_media_url",
+      arguments: { asset_id: assetId },
+    });
+    const payload = JSON.parse(
+      (result.content as Array<{ type: string; text: string }>)[0]!.text,
+    );
+    expect(payload.media_url).toBe(
+      `/api/v1/media/${assetId}?user_id=user-a`,
+    );
+    await client.close();
+  });
 });

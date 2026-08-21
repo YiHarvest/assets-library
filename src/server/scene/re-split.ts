@@ -237,6 +237,14 @@ export async function resplitSegment(
           remaining,
           maximumBytes,
         );
+        if (sizeBytes > maximumBytes) {
+          throw new AppError(
+            "corrupt_file",
+            "视频二次切分失败：最短重编码切片仍超过大小限制。",
+            400,
+            { actualBytes: sizeBytes, maximumBytes },
+          );
+        }
         pieces.push({
           startSeconds: cursor,
           endSeconds,

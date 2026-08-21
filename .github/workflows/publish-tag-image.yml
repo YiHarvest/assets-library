@@ -45,7 +45,7 @@ jobs:
             type=ref,event=tag
             type=sha,format=short,prefix=sha-
           labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Build and publish image
         uses: docker/build-push-action@v6

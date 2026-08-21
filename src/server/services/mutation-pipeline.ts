@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { db } from "@/server/db";
+import { withDeadlockRetry } from "@/server/db/retry";
 import {
   assets,
   jobs,
@@ -52,6 +53,7 @@ async function resolveScopeForJob(job: ClaimedJob): Promise<AssetScope> {
 
 async function markMutationRunning(job: ClaimedJob) {
   if (!job.taskId) throw new AppError("invalid_request", "变更作业缺少 taskId。", 500);
+  const taskId = job.taskId;
   const phase =
     job.type === "delete"
       ? "deleting"
@@ -60,15 +62,21 @@ async function markMutationRunning(job: ClaimedJob) {
         : job.type === "update"
           ? "updating"
           : "retrying";
-  await db
-    .update(tasks)
-    .set({
-      status: "running",
-      phase,
-      startedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(tasks.id, job.taskId));
+  await withDeadlockRetry(
+    () => {
+      const now = new Date();
+      return db
+        .update(tasks)
+        .set({
+          status: "running",
+          phase,
+          startedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(tasks.id, taskId));
+    },
+    { attempts: 5, backoffMs: 25 },
+  );
 }
 
 function updatePayload(job: ClaimedJob): AssetEdit {

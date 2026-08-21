@@ -209,6 +209,10 @@ export class AssetService {
       mime_type: detail.mimeType,
       size_bytes: detail.sizeBytes,
       auto_publish: detail.directPublish,
+      segment_start_seconds:
+        detail.segmentStartMs === null ? null : detail.segmentStartMs / 1_000,
+      segment_end_seconds:
+        detail.segmentEndMs === null ? null : detail.segmentEndMs / 1_000,
       failure:
         detail.failureCode || detail.failureMessage
           ? {

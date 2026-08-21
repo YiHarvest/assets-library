@@ -1213,6 +1213,8 @@ components:
             - mime_type
             - size_bytes
             - auto_publish
+            - segment_start_seconds
+            - segment_end_seconds
             - failure
             - analysis
           properties:
@@ -1220,6 +1222,12 @@ components:
             mime_type: { type: string }
             size_bytes: { type: integer, minimum: 0 }
             auto_publish: { type: boolean }
+            segment_start_seconds:
+              description: 视频分镜在父视频中的绝对起始秒；图片为 null。
+              oneOf: [{ type: number, minimum: 0 }, { type: "null" }]
+            segment_end_seconds:
+              description: 视频分镜在父视频中的绝对结束秒；图片为 null。
+              oneOf: [{ type: number, minimum: 0 }, { type: "null" }]
             failure:
               oneOf:
                 - { $ref: "#/components/schemas/ApiError" }

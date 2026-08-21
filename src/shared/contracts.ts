@@ -132,6 +132,8 @@ export interface AssetDetail extends AssetSummary {
   failureCode: FailureCode | null;
   failureMessage: string | null;
   analysis: AnalysisResult | null;
+  segmentStartMs: number | null;
+  segmentEndMs: number | null;
   updatedAt: string;
 }
 
@@ -497,6 +499,8 @@ export const apiV1AssetDetailSchema = apiV1AssetSummarySchema.extend({
   mime_type: z.string(),
   size_bytes: z.number().int().nonnegative(),
   auto_publish: z.boolean(),
+  segment_start_seconds: z.number().nonnegative().nullable(),
+  segment_end_seconds: z.number().nonnegative().nullable(),
   failure: taskErrorSchema,
   analysis: z
     .discriminatedUnion("kind", [

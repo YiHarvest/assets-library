@@ -214,6 +214,44 @@ export async function listTaskItemAssetIds(taskId: string) {
     .where(eq(assets.taskId, taskId));
 }
 
+export interface ListUserTaskIdsOptions {
+  statuses?: Array<"queued" | "running" | "done" | "failed">;
+  types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+  before?: { createdAt: Date; id: string };
+  limit: number;
+}
+
+/** MCP 恢复现场使用的用户任务索引；详情仍统一经 TaskService 组装。 */
+export async function listUserTaskIds(
+  userId: string,
+  options: ListUserTaskIdsOptions,
+) {
+  const conditions: SQL[] = [eq(tasks.userId, userId)];
+  if (options.statuses?.length) {
+    conditions.push(inArray(tasks.status, options.statuses));
+  }
+  if (options.types?.length) {
+    conditions.push(inArray(tasks.type, options.types));
+  }
+  if (options.before) {
+    conditions.push(
+      or(
+        lt(tasks.createdAt, options.before.createdAt),
+        and(
+          eq(tasks.createdAt, options.before.createdAt),
+          lt(tasks.id, options.before.id),
+        ),
+      )!,
+    );
+  }
+  return db
+    .select({ id: tasks.id, createdAt: tasks.createdAt })
+    .from(tasks)
+    .where(and(...conditions))
+    .orderBy(desc(tasks.createdAt), desc(tasks.id))
+    .limit(options.limit);
+}
+
 /**
  * 为一次 PUT 原子地获取文件上传租约。
  *
@@ -1542,6 +1580,8 @@ export async function getAssetDetail(
     failureCode: row.failureCode as FailureCode | null,
     failureMessage: row.failureMessage,
     analysis: analysis ? analysisResultSchema.parse(analysis.resultJson) : null,
+    segmentStartMs: row.segmentStartMs,
+    segmentEndMs: row.segmentEndMs,
     updatedAt: row.updatedAt.toISOString(),
   };
 }

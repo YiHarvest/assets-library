@@ -13,6 +13,10 @@ import type {
   UserStorageUsageResponse,
 } from "@/shared/contracts";
 import { defaultApiV1Service } from "@/server/api/v1/default-service";
+import type {
+  ListTasksInput,
+  TaskListResponse,
+} from "@/server/modules/tasks/task-service";
 
 export interface ReceiveUploadItemInput {
   taskId: string;
@@ -27,6 +31,7 @@ export interface ApiV1Service {
   receiveUploadItem(input: ReceiveUploadItemInput): Promise<TaskStatusResponse>;
   sealUploadTask(taskId: string): Promise<TaskStatusResponse>;
   getTask(taskId: string, expectedUserId?: string): Promise<TaskStatusResponse>;
+  listTasks(userId: string, input: ListTasksInput): Promise<TaskListResponse>;
   queryAssets(input: AssetQuery): Promise<AssetQueryResponse>;
   getUserStorageUsage(userId: string): Promise<UserStorageUsageResponse>;
   listUserMedia(

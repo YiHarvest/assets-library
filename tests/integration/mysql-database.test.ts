@@ -606,6 +606,49 @@ mysqlTest("MySQL 数据层", () => {
     ).rejects.toMatchObject({ status: 409 });
   });
 
+  test("MCP 幂等键持久化原任务，并串行化同键并发请求", async () => {
+    const { databaseMcpIdempotencyStore } = await import(
+      "@/server/mcp/idempotency"
+    );
+    const taskId = crypto.randomUUID();
+    const now = new Date();
+    const handler = vi.fn(async () => {
+      await migrationConnection.db.insert(tasks).values({
+        id: taskId,
+        type: "publish",
+        userId: "user-001",
+        status: "queued",
+        phase: "publishing",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { task_id: taskId, status: "queued" };
+    });
+    const input = {
+      operation: "publish_asset",
+      userId: "user-001",
+      key: "publish-once",
+      request: { asset_id: crypto.randomUUID() },
+      retentionDays: 7,
+    };
+
+    const [first, concurrentReplay] = await Promise.all([
+      databaseMcpIdempotencyStore.run(input, handler),
+      databaseMcpIdempotencyStore.run(input, handler),
+    ]);
+    expect(first).toEqual({ task_id: taskId, status: "queued" });
+    expect(concurrentReplay).toEqual(first);
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    await expect(
+      databaseMcpIdempotencyStore.run(
+        { ...input, request: { asset_id: crypto.randomUUID() } },
+        handler,
+      ),
+    ).rejects.toMatchObject({ code: "conflict", status: 409 });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   test("并发 PUT 只获得一个租约，中断后进度归零并可完整重试", async () => {
     const taskId = crypto.randomUUID();
     const itemId = crypto.randomUUID();

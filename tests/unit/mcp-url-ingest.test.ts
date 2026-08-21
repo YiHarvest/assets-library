@@ -7,7 +7,10 @@ vi.mock("@/server/storage/zos", () => ({
 }));
 import type { AppConfig } from "@/server/config";
 import { ApiV1Error } from "@/server/api/errors";
-import { resolveIngestSource } from "@/server/mcp/url-ingest";
+import {
+  inspectIngestSource,
+  resolveIngestSource,
+} from "@/server/mcp/url-ingest";
 
 function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -120,6 +123,38 @@ describe("resolveIngestSource SSRF guard", () => {
       if (!(error instanceof ApiV1Error)) return true;
       return error.code !== "invalid_request";
     });
+  });
+
+  it("defers HTTP GET until a probed batch item is ready to stream", async () => {
+    const config = testConfig({
+      mcpAllowedDomains: ["cdn.example.com"],
+      ZOS_INTERNAL_URL: "",
+      ZOS_WEB_URL: "",
+    });
+    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => {
+      if (init.method === "HEAD") {
+        return new Response(null, {
+          headers: { "content-length": "3", "content-type": "image/png" },
+        });
+      }
+      return new Response(new Uint8Array([1, 2, 3]), {
+        headers: { "content-length": "3", "content-type": "image/png" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const descriptor = await inspectIngestSource(
+      "https://cdn.example.com/demo.png",
+      config,
+    );
+    expect(descriptor).toMatchObject({ filename: "demo.png", sizeBytes: 3 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "HEAD" });
+
+    const source = await descriptor.open();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "GET" });
+    await source.close();
   });
 
   it("rejects empty object keys on same-bucket URLs", async () => {

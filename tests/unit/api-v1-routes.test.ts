@@ -46,9 +46,11 @@ const asset: ApiV1AssetDetail = {
   media_url: `/api/v1/media/${assetId}`,
   original_filename: "demo.png",
   mime_type: "image/png",
-  size_bytes: 3,
-  auto_publish: false,
-  failure: null,
+    size_bytes: 3,
+    auto_publish: false,
+    segment_start_seconds: null,
+    segment_end_seconds: null,
+    failure: null,
   analysis: null,
   created_at: now,
   updated_at: now,
@@ -174,6 +176,11 @@ function fakeService() {
     deleteAsset: vi.fn(async () =>
       task({ task_type: "delete", phase: "deleting" }),
     ),
+    listTasks: vi.fn(async () => ({
+      items: [],
+      next_cursor: null,
+      has_more: false,
+    })),
     getMedia: vi.fn(async () =>
       new Response(new Uint8Array([2, 3, 4]), {
         status: 206,

@@ -134,7 +134,7 @@ async function advanceJobAssetStatus(
   job: ClaimedJob,
   processingStatus: "validating" | "analyzing",
 ) {
-  if (!job.assetId) return false;
+  if (!job.assetId) return "asset_unavailable" as const;
   const assetId = job.assetId;
   const now = new Date();
   return db.transaction(async (tx) => {
@@ -148,7 +148,7 @@ async function advanceJobAssetStatus(
           eq(jobs.attempt, job.attempt),
         ),
       );
-    if (affectedRows(renewed) !== 1) return false;
+    if (affectedRows(renewed) !== 1) return "lease_lost" as const;
     const updated = await tx
       .update(assets)
       .set({ processingStatus, updatedAt: now })
@@ -158,8 +158,21 @@ async function advanceJobAssetStatus(
           eq(assets.reviewStatus, "pending_review"),
         ),
       );
-    return affectedRows(updated) === 1;
+    return affectedRows(updated) === 1
+      ? ("advanced" as const)
+      : ("asset_unavailable" as const);
   });
+}
+
+async function stopUnavailableAnalysis(job: ClaimedJob) {
+  const error = new AppError(
+    "invalid_request",
+    "素材状态已变化，分析作业无法继续。",
+    409,
+  );
+  if (await failJobAndMarkAsset(job, error)) {
+    await finishAnalysisLifecycle(job, error);
+  }
 }
 
 async function persistAnalysis(
@@ -465,7 +478,12 @@ async function processAnalysisJob(
     const hydrated = await hydratedAsset(record, job, storage);
     const asset = hydrated.asset;
     workspace = hydrated.workspace;
-    if (!(await advanceJobAssetStatus(job, "validating"))) return;
+    const validationAdvance = await advanceJobAssetStatus(job, "validating");
+    if (validationAdvance === "lease_lost") return;
+    if (validationAdvance === "asset_unavailable") {
+      await stopUnavailableAnalysis(job);
+      return;
+    }
     const prepared = hydrated.precomputedFrames
       ? { mimeType: asset.mimeType, sizeBytes: asset.sizeBytes }
       : await mediaPreparer(asset);
@@ -476,18 +494,32 @@ async function processAnalysisJob(
     if (asset.mediaType === "video" && !hydrated.precomputedFrames) {
       await videoFramePreparer(asset);
     }
-    if (!(await advanceJobAssetStatus(job, "analyzing"))) return;
+    const analysisAdvance = await advanceJobAssetStatus(job, "analyzing");
+    if (analysisAdvance === "lease_lost") return;
+    if (analysisAdvance === "asset_unavailable") {
+      await stopUnavailableAnalysis(job);
+      return;
+    }
     const outcome = await analyzer.analyze({
       assetId: asset.id,
       mediaType: asset.mediaType,
       mimeType: prepared.mimeType,
       relativePath: asset.originalPath,
     });
-    await persistAnalysis(job, outcome.result, outcome.model.protocol, outcome.model.name);
-    await finishAnalysisLifecycle(job);
+    if (
+      await persistAnalysis(
+        job,
+        outcome.result,
+        outcome.model.protocol,
+        outcome.model.name,
+      )
+    ) {
+      await finishAnalysisLifecycle(job);
+    }
   } catch (error) {
-    await failJobAndMarkAsset(job, error);
-    await finishAnalysisLifecycle(job, error);
+    if (await failJobAndMarkAsset(job, error)) {
+      await finishAnalysisLifecycle(job, error);
+    }
   } finally {
     if (workspace) await fs.rm(workspace, { recursive: true, force: true });
   }

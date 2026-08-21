@@ -7,7 +7,7 @@ Metabase 是独立部署的只读数据入口。配置随业务仓库维护，�
 ## 架构
 
 - Metabase：按 `.env` 中的 `MB_JETTY_HOST` / `MB_JETTY_PORT` 监听，外部入口由 `MB_SITE_URL` 指定。
-- Metabase 元数据库：独立 PostgreSQL，`127.0.0.1:25432`。
+- Metabase 元数据库：独立 PostgreSQL，监听地址与端口由环境配置注入。
 - 数据源：只添加目标生产数据源，不把 DEV/TEST 数据源混入同一实例。
 - Metabase 不读取应用的 `APP_MODE`，也不复用应用数据库账号。
 

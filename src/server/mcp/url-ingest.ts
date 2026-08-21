@@ -4,6 +4,12 @@ import { loadConfig } from "@/server/config";
 import { ApiV1Error } from "@/server/api/errors";
 import { createZosObjectStorage } from "@/server/storage/zos";
 import { normalizeObjectKey } from "@/server/storage/object-storage";
+import {
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+  safeUrl,
+} from "@/server/observability/audit-log";
 
 /**
  * upload_from_url 的源 URL 解析。
@@ -108,7 +114,47 @@ async function fetchWithRedirectGuard(
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
     assertAllowedHost(current, allowed);
-    const response = await fetch(current, { method, redirect: "manual" });
+    const started = process.hrtime.bigint();
+    auditLog("mcp_source_request_started", {
+      source_url: safeUrl(current.toString()),
+      source_host: current.hostname,
+      source_method: method,
+      redirect_hop: hop,
+    });
+    let response: Response;
+    try {
+      response = await fetch(current, { method, redirect: "manual" });
+    } catch (error) {
+      auditLog(
+        "mcp_source_request_failed",
+        {
+          source_url: safeUrl(current.toString()),
+          source_host: current.hostname,
+          source_method: method,
+          redirect_hop: hop,
+          duration_ms: elapsedMilliseconds(started),
+          ...errorAuditFields(error),
+        },
+        "warn",
+      );
+      throw error;
+    }
+    auditLog("mcp_source_response_headers", {
+      source_url: safeUrl(current.toString()),
+      source_host: current.hostname,
+      source_method: method,
+      redirect_hop: hop,
+      duration_ms: elapsedMilliseconds(started),
+      http_status: response.status,
+      content_length: response.headers.get("content-length"),
+      content_type: response.headers.get("content-type"),
+      content_encoding: response.headers.get("content-encoding"),
+      transfer_encoding: response.headers.get("transfer-encoding"),
+      accept_ranges: response.headers.get("accept-ranges"),
+      response_server: response.headers.get("server"),
+      response_via: response.headers.get("via"),
+      response_cache: response.headers.get("x-cache"),
+    });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
       await response.body?.cancel().catch(() => undefined);
@@ -175,6 +221,13 @@ async function resolveHttpSource(
       400,
     );
   }
+  auditLog("mcp_source_resolved", {
+    source_kind: "http",
+    source_url: safeUrl(url.toString()),
+    source_host: url.hostname,
+    filename: filenameFromPath(url.pathname),
+    size_bytes: declaredLength,
+  });
   return {
     filename: filenameFromPath(url.pathname),
     sizeBytes: declaredLength,
@@ -191,11 +244,47 @@ async function resolveSameBucketSource(
 ): Promise<IngestSource> {
   const key = objectKeyFromUrlPath(url.pathname);
   const storage = createZosObjectStorage(config);
-  const metadata = await storage.headObject(key);
+  const headStarted = process.hrtime.bigint();
+  let metadata: Awaited<ReturnType<typeof storage.headObject>>;
+  try {
+    metadata = await storage.headObject(key);
+    auditLog("mcp_source_object_head_completed", {
+      source_kind: "zos",
+      source_host: url.hostname,
+      object_key: key,
+      size_bytes: metadata.sizeBytes,
+      duration_ms: elapsedMilliseconds(headStarted),
+    });
+  } catch (error) {
+    auditLog("mcp_source_object_head_failed", {
+      source_kind: "zos",
+      source_host: url.hostname,
+      object_key: key,
+      duration_ms: elapsedMilliseconds(headStarted),
+      ...errorAuditFields(error),
+    }, "warn");
+    throw error;
+  }
+  const getStarted = process.hrtime.bigint();
   const result = await storage.getObject(key);
+  auditLog("mcp_source_object_get_opened", {
+    source_kind: "zos",
+    source_host: url.hostname,
+    object_key: key,
+    size_bytes: metadata.sizeBytes,
+    duration_ms: elapsedMilliseconds(getStarted),
+  });
   if (!result.body) {
     throw new ApiV1Error("invalid_request", "ZOS 对象不可读。", 400);
   }
+  auditLog("mcp_source_resolved", {
+    source_kind: "zos",
+    source_url: safeUrl(url.toString()),
+    source_host: url.hostname,
+    object_key: key,
+    filename: filenameFromPath(url.pathname),
+    size_bytes: metadata.sizeBytes,
+  });
   return {
     filename: filenameFromPath(url.pathname),
     sizeBytes: metadata.sizeBytes,
@@ -226,6 +315,11 @@ export async function resolveIngestSource(
   const host = hostnameOf(url);
   const allowed = allowedHostnames(config);
   assertAllowedHost(url, allowed);
+  auditLog("mcp_source_resolution_started", {
+    source_url: safeUrl(url.toString()),
+    source_host: host,
+    source_kind: isSameBucketHost(host, config) ? "zos" : "http",
+  });
   return isSameBucketHost(host, config)
     ? resolveSameBucketSource(url, config)
     : resolveHttpSource(url, config);

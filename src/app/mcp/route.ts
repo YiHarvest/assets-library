@@ -5,6 +5,13 @@ import type { AppConfig } from "@/server/config";
 import { loadConfig } from "@/server/config";
 import { registerTools } from "@/server/mcp/tools";
 import { mcpUserContext } from "@/server/mcp/user-context";
+import {
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+  requestAuditFields,
+  runWithAuditContext,
+} from "@/server/observability/audit-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,26 +100,169 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   return transport.handleRequest(request);
 }
 
-export async function POST(request: Request) {
-  const config = loadConfig();
-  const denied = authorize(request, config);
-  if (denied) return denied;
-  const userId = resolveRequestUserId(request, config);
-  if (userId instanceof Response) return userId;
+async function mcpRequestDescriptor(request: Request) {
+  if (request.method !== "POST") return { rpc_method: request.method };
+  try {
+    const payload = (await request.clone().json()) as {
+      id?: unknown;
+      method?: unknown;
+      params?: { name?: unknown };
+    };
+    return {
+      rpc_method:
+        typeof payload.method === "string" ? payload.method : "unknown",
+      rpc_id:
+        typeof payload.id === "string" || typeof payload.id === "number"
+          ? payload.id
+          : null,
+      requested_tool:
+        typeof payload.params?.name === "string" ? payload.params.name : null,
+    };
+  } catch {
+    return { rpc_method: "invalid_json" };
+  }
+}
 
-  return mcpUserContext.run(userId || undefined, () =>
-    handleMcpRequest(request),
+async function routeMcpRequest(request: Request) {
+  const started = process.hrtime.bigint();
+  const suppliedRequestId = request.headers.get("x-request-id");
+  const requestId =
+    suppliedRequestId &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      suppliedRequestId,
+    )
+      ? suppliedRequestId
+      : crypto.randomUUID();
+  const descriptor = await mcpRequestDescriptor(request);
+  const config = loadConfig();
+  const context = {
+    requestId,
+    channel: "mcp" as const,
+    operation:
+      typeof descriptor.requested_tool === "string"
+        ? `mcp:${descriptor.requested_tool}`
+        : `mcp:${descriptor.rpc_method}`,
+    fields: {
+      ...requestAuditFields(request),
+      ...descriptor,
+    },
+  };
+  return runWithAuditContext(
+    context,
+    async () => {
+      const denied = authorize(request, config);
+      if (denied) {
+        auditLog("mcp_request_rejected", {
+          http_status: denied.status,
+          duration_ms: elapsedMilliseconds(started),
+          rejection: denied.status === 401 ? "unauthorized" : "not_configured",
+        }, "warn");
+        return denied;
+      }
+      const userId = resolveRequestUserId(request, config);
+      if (userId instanceof Response) {
+        auditLog("mcp_request_rejected", {
+          http_status: userId.status,
+          duration_ms: elapsedMilliseconds(started),
+          rejection: "user_id_not_allowed",
+        }, "warn");
+        return userId;
+      }
+
+      auditLog("mcp_request_started", { user_id: userId || null });
+      try {
+        const response = await mcpUserContext.run(userId || undefined, () =>
+          handleMcpRequest(request),
+        );
+        const headers = new Headers(response.headers);
+        headers.set("x-request-id", requestId);
+        auditLog("mcp_response_opened", {
+          user_id: userId || null,
+          http_status: response.status,
+          duration_to_headers_ms: elapsedMilliseconds(started),
+        });
+        if (!response.body) {
+          auditLog("mcp_request_completed", {
+            user_id: userId || null,
+            http_status: response.status,
+            duration_ms: elapsedMilliseconds(started),
+            response_streamed: false,
+          });
+          return new Response(null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+          });
+        }
+
+        const reader = response.body.getReader();
+        let finalized = false;
+        const logFinal = (
+          event: "mcp_request_completed" | "mcp_request_cancelled" | "mcp_request_failed",
+          fields: Record<string, unknown> = {},
+          level: "info" | "warn" | "error" = "info",
+        ) => {
+          if (finalized) return;
+          finalized = true;
+          runWithAuditContext(context, () =>
+            auditLog(
+              event,
+              {
+                user_id: userId || null,
+                http_status: response.status,
+                duration_ms: elapsedMilliseconds(started),
+                response_streamed: true,
+                ...fields,
+              },
+              level,
+            ),
+          );
+        };
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const chunk = await reader.read();
+              if (chunk.done) {
+                logFinal("mcp_request_completed");
+                controller.close();
+                return;
+              }
+              controller.enqueue(chunk.value);
+            } catch (error) {
+              logFinal("mcp_request_failed", errorAuditFields(error), "error");
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            await reader.cancel(reason).catch(() => undefined);
+            logFinal(
+              "mcp_request_cancelled",
+              { cancel_reason: reason instanceof Error ? reason.message : reason },
+              "warn",
+            );
+          },
+        });
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      } catch (error) {
+        auditLog("mcp_request_failed", {
+          user_id: userId || null,
+          duration_ms: elapsedMilliseconds(started),
+          ...errorAuditFields(error),
+        }, "error");
+        throw error;
+      }
+    },
   );
 }
 
-export async function GET(request: Request) {
-  const config = loadConfig();
-  const denied = authorize(request, config);
-  if (denied) return denied;
-  const userId = resolveRequestUserId(request, config);
-  if (userId instanceof Response) return userId;
+export async function POST(request: Request) {
+  return routeMcpRequest(request);
+}
 
-  return mcpUserContext.run(userId || undefined, () =>
-    handleMcpRequest(request),
-  );
+export async function GET(request: Request) {
+  return routeMcpRequest(request);
 }

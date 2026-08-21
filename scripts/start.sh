@@ -331,6 +331,18 @@ c_ok "数据库迁移完成"
 # ---------- Web + worker ----------
 APP_PID_FILE="$PID_DIR/app.pid"
 APP_LOG="$PID_DIR/app.log"
+APP_LOG_MAX_BYTES="${APP_LOG_MAX_BYTES:-104857600}"
+
+rotate_app_log_if_needed() {
+  [ -f "$APP_LOG" ] || return 0
+  local current_size rotated
+  current_size="$(stat -c '%s' "$APP_LOG" 2>/dev/null || printf '0')"
+  [ "$current_size" -lt "$APP_LOG_MAX_BYTES" ] || {
+    rotated="$PID_DIR/app-$(date -u +%Y%m%dT%H%M%SZ).log"
+    mv "$APP_LOG" "$rotated"
+    c_info "app.log 已达到 ${current_size} bytes，轮转为 $rotated"
+  }
+}
 
 web_is_ready() {
   curl -q -fsS -m 1 "$API_INTERNAL_ORIGIN" >/dev/null 2>&1
@@ -353,10 +365,11 @@ fi
 if is_running "$APP_PID_FILE"; then
   c_warn "Web+worker 已在运行 (PID $(cat "$APP_PID_FILE"))"
 else
+  rotate_app_log_if_needed
   if [ "$APP_MODE" = "dev" ]; then
     c_info "启动 Web + worker [dev/turbopack] ..."
     nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
-      pnpm run dev > "$APP_LOG" 2>&1 &
+      pnpm run dev >> "$APP_LOG" 2>&1 &
   else
     # prd: 确保 build 产物存在
     if [ ! -d ".next" ] || [ ! -f ".next/BUILD_ID" ]; then
@@ -365,7 +378,7 @@ else
     fi
     c_info "启动 Web + worker [prd] ..."
     nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
-      pnpm run start:all > "$APP_LOG" 2>&1 &
+      pnpm run start:all >> "$APP_LOG" 2>&1 &
   fi
   app_pid=$!
   echo "$app_pid" > "$APP_PID_FILE"

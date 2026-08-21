@@ -10,6 +10,12 @@ import type * as AssetRepository from "@/server/repositories/assets";
 import { writeAll } from "@/server/storage/object-storage";
 import type { CreateUploadTask } from "@/shared/contracts";
 import type { TaskService } from "@/server/modules/tasks/task-service";
+import {
+  addAuditFields,
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+} from "@/server/observability/audit-log";
 
 const uploadProgressFlushBytes = 4 * 1024 * 1024;
 
@@ -55,17 +61,37 @@ async function writeUploadBody(
   expectedBytes: number,
   destination: string,
 ) {
+  const started = process.hrtime.bigint();
   await fs.mkdir(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.${crypto.randomUUID()}.uploading`;
   const handle = await fs.open(temporary, "wx");
   let received = 0;
   let lastFlushed = 0;
+  let chunks = 0;
+  let firstChunkMs: number | null = null;
+  let maximumReadWaitMs = 0;
+  let lastProgressBytes = 0;
+  let lastProgressAt = started;
+  auditLog("upload_stream_started", {
+    task_id: input.taskId,
+    item_id: input.itemId,
+    expected_bytes: expectedBytes,
+    declared_content_length: input.contentLength,
+    declared_content_type: input.contentType,
+  });
   try {
     const reader = input.body.getReader();
     for (;;) {
+      const readStarted = process.hrtime.bigint();
       const { value, done } = await reader.read();
+      maximumReadWaitMs = Math.max(
+        maximumReadWaitMs,
+        elapsedMilliseconds(readStarted),
+      );
       if (done) break;
       if (!value?.byteLength) continue;
+      chunks += 1;
+      if (firstChunkMs === null) firstChunkMs = elapsedMilliseconds(started);
       received += value.byteLength;
       if (received > expectedBytes) {
         throw new ApiV1Error(
@@ -82,6 +108,26 @@ async function writeUploadBody(
           receivedBytes: received,
         });
         lastFlushed = received;
+        const now = process.hrtime.bigint();
+        const intervalMs = elapsedMilliseconds(lastProgressAt);
+        auditLog("upload_stream_progress", {
+          task_id: input.taskId,
+          item_id: input.itemId,
+          received_bytes: received,
+          expected_bytes: expectedBytes,
+          progress_percent: (received / expectedBytes) * 100,
+          elapsed_ms: elapsedMilliseconds(started),
+          interval_ms: intervalMs,
+          interval_bytes: received - lastProgressBytes,
+          interval_bytes_per_second:
+            intervalMs > 0
+              ? ((received - lastProgressBytes) * 1_000) / intervalMs
+              : null,
+          chunks,
+          maximum_read_wait_ms: maximumReadWaitMs,
+        });
+        lastProgressBytes = received;
+        lastProgressAt = now;
       }
     }
     if (received !== expectedBytes) {
@@ -94,8 +140,37 @@ async function writeUploadBody(
     await handle.sync();
     await handle.close();
     await fs.rename(temporary, destination);
+    const durationMs = elapsedMilliseconds(started);
+    auditLog("upload_stream_completed", {
+      task_id: input.taskId,
+      item_id: input.itemId,
+      received_bytes: received,
+      expected_bytes: expectedBytes,
+      duration_ms: durationMs,
+      time_to_first_chunk_ms: firstChunkMs,
+      maximum_read_wait_ms: maximumReadWaitMs,
+      chunks,
+      average_bytes_per_second:
+        durationMs > 0 ? (received * 1_000) / durationMs : null,
+    });
     return received;
   } catch (error) {
+    auditLog(
+      "upload_stream_failed",
+      {
+        task_id: input.taskId,
+        item_id: input.itemId,
+        received_bytes: received,
+        expected_bytes: expectedBytes,
+        missing_bytes: Math.max(0, expectedBytes - received),
+        duration_ms: elapsedMilliseconds(started),
+        time_to_first_chunk_ms: firstChunkMs,
+        maximum_read_wait_ms: maximumReadWaitMs,
+        chunks,
+        ...errorAuditFields(error),
+      },
+      "warn",
+    );
     await handle.close().catch(() => undefined);
     await fs.rm(temporary, { force: true });
     throw error;
@@ -161,6 +236,13 @@ export class UploadService {
       result: { auto_publish: input.auto_publish },
       items: manifests,
     });
+    addAuditFields({
+      task_id: taskId,
+      user_id: input.user_id?.trim() || null,
+      upload_item_count: manifests.length,
+      upload_total_bytes: totalBytes,
+      upload_filenames: manifests.map((item) => item.filename),
+    });
     return this.dependencies.tasks.getTask(taskId);
   }
 
@@ -172,6 +254,11 @@ export class UploadService {
       const lease = await repository.acquireTaskItemUploadLease({
         taskId: input.taskId,
         itemId: input.itemId,
+      });
+      auditLog("upload_lease_acquired", {
+        task_id: input.taskId,
+        item_id: input.itemId,
+        lease_state: lease.state,
       });
       if (lease.state === "already_complete") {
         return this.dependencies.tasks.getTask(input.taskId);
@@ -219,6 +306,13 @@ export class UploadService {
         if (released && destination) {
           await fs.rm(destination, { force: true }).catch(() => undefined);
         }
+        auditLog("upload_lease_released_after_failure", {
+          task_id: input.taskId,
+          item_id: input.itemId,
+          lease_released: released,
+          progress_reset_to_zero: released,
+          ...errorAuditFields(error),
+        }, "warn");
       }
       throw normalizeUploadRepositoryError(error);
     }

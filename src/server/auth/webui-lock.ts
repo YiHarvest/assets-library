@@ -140,10 +140,9 @@ export async function verifyWebUiSession(
   }
 }
 
-function normalizeBasePath(value: string | undefined) {
-  const trimmed = value?.trim();
-  if (!trimmed || trimmed === "/") return "";
-  return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
+export function normalizeBasePath(value: string | undefined) {
+  const segments = value?.trim().split("/").filter(Boolean) ?? [];
+  return segments.length ? `/${segments.join("/")}` : "";
 }
 
 function normalizePathname(value: string) {

@@ -32,9 +32,22 @@ function stringPayload(job: ClaimedJob, key: string) {
   return typeof value === "string" ? value : null;
 }
 
-function scopeForJob(job: ClaimedJob): AssetScope {
-  const userId = stringPayload(job, "userId")?.trim();
-  return userId ? { userId } : { userId: null };
+/**
+ * 从 job payload 获取 userId；若 payload 中缺失（API 未传 user_id），
+ * 则回退到数据库查出资产的实际归属，避免 worker 用 null scope 匹配不到
+ * 用户私有资产。
+ */
+async function resolveScopeForJob(job: ClaimedJob): Promise<AssetScope> {
+  const payloadUserId = stringPayload(job, "userId")?.trim();
+  if (payloadUserId) return { userId: payloadUserId };
+  const assetId = job.assetId ?? stringPayload(job, "assetId");
+  if (!assetId) return { userId: null };
+  const [row] = await db
+    .select({ userId: assets.userId })
+    .from(assets)
+    .where(eq(assets.id, assetId))
+    .limit(1);
+  return row ? { userId: row.userId } : { userId: null };
 }
 
 async function markMutationRunning(job: ClaimedJob) {
@@ -82,7 +95,8 @@ async function queueRetryAnalysis(job: ClaimedJob) {
       .where(eq(assets.id, assetId))
       .for("update")
       .limit(1);
-    const expectedUserId = stringPayload(job, "userId")?.trim() || null;
+    const payloadUserId = stringPayload(job, "userId")?.trim() || null;
+    const expectedUserId = payloadUserId ?? asset?.userId ?? null;
     if (
       !asset ||
       asset.reviewStatus === "deleted" ||
@@ -363,7 +377,16 @@ async function hardDeletePublicAsset(
 async function deleteAsset(job: ClaimedJob, storage: ObjectStorage) {
   const assetId = job.assetId ?? stringPayload(job, "assetId");
   if (!assetId) throw new AppError("invalid_request", "删除作业缺少素材标识。", 500);
-  const userId = stringPayload(job, "userId")?.trim();
+  const payloadUserId = stringPayload(job, "userId")?.trim() ?? null;
+  let userId: string | null = payloadUserId;
+  if (!userId) {
+    const [row] = await db
+      .select({ userId: assets.userId })
+      .from(assets)
+      .where(eq(assets.id, assetId))
+      .limit(1);
+    userId = row?.userId ?? null;
+  }
   if (userId) {
     await releaseAssetToPublic(assetId, userId);
     return { released_to_public: true, parent_video_reclaimed: false };
@@ -388,10 +411,12 @@ export async function processMutationJob(
     }
     let result: Record<string, unknown>;
     if (job.type === "update") {
-      await updateAssetMetadata(assetId, updatePayload(job), scopeForJob(job));
+      const scope = await resolveScopeForJob(job);
+      await updateAssetMetadata(assetId, updatePayload(job), scope);
       result = { asset_id: assetId };
     } else if (job.type === "publish") {
-      await publishAsset(assetId, scopeForJob(job));
+      const scope = await resolveScopeForJob(job);
+      await publishAsset(assetId, scope);
       result = { asset_id: assetId, review_status: "published" };
     } else if (job.type === "delete") {
       result = { asset_id: assetId, ...(await deleteAsset(job, storage)) };

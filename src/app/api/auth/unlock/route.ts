@@ -59,7 +59,12 @@ export async function POST(request: Request) {
   const returnPath = safeWebUiReturnPath(form.get("next"));
   if (!webUiLockKeyMatches(form.get("key"), config.key)) {
     recordFailure(client, now);
-    const lockUrl = new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/lock`, request.url);
+    const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim()
+      || new URL(request.url).protocol.replace(":", "");
+    const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
+      || request.headers.get("host")
+      || new URL(request.url).host;
+    const lockUrl = new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/lock`, `${proto}://${host}`);
     lockUrl.searchParams.set("error", "invalid");
     lockUrl.searchParams.set("next", returnPath);
     return NextResponse.redirect(lockUrl, 303);
@@ -67,10 +72,18 @@ export async function POST(request: Request) {
 
   attempts.delete(client);
   const session = await createWebUiSession(config.key, now);
-  const response = NextResponse.redirect(new URL(returnPath, request.url), 303);
+  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim()
+    || new URL(request.url).protocol.replace(":", "");
+  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
+    || request.headers.get("host")
+    || new URL(request.url).host;
+  const base = `${proto}://${host}`;
+  const redirectUrl = returnPath.startsWith("http") ? returnPath : `${base}${returnPath}`;
+  const response = NextResponse.redirect(redirectUrl, 303);
+  const isSecure = proto === "https";
   response.cookies.set(WEBUI_LOCK_COOKIE_NAME, session, {
     httpOnly: true,
-    secure: config.appMode === "prd",
+    secure: isSecure,
     sameSite: "lax",
     maxAge: WEBUI_LOCK_SESSION_SECONDS,
     path: webUiCookiePath(),

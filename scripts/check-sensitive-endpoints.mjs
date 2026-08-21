@@ -11,7 +11,7 @@ const trackedAndUnignored = execFileSync(
 
 const ipv4Literal = /(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)/g;
 const urlWithNumericPort =
-  /(?:https?|wss?|mysql|postgres(?:ql)?):\/\/[^\s"'<>]+:\d{2,5}(?=[/\s"'<>]|$)/g;
+  /(?:https?|wss?|mysql|postgres(?:ql)?):\/\/[^\s"'<>]+:\d{2,5}(?=[/\s"'<>]|$)/;
 const endpointExample =
   /^([A-Z][A-Z0-9_]*(?:URL|URI|HOST|PORT|ENDPOINT|ORIGIN|BASE_PATH))[ \t]*=[ \t]*([^#\s].*)$/gm;
 const dockerWildcard = Array.from({ length: 4 }, () => "0").join(".");
@@ -29,17 +29,15 @@ for (const file of trackedAndUnignored) {
   const buffer = fs.readFileSync(file);
   if (buffer.includes(0)) continue;
   const source = buffer.toString("utf8");
-  const ipv4Matches = [...source.matchAll(ipv4Literal)].map((match) => match[0]);
-  const forbiddenIpv4 = ipv4Matches.filter(
-    (value) => !(file === "Dockerfile" && value === dockerWildcard),
+  const hasForbiddenIpv4 = [...source.matchAll(ipv4Literal)].some(
+    (match) => !(file === "Dockerfile" && match[0] === dockerWildcard),
   );
-  if (forbiddenIpv4.length > 0) {
+  if (hasForbiddenIpv4) {
     findings.push(`${file}: IPv4 literal`);
   }
   if (urlWithNumericPort.test(source)) {
     findings.push(`${file}: URL with explicit numeric port`);
   }
-  urlWithNumericPort.lastIndex = 0;
   if (file.endsWith(".env.example")) {
     for (const match of source.matchAll(endpointExample)) {
       findings.push(`${file}: nonblank endpoint example ${match[1]}`);

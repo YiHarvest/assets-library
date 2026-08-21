@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const headObject = vi.hoisted(() => vi.fn());
+
+vi.mock("@/server/storage/zos", () => ({
+  createZosObjectStorage: () => ({ headObject }),
+}));
 import type { AppConfig } from "@/server/config";
 import { ApiV1Error } from "@/server/api/errors";
 import { resolveIngestSource } from "@/server/mcp/url-ingest";
@@ -15,6 +21,15 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 }
 
 describe("resolveIngestSource SSRF guard", () => {
+  beforeEach(() => {
+    headObject.mockRejectedValue(new Error("object probe unavailable"));
+  });
+
+  afterEach(() => {
+    headObject.mockReset();
+    vi.unstubAllGlobals();
+  });
+
   it("rejects non-http(s) protocols", async () => {
     await expect(
       resolveIngestSource("file:///etc/passwd", testConfig()),
@@ -60,13 +75,13 @@ describe("resolveIngestSource SSRF guard", () => {
 
   it("accepts allowlisted same-bucket host and probes the object", async () => {
     const config = testConfig({
-      ZOS_API_ENDPOINT: "https://your.com",
-      ZOS_ENDPOINT: "https://your.com",
+      ZOS_API_ENDPOINT: "https://object-api.example.test",
+      ZOS_ENDPOINT: "https://object-api.example.test",
       ZOS_BUCKET: "test-bucket",
       ZOS_ACCESS_KEY_ID: "test-key",
       ZOS_SECRET_ACCESS_KEY: "test-secret",
     });
-    // 同桶走 S3 协议；无真实服务时应在连接层失败而不是被白名单拒绝。
+    // 同桶走 S3 协议；对象探测已 mock，测试不依赖外部网络。
     await expect(
       resolveIngestSource(
         "https://storage.example.com/assets/demo.mp4",
@@ -77,11 +92,12 @@ describe("resolveIngestSource SSRF guard", () => {
       // 白名单通过后才是连接类错误；不允许出现 invalid_request/白名单错误。
       return error.code !== "invalid_request";
     });
+    expect(headObject).toHaveBeenCalledWith("assets/demo.mp4");
   });
 
   it("honors extra allowed domains and rejects same-bucket without zos config", async () => {
     const config = testConfig({
-      mcpAllowedDomains: ["cdn.example.com"],
+      mcpAllowedDomains: ["CDN.Example.COM"],
       ZOS_API_ENDPOINT: "",
       ZOS_ENDPOINT: "",
       ZOS_INTERNAL_URL: "",
@@ -90,6 +106,12 @@ describe("resolveIngestSource SSRF guard", () => {
       ZOS_ACCESS_KEY_ID: "",
       ZOS_SECRET_ACCESS_KEY: "",
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network unavailable");
+      }),
+    );
     // 白名单域名的 HTTP 拉取路径：直接拒绝连接会抛 network error（非 invalid_request），
     // 说明域名校验已通过进入拉取阶段。
     await expect(
@@ -102,8 +124,8 @@ describe("resolveIngestSource SSRF guard", () => {
 
   it("rejects empty object keys on same-bucket URLs", async () => {
     const config = testConfig({
-      ZOS_API_ENDPOINT: "https://your.com",
-      ZOS_ENDPOINT: "https://your.com",
+      ZOS_API_ENDPOINT: "https://object-api.example.test",
+      ZOS_ENDPOINT: "https://object-api.example.test",
       ZOS_BUCKET: "test-bucket",
       ZOS_ACCESS_KEY_ID: "test-key",
       ZOS_SECRET_ACCESS_KEY: "test-secret",

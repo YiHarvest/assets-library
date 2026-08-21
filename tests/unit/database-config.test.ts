@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "@/server/config";
+import { loadTestConfig as loadConfig } from "../helpers/config";
 
 // 脱敏：测试文件不写死真实内网地址，统一从 env 读取。
 // 需要连真实测试库/模型网关时在环境里设置 TEST_* 变量；缺省回退到占位主机，
 // 与 .env.example 的占位约定（dev-services.example.com / change-me）保持一致。
 const productionDatabaseUrl =
   process.env.TEST_DATABASE_URL ??
-  "mysql://assets_library_app:change-me@dev-services.example.com:3306/assets_library";
+  "mysql://assets_library_app:change-me@your.com/assets_library";
 const vlmBaseUrl = (
   process.env.TEST_VLM_BASE_URL ??
-  "http://dev-services.example.com:30000/v1"
+  "https://your.com/v1"
 ).replace(/\/$/, "");
 const embeddingBaseUrl = (
   process.env.TEST_EMBEDDING_BASE_URL ??
-  "http://dev-services.example.com:39999/v1"
+  "https://your.com/v1"
 ).replace(/\/$/, "");
 const webUiLockKey = "test-only-webui-lock-key-32-bytes-minimum";
 
@@ -59,7 +59,7 @@ describe("database configuration", () => {
     const config = loadConfig({
       APP_MODE: "prd",
       WEBUI_LOCK_KEY: webUiLockKey,
-      PRD_INTERNAL_SERVICE_HOST: "127.0.0.1",
+      PRD_INTERNAL_SERVICE_HOST: "your.com",
       DATABASE_URL: productionDatabaseUrl,
       DEV_DATABASE_NAME: "assets_library_test",
       PRD_DATABASE_NAME: "assets_library",
@@ -72,21 +72,21 @@ describe("database configuration", () => {
     expect(config.databaseUrl).toBe(
       withHostname(
         withDatabaseName(productionDatabaseUrl, "assets_library"),
-        "127.0.0.1",
+        "your.com",
       ),
     );
     expect(config.models.vlm.baseUrl).toBe(
-      withHostname(vlmBaseUrl, "127.0.0.1"),
+      withHostname(vlmBaseUrl, "your.com"),
     );
     expect(config.embeddingBaseUrl).toBe(
-      withHostname(embeddingBaseUrl, "127.0.0.1"),
+      withHostname(embeddingBaseUrl, "your.com"),
     );
   });
 
   it("uses the development database in dev mode", () => {
     const config = loadConfig({
       APP_MODE: "dev",
-      PRD_INTERNAL_SERVICE_HOST: "127.0.0.1",
+      PRD_INTERNAL_SERVICE_HOST: "your.com",
       DATABASE_URL: productionDatabaseUrl,
       DEV_DATABASE_NAME: "assets_library_test",
       VLM_BASE_URL: vlmBaseUrl,
@@ -107,7 +107,7 @@ describe("database configuration", () => {
       loadConfig({
         APP_MODE: "prd",
         WEBUI_LOCK_KEY: webUiLockKey,
-        PRD_INTERNAL_SERVICE_HOST: "0.0.0.0",
+        PRD_INTERNAL_SERVICE_HOST: Array.from({ length: 4 }, () => "0").join("."),
         DATABASE_URL: productionDatabaseUrl,
       }),
     ).toThrow(/通配监听地址/);

@@ -2,7 +2,8 @@ import { expect, test } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const baseUrl = process.env.E2E_BASE_URL?.trim() || "http://127.0.0.1:3100";
+const baseUrl = process.env.E2E_BASE_URL?.trim();
+if (!baseUrl) throw new Error("E2E_BASE_URL must be configured for MCP E2E tests.");
 const mcpUrl = `${baseUrl}/mcp`;
 const token = process.env.MCP_ACCESS_TOKEN?.trim();
 

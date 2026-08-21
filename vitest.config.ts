@@ -9,6 +9,17 @@ export default defineConfig({
     // 各套件的 TRUNCATE 生命周期互相污染，同时单个套件内部仍可测试并发。
     fileParallelism: false,
     coverage: { reporter: ["text", "html"] },
+    env: {
+      PRD_INTERNAL_SERVICE_HOST:
+        process.env.TEST_PRD_INTERNAL_SERVICE_HOST ?? "your.com",
+      DATABASE_URL:
+        process.env.TEST_DATABASE_URL ??
+        "mysql://root@localhost/assets_library_dev_test",
+      SCENE_DETECT_BASE_URL:
+        process.env.TEST_SCENE_DETECT_BASE_URL ?? "https://your.com",
+      CHROMA_URL: process.env.TEST_CHROMA_URL ?? "https://your.com",
+      API_INTERNAL_ORIGIN: "https://your.com",
+    },
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },

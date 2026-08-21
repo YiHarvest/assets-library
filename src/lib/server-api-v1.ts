@@ -7,8 +7,7 @@ interface ApiFailure {
 function internalApiOrigin() {
   const configured = process.env.API_INTERNAL_ORIGIN?.trim();
   if (configured) return configured.replace(/\/+$/, "");
-  const port = process.env.PORT ?? process.env.E2E_PORT ?? "3000";
-  return `http://127.0.0.1:${port}`;
+  throw new Error("API_INTERNAL_ORIGIN must be configured in the environment.");
 }
 
 /** Server Components 也通过稳定 HTTP facade 读取数据，不再直连领域服务。 */

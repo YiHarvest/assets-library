@@ -117,6 +117,10 @@ export function registerTools(
   service: ApiV1Service = getApiV1Service(),
 ) {
   const userId = () => requireUserId(config);
+  const internalOrigin = process.env.API_INTERNAL_ORIGIN?.trim();
+  if (!internalOrigin) {
+    throw new Error("API_INTERNAL_ORIGIN must be configured for MCP tools.");
+  }
 
   server.registerTool(
     "get_service_info",
@@ -410,7 +414,7 @@ export function registerTools(
       const result = await service.listUserMedia(
         userId(),
         { cursor: cursor ?? null, limit: limit ?? 20 },
-        "http://mcp.invalid",
+        internalOrigin,
       );
       return textResult({
         ...result,

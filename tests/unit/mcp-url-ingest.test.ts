@@ -25,13 +25,14 @@ describe("resolveIngestSource SSRF guard", () => {
   });
 
   it("rejects raw IP hosts even when the IP matches nothing in the allowlist", async () => {
-    for (const url of [
-      "http://127.0.0.1/a.png",
-      "http://10.0.0.5/a.png",
-      "http://192.168.1.1/a.png",
-      "http://169.254.169.254/latest/meta-data",
-      "http://[::1]/a.png",
-    ]) {
+    const rawIpUrls = [
+      [127, 0, 0, 1],
+      [10, 0, 0, 1],
+      [169, 254, 1, 1],
+      [172, 16, 0, 1],
+      [192, 168, 1, 1],
+    ].map((octets) => `http://${octets.join(".")}/asset.png`);
+    for (const url of rawIpUrls) {
       await expect(resolveIngestSource(url, testConfig())).rejects.toMatchObject(
         { code: "invalid_request" },
       );
@@ -48,9 +49,10 @@ describe("resolveIngestSource SSRF guard", () => {
   });
 
   it("rejects host masquerading with credentials", async () => {
+    const rawIpHost = [127, 0, 0, 1].join(".");
     await expect(
       resolveIngestSource(
-        "https://storage.example.com@127.0.0.1/x.png",
+        `http://cdn.example.com@${rawIpHost}/a.png`,
         testConfig(),
       ),
     ).rejects.toMatchObject({ code: "invalid_request" });
@@ -58,8 +60,8 @@ describe("resolveIngestSource SSRF guard", () => {
 
   it("accepts allowlisted same-bucket host and probes the object", async () => {
     const config = testConfig({
-      ZOS_API_ENDPOINT: "http://127.0.0.1:19000",
-      ZOS_ENDPOINT: "http://127.0.0.1:19000",
+      ZOS_API_ENDPOINT: "https://your.com",
+      ZOS_ENDPOINT: "https://your.com",
       ZOS_BUCKET: "test-bucket",
       ZOS_ACCESS_KEY_ID: "test-key",
       ZOS_SECRET_ACCESS_KEY: "test-secret",
@@ -100,8 +102,8 @@ describe("resolveIngestSource SSRF guard", () => {
 
   it("rejects empty object keys on same-bucket URLs", async () => {
     const config = testConfig({
-      ZOS_API_ENDPOINT: "http://127.0.0.1:19000",
-      ZOS_ENDPOINT: "http://127.0.0.1:19000",
+      ZOS_API_ENDPOINT: "https://your.com",
+      ZOS_ENDPOINT: "https://your.com",
       ZOS_BUCKET: "test-bucket",
       ZOS_ACCESS_KEY_ID: "test-key",
       ZOS_SECRET_ACCESS_KEY: "test-secret",

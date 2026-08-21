@@ -157,6 +157,29 @@ describe("resolveIngestSource SSRF guard", () => {
     await source.close();
   });
 
+  it("rejects a sixth redirect while allowing five redirect hops", async () => {
+    const config = testConfig({
+      mcpAllowedDomains: ["cdn.example.com"],
+      ZOS_INTERNAL_URL: "",
+      ZOS_WEB_URL: "",
+    });
+    const fetchMock = vi.fn(async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: "/next.png" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      inspectIngestSource("https://cdn.example.com/demo.png", config),
+    ).rejects.toMatchObject({
+      code: "invalid_request",
+      message: "源 URL 重定向次数过多。",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
   it("rejects empty object keys on same-bucket URLs", async () => {
     const config = testConfig({
       ZOS_API_ENDPOINT: "https://object-api.example.test",

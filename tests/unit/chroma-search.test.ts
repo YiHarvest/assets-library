@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 function configureEmbedding() {
-  process.env.CHROMA_URL = "https://your.com";
+  process.env.CHROMA_URL = "https://chroma.example.test";
   process.env.EMBEDDING_BASE_URL = "https://embeddings.test/v1";
   process.env.EMBEDDING_API_KEY = "test-key";
   process.env.EMBEDDING_MODEL = "test-embedding";

@@ -2138,8 +2138,8 @@ const STALE_JOB_BATCH_SIZE = 50;
  *
  * 原实现用一次范围 UPDATE（status + claimedAt 区间）锁定大批行，与并发的
  * 作业 INSERT 事务互锁导致偶发死锁（1213/1205）。这里改为在单个事务里用
- * FOR UPDATE SKIP LOCKED 分批选中要恢复的作业，再按主键逐行 UPDATE，
- * 锁粒度从索引区间缩小到单行，且 SKIP LOCKED 让已被领取的行直接跳过。
+ * FOR UPDATE SKIP LOCKED 分批选中要恢复的作业，再按选中的主键集合批量 UPDATE；
+ * 小批量限制锁窗口，且 SKIP LOCKED 让已被领取的行直接跳过。
  */
 export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
   const now = new Date();
@@ -2154,21 +2154,26 @@ export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
         .orderBy(asc(jobs.claimedAt))
         .limit(STALE_JOB_BATCH_SIZE)
         .for("update", { skipLocked: true });
-      let updated = 0;
-      for (const row of rows) {
-        const result = await tx
-          .update(jobs)
-          .set({
-            status: "queued",
-            claimedAt: null,
-            leaseOwner: null,
-            availableAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(jobs.id, row.id), eq(jobs.status, "running")));
-        updated += affectedRows(result);
-      }
-      return updated;
+      if (rows.length === 0) return 0;
+      const result = await tx
+        .update(jobs)
+        .set({
+          status: "queued",
+          claimedAt: null,
+          leaseOwner: null,
+          availableAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            inArray(
+              jobs.id,
+              rows.map((row) => row.id),
+            ),
+            eq(jobs.status, "running"),
+          ),
+        );
+      return affectedRows(result);
     });
     if (batch === 0) break;
     recovered += batch;

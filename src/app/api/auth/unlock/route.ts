@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   createWebUiSession,
+  normalizeBasePath,
   readWebUiLockConfig,
   safeWebUiReturnPath,
   webUiCookiePath,
@@ -15,7 +16,7 @@ export const dynamic = "force-dynamic";
 const MAX_BODY_BYTES = 4_096;
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW_MS = 5 * 60 * 1_000;
-const attempts = new Map<string, { count: number; resetAt: number }>();
+const rateLimiter = createInMemoryRateLimiter(MAX_ATTEMPTS, ATTEMPT_WINDOW_MS);
 
 export async function POST(request: Request) {
   let config;
@@ -27,7 +28,7 @@ export async function POST(request: Request) {
 
   if (!config.enabled || !config.key) {
     return NextResponse.redirect(
-      new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/`, request.url),
+      new URL(`${normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH)}/`, request.url),
       303,
     );
   }
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
 
   const client = clientAddress(request);
   const now = Date.now();
-  if (isRateLimited(client, now)) {
+  if (rateLimiter.isRateLimited(client, now)) {
     return new NextResponse("Too Many Requests", {
       status: 429,
       headers: { "retry-after": "300", "cache-control": "no-store" },
@@ -57,33 +58,25 @@ export async function POST(request: Request) {
 
   const form = new URLSearchParams(body);
   const returnPath = safeWebUiReturnPath(form.get("next"));
+  const origin = resolveOrigin(request);
   if (!webUiLockKeyMatches(form.get("key"), config.key)) {
-    recordFailure(client, now);
-    const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim()
-      || new URL(request.url).protocol.replace(":", "");
-    const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
-      || request.headers.get("host")
-      || new URL(request.url).host;
-    const lockUrl = new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/lock`, `${proto}://${host}`);
+    rateLimiter.recordFailure(client, now);
+    const lockUrl = new URL(
+      `${normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH)}/lock`,
+      origin.baseUrl,
+    );
     lockUrl.searchParams.set("error", "invalid");
     lockUrl.searchParams.set("next", returnPath);
     return NextResponse.redirect(lockUrl, 303);
   }
 
-  attempts.delete(client);
+  rateLimiter.reset(client);
   const session = await createWebUiSession(config.key, now);
-  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim()
-    || new URL(request.url).protocol.replace(":", "");
-  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
-    || request.headers.get("host")
-    || new URL(request.url).host;
-  const base = `${proto}://${host}`;
-  const redirectUrl = returnPath.startsWith("http") ? returnPath : `${base}${returnPath}`;
+  const redirectUrl = `${origin.baseUrl}${returnPath}`;
   const response = NextResponse.redirect(redirectUrl, 303);
-  const isSecure = proto === "https";
   response.cookies.set(WEBUI_LOCK_COOKIE_NAME, session, {
     httpOnly: true,
-    secure: isSecure,
+    secure: origin.isSecure,
     sameSite: "lax",
     maxAge: WEBUI_LOCK_SESSION_SECONDS,
     path: webUiCookiePath(),
@@ -93,25 +86,80 @@ export async function POST(request: Request) {
 }
 
 function clientAddress(request: Request) {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const forwarded = request.headers.get("x-forwarded-for")
+    ?.split(",")[0]
+    ?.trim();
+  if (forwarded) return forwarded;
+  for (const header of [
+    "x-real-ip",
+    "cf-connecting-ip",
+    "fly-client-ip",
+    "x-client-ip",
+  ]) {
+    const value = request.headers.get(header)?.trim();
+    if (value) return value;
+  }
+  const host = request.headers.get("host")?.slice(0, 255) || "unknown-host";
+  const userAgent =
+    request.headers.get("user-agent")?.slice(0, 512) || "unknown-agent";
+  return `${host}::${userAgent}`;
 }
 
-function isRateLimited(client: string, now: number) {
-  const entry = attempts.get(client);
-  if (!entry || entry.resetAt <= now) {
-    attempts.delete(client);
-    return false;
+function resolveOrigin(request: Request) {
+  const requestUrl = new URL(request.url);
+  const forwardedProtocol = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  const protocol =
+    forwardedProtocol === "http" || forwardedProtocol === "https"
+      ? forwardedProtocol
+      : requestUrl.protocol.replace(":", "");
+  const host =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host") ||
+    requestUrl.host;
+  try {
+    const candidate = new URL(`${protocol}://${host}`);
+    if (candidate.pathname !== "/" || candidate.search || candidate.hash) {
+      throw new Error("Invalid forwarded origin");
+    }
+    return {
+      baseUrl: candidate.origin,
+      isSecure: candidate.protocol === "https:",
+    };
+  } catch {
+    return {
+      baseUrl: requestUrl.origin,
+      isSecure: requestUrl.protocol === "https:",
+    };
   }
-  return entry.count >= MAX_ATTEMPTS;
 }
 
-function recordFailure(client: string, now: number) {
-  const entry = attempts.get(client);
-  if (!entry || entry.resetAt <= now) {
-    attempts.set(client, { count: 1, resetAt: now + ATTEMPT_WINDOW_MS });
-    return;
-  }
-  entry.count += 1;
+function createInMemoryRateLimiter(maxAttempts: number, windowMs: number) {
+  const attempts = new Map<string, { count: number; resetAt: number }>();
+  return {
+    isRateLimited(client: string, now: number) {
+      const entry = attempts.get(client);
+      if (!entry || entry.resetAt <= now) {
+        attempts.delete(client);
+        return false;
+      }
+      return entry.count >= maxAttempts;
+    },
+    recordFailure(client: string, now: number) {
+      const entry = attempts.get(client);
+      if (!entry || entry.resetAt <= now) {
+        attempts.set(client, { count: 1, resetAt: now + windowMs });
+        return;
+      }
+      entry.count += 1;
+    },
+    reset(client: string) {
+      attempts.delete(client);
+    },
+  };
 }
 
 function unavailable() {

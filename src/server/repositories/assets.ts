@@ -1876,9 +1876,23 @@ async function selectFairAnalysisJob(
              and queued_analysis.available_at <= ${now}
         )`,
       )
+      .limit(1);
+    if (!candidateTask) return null;
+
+    // 候选查询会使用 status/created_at 等二级索引。直接在该查询上 FOR UPDATE
+    // 会形成“二级索引 -> 主键”的加锁顺序，而 mutation worker 更新 task 时是
+    // “主键 -> 二级索引”，高并发下会产生 InnoDB 死锁。先无锁选候选，再通过
+    // 主键锁定具体 task；等待锁后重新检查作业状态和并发计数即可保持公平性。
+    const [lockedTask] = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(eq(tasks.id, candidateTask.id))
       .limit(1)
       .for("update");
-    if (!candidateTask) return null;
+    if (!lockedTask) {
+      excludedTaskIds.push(candidateTask.id);
+      continue;
+    }
 
     const [runningRow] = await tx
       .select({ value: sql<number>`count(*)`.mapWith(Number) })

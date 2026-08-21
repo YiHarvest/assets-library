@@ -38,7 +38,10 @@ function allowedHostnames(config: AppConfig) {
   for (const value of [config.ZOS_WEB_URL, config.ZOS_INTERNAL_URL]) {
     if (value) hosts.add(hostnameOf(new URL(value)));
   }
-  for (const domain of config.mcpAllowedDomains) hosts.add(domain);
+  for (const domain of config.mcpAllowedDomains) {
+    const normalized = domain.trim().toLowerCase();
+    if (normalized) hosts.add(normalized);
+  }
   return hosts;
 }
 

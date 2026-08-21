@@ -1,5 +1,14 @@
 import type { NextConfig } from "next";
 
+export function normalizePublicBasePath(value: string | undefined) {
+  const segments = value?.trim().split("/").filter(Boolean) ?? [];
+  return segments.length ? `/${segments.join("/")}` : "";
+}
+
+const publicBasePath = normalizePublicBasePath(
+  process.env.NEXT_PUBLIC_BASE_PATH,
+);
+
 const nextConfig: NextConfig = {
   // Playwright 的 next dev 使用独立目录，避免覆盖可供 start.sh 直接运行的
   // 生产 .next 构建产物。
@@ -17,9 +26,9 @@ const nextConfig: NextConfig = {
    * 否则不得改变这套设计。
    */
   basePath: undefined,
-  assetPrefix: process.env.NEXT_PUBLIC_BASE_PATH || undefined,
+  assetPrefix: publicBasePath || undefined,
   async rewrites() {
-    const prefix = process.env.NEXT_PUBLIC_BASE_PATH;
+    const prefix = publicBasePath;
     if (!prefix) return [];
     return [
       { source: `${prefix}/:path*`, destination: "/:path*" },

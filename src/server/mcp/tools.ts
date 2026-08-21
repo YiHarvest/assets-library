@@ -14,6 +14,13 @@ import { getMcpRequestUserId } from "@/server/mcp/user-context";
 import type {
   UserScope,
 } from "@/shared/contracts";
+import {
+  addAuditFields,
+  auditLog,
+  elapsedMilliseconds,
+  errorAuditFields,
+  summarizeResult,
+} from "@/server/observability/audit-log";
 
 /** 把带假 origin 的绝对 URL 转为相对路径；客户端用已知服务地址拼接。 */
 function relativeUrl(absolute: string) {
@@ -34,6 +41,41 @@ function textResult(data: unknown) {
     content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
     ...(structuredContent ? { structuredContent } : {}),
   };
+}
+
+async function auditedToolCall<T>(
+  toolName: string,
+  input: unknown,
+  handler: () => Promise<T> | T,
+) {
+  const started = process.hrtime.bigint();
+  auditLog("mcp_tool_started", {
+    tool_name: toolName,
+    user_id: getMcpRequestUserId() ?? null,
+    tool_input: input,
+  });
+  try {
+    const result = await handler();
+    auditLog("mcp_tool_completed", {
+      tool_name: toolName,
+      user_id: getMcpRequestUserId() ?? null,
+      duration_ms: elapsedMilliseconds(started),
+      tool_result: summarizeResult(result),
+    });
+    return result;
+  } catch (error) {
+    auditLog(
+      "mcp_tool_failed",
+      {
+        tool_name: toolName,
+        user_id: getMcpRequestUserId() ?? null,
+        duration_ms: elapsedMilliseconds(started),
+        ...errorAuditFields(error),
+      },
+      "warn",
+    );
+    throw error;
+  }
 }
 
 function requireUserId(config: AppConfig) {
@@ -60,7 +102,20 @@ async function runUploadFromUrl(
   service: ApiV1Service,
 ) {
   const userId = requireUserId(config);
+  const totalStarted = process.hrtime.bigint();
+  addAuditFields({
+    user_id: userId,
+    source_url: input.url,
+    requested_filename: input.filename ?? null,
+    publish: input.publish ?? false,
+  });
+  const sourceStarted = process.hrtime.bigint();
   const source = await resolveIngestSource(input.url, config);
+  auditLog("mcp_upload_source_ready", {
+    source_resolution_ms: elapsedMilliseconds(sourceStarted),
+    source_size_bytes: source.sizeBytes,
+    source_filename: source.filename,
+  });
   try {
     const filename = input.filename?.trim() || source.filename;
     if (!targetFormatFromFilename(filename)) {
@@ -70,6 +125,7 @@ async function runUploadFromUrl(
         415,
       );
     }
+    const createStarted = process.hrtime.bigint();
     const task = await service.createUploadTask({
       user_id: userId,
       callback_url: null,
@@ -82,6 +138,17 @@ async function runUploadFromUrl(
         },
       ],
     });
+    addAuditFields({
+      task_id: task.task_id,
+      item_id: task.items[0]?.item_id ?? null,
+      filename,
+      expected_bytes: source.sizeBytes,
+    });
+    auditLog("mcp_upload_task_created", {
+      task_id: task.task_id,
+      item_id: task.items[0]?.item_id ?? null,
+      duration_ms: elapsedMilliseconds(createStarted),
+    });
     const item = task.items[0];
     const receiveInput: ReceiveUploadItemInput = {
       taskId: task.task_id,
@@ -90,7 +157,17 @@ async function runUploadFromUrl(
       contentLength: source.sizeBytes,
       contentType: null,
     };
+    const receiveStarted = process.hrtime.bigint();
     const received = await service.receiveUploadItem(receiveInput);
+    auditLog("mcp_upload_body_received", {
+      task_id: task.task_id,
+      item_id: item.item_id,
+      duration_ms: elapsedMilliseconds(receiveStarted),
+      received_bytes: received.received_bytes,
+      expected_bytes: source.sizeBytes,
+      status: received.status,
+      phase: received.phase,
+    });
     if (received.status === "failed") {
       throw new ApiV1Error(
         "internal_error",
@@ -98,7 +175,15 @@ async function runUploadFromUrl(
         500,
       );
     }
+    const sealStarted = process.hrtime.bigint();
     const sealed = await service.sealUploadTask(task.task_id);
+    auditLog("mcp_upload_task_sealed", {
+      task_id: task.task_id,
+      duration_ms: elapsedMilliseconds(sealStarted),
+      total_duration_ms: elapsedMilliseconds(totalStarted),
+      status: sealed.status,
+      phase: sealed.phase,
+    });
     return {
       task_id: task.task_id,
       status: sealed.status,
@@ -129,8 +214,8 @@ export function registerTools(
       description:
         "返回素材库服务信息：支持的媒体类型、图片/视频大小上限、当前调用方的 user_id。",
     },
-    async () => {
-      return textResult({
+    async () => auditedToolCall("get_service_info", {}, () =>
+      textResult({
         service: "assets-library",
         supported_extensions: [".jpg", ".jpeg", ".png", ".webp", ".mp4"],
         max_image_bytes: config.MAX_IMAGE_BYTES,
@@ -139,8 +224,8 @@ export function registerTools(
         user_id: getMcpRequestUserId() ?? config.mcpDefaultUserId ?? null,
         // 任意用户模式下 agent 可访问全部注册用户。
         any_user_access: config.mcpAllowAnyUserId,
-      });
-    },
+      }),
+    ),
   );
 
   server.registerTool(
@@ -150,7 +235,7 @@ export function registerTools(
       description:
         "列出 users 注册表中的可访问用户、资料字段与有效素材数；包含素材数为 0 的用户。任意用户模式下返回全部用户，白名单模式下仅返回允许的用户。",
     },
-    async () => {
+    async () => auditedToolCall("list_users", {}, async () => {
       const allUsers = await service.listUsers();
       const visible =
         config.mcpAllowAnyUserId
@@ -159,7 +244,7 @@ export function registerTools(
               config.mcpAllowedUserIds.includes(user.user_id),
             );
       return textResult({ users: visible });
-    },
+    }),
   );
 
   server.registerTool(
@@ -183,11 +268,13 @@ export function registerTools(
           .describe("分析成功后是否直接发布，默认 false"),
       }),
     },
-    async ({ url, filename, publish }) => {
-      return textResult(
+    async ({ url, filename, publish }) => auditedToolCall(
+      "upload_from_url",
+      { url, filename, publish },
+      async () => textResult(
         await runUploadFromUrl({ url, filename, publish }, config, service),
-      );
-    },
+      ),
+    ),
   );
 
   server.registerTool(
@@ -199,9 +286,11 @@ export function registerTools(
         task_id: z.string().uuid().describe("任务 ID"),
       }),
     },
-    async ({ task_id }) => {
-      return textResult(await service.getTask(task_id, userId()));
-    },
+    async ({ task_id }) => auditedToolCall(
+      "get_task_status",
+      { task_id },
+      async () => textResult(await service.getTask(task_id, userId())),
+    ),
   );
 
   server.registerTool(
@@ -247,7 +336,7 @@ export function registerTools(
         include_tag_statistics: z.boolean().optional(),
       }),
     },
-    async (input) => {
+    async (input) => auditedToolCall("query_assets", input, async () => {
       const scope: UserScope =
         input.scope === "public"
           ? { mode: "public" }
@@ -295,7 +384,7 @@ export function registerTools(
         include_tag_statistics: input.include_tag_statistics ?? true,
       });
       return textResult(result);
-    },
+    }),
   );
 
   server.registerTool(
@@ -311,11 +400,15 @@ export function registerTools(
           .describe("可见范围，默认 own"),
       }),
     },
-    async ({ asset_id, scope }) => {
+    async ({ asset_id, scope }) => auditedToolCall(
+      "get_asset",
+      { asset_id, scope },
+      async () => {
       const finalScope: UserScope =
         scope === "public" ? { mode: "public" } : ownScope(userId());
       return textResult(await service.getAsset(asset_id, finalScope));
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -333,7 +426,10 @@ export function registerTools(
           .describe("人工标签"),
       }),
     },
-    async ({ asset_id, name, description, tags }) => {
+    async ({ asset_id, name, description, tags }) => auditedToolCall(
+      "update_asset",
+      { asset_id, name, description, tags },
+      async () => {
       const accepted = await service.updateAsset(asset_id, {
         user_id: userId(),
         callback_url: null,
@@ -342,7 +438,8 @@ export function registerTools(
         tags,
       });
       return textResult(accepted);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -354,13 +451,17 @@ export function registerTools(
         asset_id: z.string().uuid().describe("素材 ID"),
       }),
     },
-    async ({ asset_id }) => {
+    async ({ asset_id }) => auditedToolCall(
+      "publish_asset",
+      { asset_id },
+      async () => {
       const accepted = await service.publishAsset(asset_id, {
         user_id: userId(),
         callback_url: null,
       });
       return textResult(accepted);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -372,13 +473,17 @@ export function registerTools(
         asset_id: z.string().uuid().describe("素材 ID"),
       }),
     },
-    async ({ asset_id }) => {
+    async ({ asset_id }) => auditedToolCall(
+      "retry_asset",
+      { asset_id },
+      async () => {
       const accepted = await service.retryAsset(asset_id, {
         user_id: userId(),
         callback_url: null,
       });
       return textResult(accepted);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -391,13 +496,17 @@ export function registerTools(
         asset_id: z.string().uuid().describe("素材 ID"),
       }),
     },
-    async ({ asset_id }) => {
+    async ({ asset_id }) => auditedToolCall(
+      "delete_asset",
+      { asset_id },
+      async () => {
       const accepted = await service.deleteAsset(asset_id, {
         user_id: userId(),
         callback_url: null,
       });
       return textResult(accepted);
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -410,7 +519,10 @@ export function registerTools(
         limit: z.number().int().min(1).max(100).optional(),
       }),
     },
-    async ({ cursor, limit }) => {
+    async ({ cursor, limit }) => auditedToolCall(
+      "list_user_media",
+      { cursor, limit },
+      async () => {
       const result = await service.listUserMedia(
         userId(),
         { cursor: cursor ?? null, limit: limit ?? 20 },
@@ -426,7 +538,8 @@ export function registerTools(
             : {}),
         })),
       });
-    },
+      },
+    ),
   );
 
   server.registerTool(
@@ -435,9 +548,11 @@ export function registerTools(
       title: "获取存储用量",
       description: "返回当前调用方的存储用量统计（文件数、字节数、逐素材明细）。",
     },
-    async () => {
-      return textResult(await service.getUserStorageUsage(userId()));
-    },
+    async () => auditedToolCall(
+      "get_storage_usage",
+      {},
+      async () => textResult(await service.getUserStorageUsage(userId())),
+    ),
   );
 
   server.registerTool(
@@ -454,7 +569,10 @@ export function registerTools(
           .describe("可见范围，默认 own"),
       }),
     },
-    async ({ asset_id, scope }) => {
+    async ({ asset_id, scope }) => auditedToolCall(
+      "get_media_url",
+      { asset_id, scope },
+      async () => {
       const finalScope: UserScope =
         scope === "public" ? { mode: "public" } : ownScope(userId());
       const detail = await service.getAsset(asset_id, finalScope);
@@ -463,6 +581,7 @@ export function registerTools(
         media_url: relativeUrl(detail.media_url),
         original_filename: (detail as { original_filename?: string }).original_filename,
       });
-    },
+      },
+    ),
   );
 }

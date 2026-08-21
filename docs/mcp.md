@@ -147,3 +147,33 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
   `tests/unit/mcp-tools.test.ts`（工具注册）。
 - E2E：`tests/e2e/mcp.spec.ts`（鉴权 401、握手、listTools、工具调用全链路，
   需要 `MCP_ACCESS_TOKEN` 与测试数据库）。
+
+## 调用审计与上传诊断日志
+
+通过 `./scripts/start.sh` 启动时，Web 与 worker 的结构化 JSON 日志统一写入
+`.run/app.log`。重启采用追加写入；文件超过 `APP_LOG_MAX_BYTES`（默认 100 MiB）时，
+下次启动会轮转为 `.run/app-<UTC时间>.log`。
+
+每次 MCP 调用可以用同一个 `request_id` 串起以下事件：
+
+- `mcp_request_started`、`mcp_response_opened`、`mcp_request_completed/failed`：
+  HTTP/RPC 方法、调用 IP、User-Agent、`x-request-userid`、响应头等待和流结束总耗时；
+- `mcp_tool_started/completed/failed`：工具名、脱敏后的参数、实际用户、结果摘要和工具耗时；
+- `mcp_source_*`：源 URL 的脱敏 host/path、HEAD/GET/重定向状态、响应头等待时间、
+  `Content-Length` 和来源类型（HTTP 或同桶 ZOS）；
+- `upload_stream_*`：首个数据块等待、每 4 MiB 进度、最大单次读取等待、实际/声明字节数、
+  EOF 缺失字节数、平均吞吐量；
+- `worker_job_*`：异步作业从 `available_at` 到领取的排队时间，以及实际处理耗时。
+
+Bearer token、Cookie、签名 URL 查询参数和 API Key 不会写入日志。常用排查命令：
+
+```bash
+# 查看某次 MCP 请求完整链路
+rg '"request_id":"<request-id>"' .run/app.log
+
+# 查看源站提前 EOF、长度不一致和上传租约回滚
+rg 'upload_stream_failed|upload_lease_released_after_failure|mcp_source_' .run/app.log
+
+# 查看调用方、工具耗时和 worker 排队时间
+rg 'mcp_tool_(completed|failed)|worker_job_started' .run/app.log
+```

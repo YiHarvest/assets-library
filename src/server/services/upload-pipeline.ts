@@ -19,7 +19,11 @@ import {
   seedAnalysisVideoFrames,
 } from "@/server/media/storage";
 import { validateMediaFile } from "@/server/media/validate";
-import { prepareSceneBatch, cleanupPreparedSceneBatch } from "@/server/scene/batch";
+import {
+  prepareSceneBatch,
+  cleanupPreparedSceneBatch,
+  type PreparedSceneSegment,
+} from "@/server/scene/batch";
 import { SceneDetectClient } from "@/server/scene/client";
 import { ScenePipelineError } from "@/server/scene/types";
 import {
@@ -70,6 +74,51 @@ function taskItemId(job: ClaimedJob) {
     throw new AppError("invalid_request", "校验作业缺少 taskItemId。", 500);
   }
   return value;
+}
+
+interface SegmentAnalysisPlan {
+  prepared: PreparedSceneSegment;
+  analysisJobId: string;
+}
+
+/**
+ * 分析作业只有在帧工作区完整落盘后才能进入数据库；后续事务失败时也必须
+ * 回收已经写入的工作区，避免留下永远不会被 worker 消费的孤儿目录。
+ */
+async function withSeededAnalysisWorkspaces<T>(
+  plans: readonly SegmentAnalysisPlan[],
+  mediaRoot: string,
+  operation: () => Promise<T>,
+) {
+  const seededJobIds = new Set<string>();
+  try {
+    const seedResults = await Promise.allSettled(
+      plans.map(async ({ analysisJobId, prepared }) => {
+        await seedAnalysisVideoFrames(
+          analysisJobId,
+          ".mp4",
+          prepared.analysisFramesDirectory,
+          mediaRoot,
+        );
+        seededJobIds.add(analysisJobId);
+      }),
+    );
+    const failedSeed = seedResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failedSeed) throw failedSeed.reason;
+    return await operation();
+  } catch (error) {
+    const cleanupResults = await Promise.allSettled(
+      [...seededJobIds].map((jobId) =>
+        removeAnalysisWorkspace(jobId, mediaRoot),
+      ),
+    );
+    if (cleanupResults.some((result) => result.status === "rejected")) {
+      console.error("视频分析关键帧工作区回滚不完整。");
+    }
+    throw error;
+  }
 }
 
 async function uploadContext(job: ClaimedJob): Promise<UploadContext> {
@@ -267,8 +316,6 @@ async function processVideo(
         ] as const,
     ),
   );
-  const seededAnalysisJobIds = new Set<string>();
-  let databaseCommitted = false;
   try {
     await markTaskItemRunning(context.task.id, context.item.id, "persisting");
     await persistSceneBatch({
@@ -291,24 +338,11 @@ async function processVideo(
           return { segment, ...plan };
         });
         // analyze 作业一旦提交即可被其他 worker 领取，所以必须先原子准备好帧种子。
-        const seedResults = await Promise.allSettled(
-          segmentRows.map(async ({ analysisJobId, prepared }) => {
-            await seedAnalysisVideoFrames(
-              analysisJobId,
-              ".mp4",
-              prepared.analysisFramesDirectory,
-              dependencies.config.mediaRoot,
-            );
-            seededAnalysisJobIds.add(analysisJobId);
-          }),
-        );
-        const failedSeed = seedResults.find(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected",
-        );
-        if (failedSeed) throw failedSeed.reason;
-        // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
-        try {
+        await withSeededAnalysisWorkspaces(
+          segmentRows,
+          dependencies.config.mediaRoot,
+          async () => {
+            // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
           await db.transaction(async (tx) => {
           await tx.insert(mediaObjects).values([
             mediaObjectValues(
@@ -429,28 +463,11 @@ async function processVideo(
             })
             .where(eq(taskItems.id, context.item.id));
           });
-          databaseCommitted = true;
-        } catch (error) {
-          await Promise.all(
-            [...seededAnalysisJobIds].map((jobId) =>
-              removeAnalysisWorkspace(jobId, dependencies.config.mediaRoot),
-            ),
-          );
-          seededAnalysisJobIds.clear();
-          throw error;
-        }
+          },
+        );
       },
     });
   } finally {
-    if (!databaseCommitted) {
-      await Promise.all(
-        [...seededAnalysisJobIds].map((jobId) =>
-          removeAnalysisWorkspace(jobId, dependencies.config.mediaRoot),
-        ),
-      ).catch((error) => {
-        console.error("视频批次失败后分析关键帧清理失败。", error);
-      });
-    }
     await cleanupPreparedSceneBatch(batch, dependencies.sceneClient).catch(
       (error) => {
         console.error("视频批次已终止，但本地或分镜服务副本清理失败。", error);

@@ -35,6 +35,13 @@ export interface IngestSource {
   close: () => Promise<void>;
 }
 
+export interface IngestSourceDescriptor {
+  filename: string;
+  sizeBytes: number;
+  /** 真正开始接收该 item 时才打开 body，避免批量探测长期占用大量连接。 */
+  open: () => Promise<IngestSource>;
+}
+
 function hostnameOf(url: URL) {
   return url.hostname.toLowerCase();
 }
@@ -189,10 +196,10 @@ async function fetchWithRedirectGuard(
   throw new ApiV1Error("invalid_request", "源 URL 重定向次数过多。", 400);
 }
 
-async function resolveHttpSource(
+async function inspectHttpSource(
   url: URL,
   config: AppConfig,
-): Promise<IngestSource> {
+): Promise<IngestSourceDescriptor> {
   const allowed = allowedHostnames(config);
   const head = await fetchWithRedirectGuard(url, "HEAD", allowed);
   const declaredLength = Number(head.headers.get("content-length") ?? "0");
@@ -208,19 +215,6 @@ async function resolveHttpSource(
       400,
     );
   }
-  const response = await fetchWithRedirectGuard(url, "GET", allowed);
-  if (!response.body) {
-    throw new ApiV1Error("invalid_request", "源 URL 未返回可读响应体。", 400);
-  }
-  const actualLength = Number(response.headers.get("content-length") ?? "0");
-  if (actualLength !== declaredLength) {
-    await response.body.cancel().catch(() => undefined);
-    throw new ApiV1Error(
-      "invalid_request",
-      "源 URL HEAD 与 GET 返回的大小不一致。",
-      400,
-    );
-  }
   auditLog("mcp_source_resolved", {
     source_kind: "http",
     source_url: safeUrl(url.toString()),
@@ -231,17 +225,36 @@ async function resolveHttpSource(
   return {
     filename: filenameFromPath(url.pathname),
     sizeBytes: declaredLength,
-    body: response.body,
-    close: async () => {
-      await response.body?.cancel().catch(() => undefined);
+    open: async () => {
+      const response = await fetchWithRedirectGuard(url, "GET", allowed);
+      if (!response.body) {
+        throw new ApiV1Error("invalid_request", "源 URL 未返回可读响应体。", 400);
+      }
+      const actualLength = Number(response.headers.get("content-length") ?? "0");
+      if (actualLength !== declaredLength) {
+        await response.body.cancel().catch(() => undefined);
+        throw new ApiV1Error(
+          "invalid_request",
+          "源 URL HEAD 与 GET 返回的大小不一致。",
+          400,
+        );
+      }
+      return {
+        filename: filenameFromPath(url.pathname),
+        sizeBytes: declaredLength,
+        body: response.body,
+        close: async () => {
+          await response.body?.cancel().catch(() => undefined);
+        },
+      };
     },
   };
 }
 
-async function resolveSameBucketSource(
+async function inspectSameBucketSource(
   url: URL,
   config: AppConfig,
-): Promise<IngestSource> {
+): Promise<IngestSourceDescriptor> {
   const key = objectKeyFromUrlPath(url.pathname);
   const storage = createZosObjectStorage(config);
   const headStarted = process.hrtime.bigint();
@@ -265,18 +278,6 @@ async function resolveSameBucketSource(
     }, "warn");
     throw error;
   }
-  const getStarted = process.hrtime.bigint();
-  const result = await storage.getObject(key);
-  auditLog("mcp_source_object_get_opened", {
-    source_kind: "zos",
-    source_host: url.hostname,
-    object_key: key,
-    size_bytes: metadata.sizeBytes,
-    duration_ms: elapsedMilliseconds(getStarted),
-  });
-  if (!result.body) {
-    throw new ApiV1Error("invalid_request", "ZOS 对象不可读。", 400);
-  }
   auditLog("mcp_source_resolved", {
     source_kind: "zos",
     source_url: safeUrl(url.toString()),
@@ -288,9 +289,27 @@ async function resolveSameBucketSource(
   return {
     filename: filenameFromPath(url.pathname),
     sizeBytes: metadata.sizeBytes,
-    body: result.body,
-    close: async () => {
-      await result.body?.cancel().catch(() => undefined);
+    open: async () => {
+      const getStarted = process.hrtime.bigint();
+      const result = await storage.getObject(key);
+      auditLog("mcp_source_object_get_opened", {
+        source_kind: "zos",
+        source_host: url.hostname,
+        object_key: key,
+        size_bytes: metadata.sizeBytes,
+        duration_ms: elapsedMilliseconds(getStarted),
+      });
+      if (!result.body) {
+        throw new ApiV1Error("invalid_request", "ZOS 对象不可读。", 400);
+      }
+      return {
+        filename: filenameFromPath(url.pathname),
+        sizeBytes: metadata.sizeBytes,
+        body: result.body,
+        close: async () => {
+          await result.body?.cancel().catch(() => undefined);
+        },
+      };
     },
   };
 }
@@ -299,10 +318,10 @@ async function resolveSameBucketSource(
  * 校验并打开一个可入站的文件源。只做解析与大小探测，不消费 body。
  * 调用方必须保证最终消费或调用 close()。
  */
-export async function resolveIngestSource(
+export async function inspectIngestSource(
   rawUrl: string,
   config: AppConfig = loadConfig(),
-): Promise<IngestSource> {
+): Promise<IngestSourceDescriptor> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -321,6 +340,14 @@ export async function resolveIngestSource(
     source_kind: isSameBucketHost(host, config) ? "zos" : "http",
   });
   return isSameBucketHost(host, config)
-    ? resolveSameBucketSource(url, config)
-    : resolveHttpSource(url, config);
+    ? inspectSameBucketSource(url, config)
+    : inspectHttpSource(url, config);
+}
+
+/** 向后兼容单文件调用：探测后立即打开 body。 */
+export async function resolveIngestSource(
+  rawUrl: string,
+  config: AppConfig = loadConfig(),
+): Promise<IngestSource> {
+  return (await inspectIngestSource(rawUrl, config)).open();
 }

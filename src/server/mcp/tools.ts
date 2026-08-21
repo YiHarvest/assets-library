@@ -8,12 +8,18 @@ import type {
 } from "@/server/api/v1/service";
 import { getApiV1Service } from "@/server/api/v1/service";
 import { ApiV1Error } from "@/server/api/errors";
-import { resolveIngestSource } from "@/server/mcp/url-ingest";
+import {
+  inspectIngestSource,
+  resolveIngestSource,
+  type IngestSourceDescriptor,
+} from "@/server/mcp/url-ingest";
 import { targetFormatFromFilename } from "@/server/media/target-format";
 import { getMcpRequestUserId } from "@/server/mcp/user-context";
-import type {
-  UserScope,
-} from "@/shared/contracts";
+import { resolveMcpAssetScope } from "@/server/mcp/scope";
+import {
+  databaseMcpIdempotencyStore,
+  type McpIdempotencyStore,
+} from "@/server/mcp/idempotency";
 import {
   addAuditFields,
   auditLog,
@@ -92,8 +98,60 @@ function requireUserId(config: AppConfig) {
   return userId;
 }
 
-function ownScope(userId: string): UserScope {
-  return { mode: "user", user_id: userId };
+function assertIngestSourceAllowed(
+  filename: string,
+  sizeBytes: number,
+  config: AppConfig,
+) {
+  const target = targetFormatFromFilename(filename);
+  if (!target) {
+    throw new ApiV1Error(
+      "unsupported_media_type",
+      "仅支持 .jpg/.jpeg/.png/.webp/.mp4；请通过 filename 参数指定扩展名。",
+      415,
+    );
+  }
+  const limitBytes =
+    target.mediaType === "video"
+      ? config.MAX_VIDEO_BYTES
+      : config.MAX_IMAGE_BYTES;
+  if (sizeBytes > limitBytes) {
+    throw new ApiV1Error(
+      "file_too_large",
+      `${filename} 大小 ${sizeBytes} 字节，超过 ${target.mediaType === "video" ? "视频" : "图片"}上限 ${limitBytes} 字节。`,
+      413,
+      [{ filename, size_bytes: sizeBytes, limit_bytes: limitBytes }],
+    );
+  }
+}
+
+const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(255)
+  .optional()
+  .describe("可选幂等键；同一用户、同一工具和相同参数重试时复用原任务");
+
+async function runIdempotentWrite<T extends Record<string, unknown>>(
+  store: McpIdempotencyStore,
+  config: AppConfig,
+  operation: string,
+  userId: string,
+  key: string | undefined,
+  request: unknown,
+  handler: () => Promise<T>,
+) {
+  return store.run(
+    {
+      operation,
+      userId,
+      key,
+      request,
+      retentionDays: config.TASK_RETENTION_DAYS,
+    },
+    handler,
+  );
 }
 
 async function runUploadFromUrl(
@@ -118,13 +176,7 @@ async function runUploadFromUrl(
   });
   try {
     const filename = input.filename?.trim() || source.filename;
-    if (!targetFormatFromFilename(filename)) {
-      throw new ApiV1Error(
-        "unsupported_media_type",
-        "仅支持 .jpg/.jpeg/.png/.webp/.mp4；请通过 filename 参数指定扩展名。",
-        415,
-      );
-    }
+    assertIngestSourceAllowed(filename, source.sizeBytes, config);
     const createStarted = process.hrtime.bigint();
     const task = await service.createUploadTask({
       user_id: userId,
@@ -195,11 +247,91 @@ async function runUploadFromUrl(
   }
 }
 
+interface BatchUrlItem {
+  url: string;
+  filename?: string;
+}
+
+async function runUploadBatchFromUrls(
+  input: { items: BatchUrlItem[]; auto_publish?: boolean },
+  config: AppConfig,
+  service: ApiV1Service,
+) {
+  const userId = requireUserId(config);
+  const totalStarted = process.hrtime.bigint();
+  const sources: Array<IngestSourceDescriptor & { filename: string }> = [];
+  for (const item of input.items) {
+    const source = await inspectIngestSource(item.url, config);
+    const filename = item.filename?.trim() || source.filename;
+    assertIngestSourceAllowed(filename, source.sizeBytes, config);
+    sources.push({ ...source, filename });
+  }
+
+  const task = await service.createUploadTask({
+    user_id: userId,
+    callback_url: null,
+    auto_publish: input.auto_publish ?? false,
+    items: sources.map((source) => ({
+      filename: source.filename,
+      size_bytes: source.sizeBytes,
+      content_type: null,
+    })),
+  });
+  addAuditFields({
+    task_id: task.task_id,
+    user_id: userId,
+    upload_item_count: sources.length,
+    upload_total_bytes: sources.reduce((sum, source) => sum + source.sizeBytes, 0),
+  });
+
+  for (const [index, descriptor] of sources.entries()) {
+    const taskItem = task.items[index];
+    if (!taskItem) throw new Error(`上传任务缺少第 ${index + 1} 个 item。`);
+    const openStarted = process.hrtime.bigint();
+    const source = await descriptor.open();
+    auditLog("mcp_batch_source_opened", {
+      task_id: task.task_id,
+      item_id: taskItem.item_id,
+      item_index: index,
+      filename: descriptor.filename,
+      duration_ms: elapsedMilliseconds(openStarted),
+    });
+    try {
+      await service.receiveUploadItem({
+        taskId: task.task_id,
+        itemId: taskItem.item_id,
+        body: source.body,
+        contentLength: descriptor.sizeBytes,
+        contentType: null,
+      });
+    } finally {
+      await source.close().catch(() => undefined);
+    }
+  }
+
+  const sealed = await service.sealUploadTask(task.task_id);
+  auditLog("mcp_upload_task_sealed", {
+    task_id: task.task_id,
+    total_duration_ms: elapsedMilliseconds(totalStarted),
+    status: sealed.status,
+    phase: sealed.phase,
+    total_items: sources.length,
+  });
+  return {
+    task_id: task.task_id,
+    status: sealed.status,
+    phase: sealed.phase,
+    total_items: sources.length,
+    note: "全部文件已接收并进入异步处理，请用 list_tasks 或 get_task_status 查询终态和 asset_ids。",
+  };
+}
+
 /** 组装并注册全部 MCP 工具。server 实例由调用方持有。 */
 export function registerTools(
   server: McpServer,
   config: AppConfig = loadConfig(),
   service: ApiV1Service = getApiV1Service(),
+  idempotencyStore: McpIdempotencyStore = databaseMcpIdempotencyStore,
 ) {
   const userId = () => requireUserId(config);
   const internalOrigin = process.env.API_INTERNAL_ORIGIN?.trim();
@@ -266,14 +398,70 @@ export function registerTools(
           .boolean()
           .optional()
           .describe("分析成功后是否直接发布，默认 false"),
+        idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ url, filename, publish }) => auditedToolCall(
+    async ({ url, filename, publish, idempotency_key }) => auditedToolCall(
       "upload_from_url",
-      { url, filename, publish },
-      async () => textResult(
-        await runUploadFromUrl({ url, filename, publish }, config, service),
-      ),
+      { url, filename, publish, idempotency_key },
+      async () => {
+        const currentUserId = userId();
+        const result = await runIdempotentWrite(
+          idempotencyStore,
+          config,
+          "upload_from_url",
+          currentUserId,
+          idempotency_key,
+          { url, filename, publish: publish ?? false },
+          () => runUploadFromUrl({ url, filename, publish }, config, service),
+        );
+        return textResult(result);
+      },
+    ),
+  );
+
+  server.registerTool(
+    "upload_batch_from_urls",
+    {
+      title: "批量从 URL 上传素材",
+      description:
+        "从白名单 URL 批量拉取 1–100 个图片/视频，在一个任务中封存；items 只描述 URL/文件名，auto_publish 对整个任务生效。",
+      inputSchema: z.object({
+        items: z
+          .array(
+            z.object({
+              url: z.string().url().describe("文件的可达 URL"),
+              filename: z
+                .string()
+                .trim()
+                .min(1)
+                .max(255)
+                .optional()
+                .describe("可选，覆盖 URL 推断的文件名"),
+            }),
+          )
+          .min(1)
+          .max(config.UPLOAD_MAX_ITEMS),
+        auto_publish: z.boolean().optional().describe("整个任务分析成功后是否直接发布"),
+        idempotency_key: idempotencyKeySchema,
+      }),
+    },
+    async ({ items, auto_publish, idempotency_key }) => auditedToolCall(
+      "upload_batch_from_urls",
+      { items, auto_publish, idempotency_key },
+      async () => {
+        const currentUserId = userId();
+        const result = await runIdempotentWrite(
+          idempotencyStore,
+          config,
+          "upload_batch_from_urls",
+          currentUserId,
+          idempotency_key,
+          { items, auto_publish: auto_publish ?? false },
+          () => runUploadBatchFromUrls({ items, auto_publish }, config, service),
+        );
+        return textResult(result);
+      },
     ),
   );
 
@@ -294,11 +482,45 @@ export function registerTools(
   );
 
   server.registerTool(
+    "list_tasks",
+    {
+      title: "列出我的任务",
+      description:
+        "按创建时间倒序列出当前用户的任务及逐文件状态，供 agent 重启后恢复 task_id、进度、错误和 asset_ids。",
+      inputSchema: z.object({
+        statuses: z
+          .array(z.enum(["queued", "running", "done", "failed"]))
+          .max(4)
+          .optional(),
+        task_types: z
+          .array(z.enum(["upload", "delete", "publish", "update", "retry"]))
+          .max(5)
+          .optional(),
+        cursor: z.string().min(1).max(2048).nullable().optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+      }),
+    },
+    async ({ statuses, task_types, cursor, limit }) => auditedToolCall(
+      "list_tasks",
+      { statuses, task_types, cursor, limit },
+      async () =>
+        textResult(
+          await service.listTasks(userId(), {
+            statuses,
+            types: task_types,
+            cursor: cursor ?? null,
+            limit: limit ?? 10,
+          }),
+        ),
+    ),
+  );
+
+  server.registerTool(
     "query_assets",
     {
       title: "查询素材",
       description:
-        "语义搜索与过滤素材。scope 决定可见范围：own 仅本人素材，public 仅公共素材，all 公共+所有用户（默认 own）。支持游标分页与标签统计。",
+        "语义搜索与过滤素材。scope 决定可见范围：own 仅本人、user 指定用户、public 仅公共、all 公共+所有用户（默认 own）。支持游标分页与标签统计。",
       inputSchema: z.object({
         query: z
           .string()
@@ -337,40 +559,9 @@ export function registerTools(
       }),
     },
     async (input) => auditedToolCall("query_assets", input, async () => {
-      const scope: UserScope =
-        input.scope === "public"
-          ? { mode: "public" }
-          : input.scope === "all"
-            ? { mode: "all" }
-            : input.scope === "user"
-              ? { mode: "user", user_id: input.user_id ?? "" }
-              : ownScope(userId());
-      if (scope.mode === "user" && !scope.user_id) {
-        throw new ApiV1Error(
-          "invalid_request",
-          "scope=user 时必须提供 user_id。",
-          400,
-        );
-      }
-      if (scope.mode === "all" && !config.mcpAllowAnyUserId) {
-        throw new ApiV1Error(
-          "forbidden",
-          "scope=all 仅在 MCP_ALLOW_ANY_USER_ID=true 时可用。",
-          403,
-        );
-      }
-      // 白名单模式下，scope=user 的目标必须也在白名单内（否则可越权看他人素材）。
-      if (
-        scope.mode === "user" &&
-        !config.mcpAllowAnyUserId &&
-        !config.mcpAllowedUserIds.includes(scope.user_id)
-      ) {
-        throw new ApiV1Error(
-          "forbidden",
-          `user_id ${scope.user_id} 不在允许访问范围内。`,
-          403,
-        );
-      }
+      const scope = resolveMcpAssetScope(input, userId(), config, {
+        allowAll: true,
+      });
       const result = await service.queryAssets({
         query: input.query,
         keywords: input.keywords,
@@ -391,22 +582,33 @@ export function registerTools(
     "get_asset",
     {
       title: "获取素材详情",
-      description: "获取单个素材详情，包含 VLM 分析结果（描述、标签、OCR、视频分段）。",
+      description:
+        "获取单个素材详情，包含绝对分镜秒数及 VLM 分析结果（描述、标签、OCR、视频时间线）。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
         scope: z
-          .enum(["own", "public"])
+          .enum(["own", "user", "public"])
           .optional()
           .describe("可见范围，默认 own"),
+        user_id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(191)
+          .optional()
+          .describe("scope=user 时指定目标用户"),
       }),
     },
-    async ({ asset_id, scope }) => auditedToolCall(
+    async ({ asset_id, scope, user_id }) => auditedToolCall(
       "get_asset",
-      { asset_id, scope },
+      { asset_id, scope, user_id },
       async () => {
-      const finalScope: UserScope =
-        scope === "public" ? { mode: "public" } : ownScope(userId());
-      return textResult(await service.getAsset(asset_id, finalScope));
+        const finalScope = resolveMcpAssetScope(
+          { scope, user_id },
+          userId(),
+          config,
+        );
+        return textResult(await service.getAsset(asset_id, finalScope));
       },
     ),
   );
@@ -424,19 +626,29 @@ export function registerTools(
           .array(z.object({ category: z.string().max(64), value: z.string().max(128) }))
           .max(100)
           .describe("人工标签"),
+        idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ asset_id, name, description, tags }) => auditedToolCall(
+    async ({ asset_id, name, description, tags, idempotency_key }) => auditedToolCall(
       "update_asset",
-      { asset_id, name, description, tags },
+      { asset_id, name, description, tags, idempotency_key },
       async () => {
-      const accepted = await service.updateAsset(asset_id, {
-        user_id: userId(),
-        callback_url: null,
-        name,
-        description,
-        tags,
-      });
+      const currentUserId = userId();
+      const accepted = await runIdempotentWrite(
+        idempotencyStore,
+        config,
+        "update_asset",
+        currentUserId,
+        idempotency_key,
+        { asset_id, name, description, tags },
+        () => service.updateAsset(asset_id, {
+          user_id: currentUserId,
+          callback_url: null,
+          name,
+          description,
+          tags,
+        }),
+      );
       return textResult(accepted);
       },
     ),
@@ -449,16 +661,26 @@ export function registerTools(
       description: "提交异步任务，发布分析成功的素材（进入已发布状态）。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
+        idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ asset_id }) => auditedToolCall(
+    async ({ asset_id, idempotency_key }) => auditedToolCall(
       "publish_asset",
-      { asset_id },
+      { asset_id, idempotency_key },
       async () => {
-      const accepted = await service.publishAsset(asset_id, {
-        user_id: userId(),
-        callback_url: null,
-      });
+      const currentUserId = userId();
+      const accepted = await runIdempotentWrite(
+        idempotencyStore,
+        config,
+        "publish_asset",
+        currentUserId,
+        idempotency_key,
+        { asset_id },
+        () => service.publishAsset(asset_id, {
+          user_id: currentUserId,
+          callback_url: null,
+        }),
+      );
       return textResult(accepted);
       },
     ),
@@ -471,16 +693,26 @@ export function registerTools(
       description: "提交异步任务，重试分析失败的素材。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
+        idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ asset_id }) => auditedToolCall(
+    async ({ asset_id, idempotency_key }) => auditedToolCall(
       "retry_asset",
-      { asset_id },
+      { asset_id, idempotency_key },
       async () => {
-      const accepted = await service.retryAsset(asset_id, {
-        user_id: userId(),
-        callback_url: null,
-      });
+      const currentUserId = userId();
+      const accepted = await runIdempotentWrite(
+        idempotencyStore,
+        config,
+        "retry_asset",
+        currentUserId,
+        idempotency_key,
+        { asset_id },
+        () => service.retryAsset(asset_id, {
+          user_id: currentUserId,
+          callback_url: null,
+        }),
+      );
       return textResult(accepted);
       },
     ),
@@ -494,16 +726,26 @@ export function registerTools(
         "软删除本人素材（归属转为公共，保留文件与分析）。公共素材的硬删除不在 MCP 范围内。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
+        idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ asset_id }) => auditedToolCall(
+    async ({ asset_id, idempotency_key }) => auditedToolCall(
       "delete_asset",
-      { asset_id },
+      { asset_id, idempotency_key },
       async () => {
-      const accepted = await service.deleteAsset(asset_id, {
-        user_id: userId(),
-        callback_url: null,
-      });
+      const currentUserId = userId();
+      const accepted = await runIdempotentWrite(
+        idempotencyStore,
+        config,
+        "delete_asset",
+        currentUserId,
+        idempotency_key,
+        { asset_id },
+        () => service.deleteAsset(asset_id, {
+          user_id: currentUserId,
+          callback_url: null,
+        }),
+      );
       return textResult(accepted);
       },
     ),
@@ -556,31 +798,50 @@ export function registerTools(
   );
 
   server.registerTool(
-    "get_media_url",
+    "get_media_links",
     {
-      title: "获取媒体直链",
+      title: "获取媒体链接",
       description:
-        "返回素材的 media_url（可直接用于下载或展示）与原始文件名；视频缩略图请使用 list_user_media 返回的 thumbnail_url。",
+        "返回素材的媒体路径与原始文件名；视频同时返回 thumbnail_url。scope 权限规则与 query_assets 一致。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
         scope: z
-          .enum(["own", "public"])
+          .enum(["own", "user", "public"])
           .optional()
           .describe("可见范围，默认 own"),
+        user_id: z
+          .string()
+          .trim()
+          .min(1)
+          .max(191)
+          .optional()
+          .describe("scope=user 时指定目标用户"),
       }),
     },
-    async ({ asset_id, scope }) => auditedToolCall(
-      "get_media_url",
-      { asset_id, scope },
+    async ({ asset_id, scope, user_id }) => auditedToolCall(
+      "get_media_links",
+      { asset_id, scope, user_id },
       async () => {
-      const finalScope: UserScope =
-        scope === "public" ? { mode: "public" } : ownScope(userId());
-      const detail = await service.getAsset(asset_id, finalScope);
-      return textResult({
-        asset_id,
-        media_url: relativeUrl(detail.media_url),
-        original_filename: (detail as { original_filename?: string }).original_filename,
-      });
+        const finalScope = resolveMcpAssetScope(
+          { scope, user_id },
+          userId(),
+          config,
+        );
+        const detail = await service.getAsset(asset_id, finalScope);
+        const mediaUrl = relativeUrl(detail.media_url);
+        return textResult({
+          asset_id,
+          media_url: mediaUrl,
+          ...(detail.media_type === "video"
+            ? {
+                thumbnail_url: mediaUrl.replace(
+                  `/media/${asset_id}`,
+                  `/media/${asset_id}/thumbnail`,
+                ),
+              }
+            : {}),
+          original_filename: detail.original_filename,
+        });
       },
     ),
   );

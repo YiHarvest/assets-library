@@ -71,10 +71,11 @@ test("initializes, lists tools, and exercises user switching in one session", as
     [
       "delete_asset",
       "get_asset",
-      "get_media_url",
+      "get_media_links",
       "get_service_info",
       "get_storage_usage",
       "get_task_status",
+      "list_tasks",
       "list_user_media",
       "list_users",
       "publish_asset",
@@ -82,6 +83,7 @@ test("initializes, lists tools, and exercises user switching in one session", as
       "retry_asset",
       "update_asset",
       "upload_from_url",
+      "upload_batch_from_urls",
     ].sort(),
   );
 

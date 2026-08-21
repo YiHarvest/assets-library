@@ -48,6 +48,56 @@ export interface TaskRepository {
   listTaskItemAssetIds(taskId: string): Promise<
     Array<{ id: string; taskItemId: string | null }>
   >;
+  listUserTaskIds(
+    userId: string,
+    options: {
+      statuses?: Array<"queued" | "running" | "done" | "failed">;
+      types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+      before?: { createdAt: Date; id: string };
+      limit: number;
+    },
+  ): Promise<Array<{ id: string; createdAt: Date }>>;
+}
+
+export interface ListTasksInput {
+  cursor?: string | null;
+  limit: number;
+  statuses?: Array<"queued" | "running" | "done" | "failed">;
+  types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+}
+
+export interface TaskListResponse {
+  items: TaskStatusResponse[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+function encodeListCursor(createdAt: Date, id: string) {
+  return Buffer.from(
+    JSON.stringify({ created_at: createdAt.toISOString(), id }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeListCursor(cursor?: string | null) {
+  if (!cursor) return undefined;
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as { created_at?: unknown; id?: unknown };
+    const createdAt = new Date(String(value.created_at));
+    if (
+      typeof value.created_at === "string" &&
+      !Number.isNaN(createdAt.getTime()) &&
+      typeof value.id === "string" &&
+      /^[0-9a-f-]{36}$/i.test(value.id)
+    ) {
+      return { createdAt, id: value.id };
+    }
+  } catch {
+    // 统一成公开错误。
+  }
+  throw new ApiV1Error("invalid_request", "cursor 无效或已经过期。", 400);
 }
 
 function shanghaiIso(value: Date | null) {
@@ -224,5 +274,28 @@ export class TaskService {
 
   async getAcceptedTask(taskId: string) {
     return acceptedTask(await this.getTask(taskId));
+  }
+
+  async listTasks(
+    userId: string,
+    input: ListTasksInput,
+  ): Promise<TaskListResponse> {
+    const before = decodeListCursor(input.cursor);
+    const rows = await this.repository.listUserTaskIds(userId, {
+      statuses: input.statuses,
+      types: input.types,
+      before,
+      limit: input.limit + 1,
+    });
+    const hasMore = rows.length > input.limit;
+    const page = rows.slice(0, input.limit);
+    return {
+      items: await Promise.all(page.map(({ id }) => this.getTask(id, userId))),
+      next_cursor:
+        hasMore && page.at(-1)
+          ? encodeListCursor(page.at(-1)!.createdAt, page.at(-1)!.id)
+          : null,
+      has_more: hasMore,
+    };
   }
 }

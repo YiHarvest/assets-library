@@ -29,6 +29,8 @@
 - MySQL 负责关系数据和可靠作业，Chroma 负责语义向量检索。
 - 支持待审核、发布、修改、删除，以及个人素材与公共素材的作用域管理。
 - 媒体接口支持私有文件代理、下载和 HTTP Range，不向浏览器暴露 ZOS 密钥。
+- 内置带 Bearer 鉴权的 MCP 服务，支持 URL/批量入库、任务恢复、素材检索与异步管理。
+- MCP 写操作支持持久化幂等键；结构化审计日志可串联来源拉取、上传和 worker 处理链路。
 - `dev`/`prd` 数据库目标硬隔离，启动和 Drizzle CLI 共用同一套安全校验。
 
 ## 技术栈
@@ -226,6 +228,42 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 成功入库后本地 staging、分析下载文件和分镜工作区会立即清理。失败或未封存 staging
 默认保留 24 小时；终态任务记录默认保留 7 天。完整父视频、分片和图片长期保存于 ZOS。
 
+## MCP / AI 工具接入
+
+应用在 `<部署地址>/<NEXT_PUBLIC_BASE_PATH>/mcp` 暴露无状态 MCP Streamable HTTP
+端点。配置 `MCP_ACCESS_TOKEN` 后，Claude Desktop、Cursor、Cherry Studio 等 MCP
+客户端可以直接使用素材库；未配置 token 时端点会以 503 关闭。
+
+```json
+{
+  "mcpServers": {
+    "assets-library": {
+      "type": "http",
+      "url": "https://<公网域名>/feisu/assets-library/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_ACCESS_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+当前提供 15 个工具，覆盖以下工作流：
+
+- 从单个或最多 100 个白名单 URL 创建上传任务，并通过任务状态或最近任务列表恢复现场。
+- 语义搜索、条件过滤、标签统计，以及个人、指定用户和公共素材的受控访问。
+- 查询视频分镜的绝对时间与 VLM 时间线，获取媒体和缩略图链接。
+- 异步更新、发布、重试和软删除素材；所有写工具均支持持久化 `idempotency_key`。
+- 查询用户、分页列出个人素材，并统计文件数和存储用量。
+
+`user_id` 由服务端默认值或 `x-request-userid` 请求头注入，不作为工具参数暴露；可选择
+白名单模式或显式开启任意用户代理模式。URL 拉取仅允许精确命中域名白名单，禁止 IP
+直连，并会逐跳校验重定向。生产环境应通过 HTTPS 传输 Bearer token。
+
+完整的客户端配置、工具参数、数据隔离和排障方法见 [docs/mcp.md](docs/mcp.md)。通过
+`./scripts/start.sh` 启动后，MCP 请求、来源拉取、上传进度和 worker 耗时会以同一个
+`request_id` 写入 `.run/app.log`，便于定位连接中断、字节数不一致和排队延迟。
+
 ## API
 
 完整文档见 [docs/api.md](docs/api.md)，MCP（AI 工具）接入见
@@ -263,6 +301,7 @@ src/
   server/
     api/v1/            稳定 API facade 与显式组合根
     db/                Drizzle schema、连接与 migration
+    mcp/               AI 工具、URL 入站、作用域与幂等控制
     media/             媒体探测、正规化、抽帧
     model/             OpenAI-compatible VLM/LLM 客户端
     modules/           assets/media/tasks/uploads/users 领域服务

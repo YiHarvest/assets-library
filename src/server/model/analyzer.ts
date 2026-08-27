@@ -135,6 +135,7 @@ class ModelTargetRequestLimiter {
 
 const imageShape = `{
   "kind":"image",
+  "primaryCategory":"城市风貌|建筑|科技|财经|社会场景",
   "description":"string",
   "tags":{"scene":["string"],"object":["string"],"person":["string"],"style":["string"],"color_composition":["string"]},
   "ocr":{"text":"string or null","unavailableReason":"string or null"}
@@ -142,6 +143,7 @@ const imageShape = `{
 
 const videoShape = `{
   "kind":"video",
+  "primaryCategory":"城市风貌|建筑|科技|财经|社会场景",
   "description":"string",
   "topics":["string"],
   "tags":{"scene":["string"],"person":["string"],"form":["string"]},
@@ -158,15 +160,14 @@ function promptFor(mediaType: MediaType, durationSeconds: number | null) {
   const scope =
     mediaType === "video"
       ? "输入是按时间分位采样的关键帧。只分析画面，不分析音轨，不输出 ASR 或语言。根据每帧标注时间生成时间轴，时间必须使用秒。"
-      : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。";
+      : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。ocr.text 只摘录关键可见文字，最多 600 字；表格或密集文本不要逐行完整转写，超出时截断。";
   return [
-    "你是素材库分析器。描述、topics 和所有标签值必须使用简体中文。",
+    "你是素材库分析器。描述、topics 和所有标签值必须以简体中文为主。",
     "每个标签值必须至少包含一个中文汉字；禁止英文标签、拼音和 snake_case。JSON 字段名与标签分类键保持结构中规定的英文。",
-    `每个素材必须先确定一个一级分类，从以下五个中选且只选一个：${PRIMARY_TAG_CATEGORIES.join("、")}。`,
-    `一级分类必须逐字使用给定词，一字不能多也不能少，禁止改写、缩写、增删字或使用近义词；作为 tags.scene 数组的第一个标签（即整个素材的首标签）。`,
-    "其余四个一级分类不得出现在任何其他标签或 topics 中（互斥，不重复）。",
+    `必须先单独输出 primaryCategory 字段，取值为以下五个一级分类词之一，逐字一致、一字不能多也不能少：${PRIMARY_TAG_CATEGORIES.join("、")}。系统会自动把 primaryCategory 作为该素材的首标签（tags.scene 的第一个值）。`,
+    "除 primaryCategory 外，其余任何标签值与 topics 不得再出现这五个一级分类词（互斥，不重复）。",
     "每个标签分类最多输出 5 个标签。视频 keyMoments 最多 3 个，timeline 最多 5 段。不要输出 visualSegments，系统会根据 timeline 自动生成。",
-    "描述、topics、标签和所有 summary 只能使用简体中文，禁止夹杂英文单词。",
+    "描述与所有 summary 必须使用简体中文，可以保留画面中出现的英文原文（如产品名、界面文字、专业术语）；标签值与 topics 必须为纯简体中文，禁止夹杂英文单词。",
     mediaType === "video"
       ? `视频总时长精确为 ${durationSeconds} 秒。timeline 必须从 0 秒开始、连续覆盖，并精确结束于 ${durationSeconds} 秒。`
       : "",
@@ -186,11 +187,15 @@ function repairPromptFor(
   durationSeconds: number | null,
 ) {
   return [
-    "下面是一次素材分析的无效输出。只修复 JSON 结构、中文标签和规定数量，不需要也不得重新分析图片。",
+    "下面是一次素材分析的无效输出。只修复 JSON 结构、一级分类、中文规则和规定数量，不需要也不得重新分析图片。",
     `修复原因：${correction}`,
     `必须严格符合此结构：${mediaType === "image" ? imageShape : videoShape}`,
+    `必须输出 primaryCategory 字段，取值为五个一级分类词之一，逐字一致：${PRIMARY_TAG_CATEGORIES.join("、")}。`,
     "每个标签分类最多 5 个标签。视频 keyMoments 最多 3 个，timeline 最多 5 段。不要输出 visualSegments。",
-    "描述、topics、标签和所有 summary 只能使用简体中文，禁止夹杂英文单词。",
+    mediaType === "image"
+      ? "ocr.text 只保留关键可见文字，最多 600 字，超出时截断。"
+      : "",
+    "描述与所有 summary 使用简体中文，可以保留原文中的英文专有名词；标签值与 topics 必须为纯简体中文，禁止夹杂英文单词。",
     mediaType === "video"
       ? `视频总时长精确为 ${durationSeconds} 秒；timeline 必须从 0 秒连续覆盖到 ${durationSeconds} 秒。禁止输出无法由关键帧判断的慢镜头、长镜头、快镜头、延时摄影、升格、降格或运镜速度。`
       : "",
@@ -246,14 +251,39 @@ function semanticTexts(result: AnalysisResult) {
   ];
 }
 
+/** 标签值（tags 各类）与 topics：展示与过滤使用，必须纯简体中文。 */
+function labelTexts(result: AnalysisResult) {
+  const labels = [...Object.values(result.tags).flat()];
+  if (result.kind === "video") labels.push(...result.topics);
+  return labels;
+}
+
+/** 叙述性文本（描述与 summary）：允许保留画面中出现的英文原文，但必须包含简体中文。 */
+function narrativeTexts(result: AnalysisResult) {
+  const texts = [result.description];
+  if (result.kind === "video") {
+    texts.push(
+      ...result.timeline.map((item) => item.summary),
+      ...result.keyMoments.map((item) => item.summary),
+    );
+  }
+  return texts;
+}
+
 function requireChineseText(result: AnalysisResult) {
-  const invalidTexts = semanticTexts(result).filter(
+  const invalidLabels = labelTexts(result).filter(
     (value) =>
       !chineseCharacterPattern.test(value) || latinWordPattern.test(value),
   );
+  const invalidNarratives = narrativeTexts(result).filter(
+    (value) => !chineseCharacterPattern.test(value),
+  );
+  const invalidTexts = [...invalidNarratives, ...invalidLabels];
   if (invalidTexts.length > 0) {
     throw new Error(
-      `描述、标签与时间轴文本必须使用简体中文且不得夹杂英文，以下值不合格：${invalidTexts.slice(0, 8).join("、")}`,
+      `描述与 summary 必须包含简体中文，标签值与 topics 必须为纯简体中文且不得夹杂英文，以下值不合格：${invalidTexts
+        .slice(0, 8)
+        .join("、")}`,
     );
   }
   return result;
@@ -327,9 +357,44 @@ function normalizedKeyMoments(value: unknown, durationSeconds: number | null) {
   });
 }
 
+/** 模型显式选择的一级分类；取值必须逐字等于五个分类词之一，否则视为缺失交由 requirePrimaryTag 修复。 */
+function normalizePrimaryCategory(value: unknown) {
+  return typeof value === "string" && PRIMARY_TAG_SET.has(value)
+    ? value
+    : null;
+}
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : null;
+}
+
+/**
+ * Chat Completions 协议的 thinking 参数。除标准 enable_thinking 外同时下发
+ * chat_template_kwargs（vLLM / llama.cpp 类网关对其生效），否则部分推理模型
+ *（如 Qwythos）会忽略顶层开关而把所有 token 消耗在 reasoning_content 上，
+ * 导致 content 为空、JSON 解析失败。
+ */
+function chatThinkingOptions(model: ConfiguredModelTarget) {
+  const enableThinking = model.requestOptions.enableThinking;
+  return enableThinking === null
+    ? {}
+    : {
+        enable_thinking: enableThinking,
+        chat_template_kwargs: { enable_thinking: enableThinking },
+      };
+}
+
+/** Responses 协议只支持标准 enable_thinking，避免注入非标字段。 */
+function responsesThinkingOptions(model: ConfiguredModelTarget) {
+  const enableThinking = model.requestOptions.enableThinking;
+  return enableThinking === null ? {} : { enable_thinking: enableThinking };
+}
+
 /**
  * 对模型常见的可恢复偏差做确定性规范化：限制数组长度，并让视频模型只负责
  * timeline；visualSegments 由同一份 timeline 派生，避免重复生成相同语义。
+ * primaryCategory 由模型显式选择，规范化时把它提升为首标签（tags.scene[0]）
+ * 并移除其余位置的一级分类词，从而确定性地满足首个标签互斥约束。
  */
 function normalizeAnalysisPayload(
   value: unknown,
@@ -343,42 +408,57 @@ function normalizeAnalysisPayload(
     !Array.isArray(candidate.tags)
       ? (candidate.tags as Record<string, unknown>)
       : null;
+  const primaryCategory = normalizePrimaryCategory(candidate.primaryCategory);
+  const base: Record<string, unknown> = { ...candidate };
+  delete base.primaryCategory;
   if (candidate.kind === "image") {
     return {
-      ...candidate,
+      ...base,
       ...(tags
-        ? {
-            tags: Object.fromEntries(
-              Object.entries(tags).map(([category, labels]) => [
-                category,
-                limitArray(labels, 5),
-              ]),
-            ),
-          }
+        ? { tags: normalizeTags(tags, primaryCategory) }
         : {}),
     };
   }
-  if (candidate.kind !== "video") return candidate;
+  if (candidate.kind !== "video") return base;
   const timelineSource = Array.isArray(candidate.timeline)
     ? candidate.timeline
     : candidate.visualSegments;
   const timeline = normalizedTimeline(timelineSource, durationSeconds);
+  const topics = primaryCategory
+    ? asStringArray(candidate.topics)?.filter(
+        (topic) => !PRIMARY_TAG_SET.has(topic),
+      )
+    : candidate.topics;
   return {
-    ...candidate,
-    ...(tags
-      ? {
-          tags: Object.fromEntries(
-            Object.entries(tags).map(([category, labels]) => [
-              category,
-              limitArray(labels, 5),
-            ]),
-          ),
-        }
-      : {}),
+    ...base,
+    ...(tags ? { tags: normalizeTags(tags, primaryCategory) } : {}),
+    topics,
     keyMoments: normalizedKeyMoments(candidate.keyMoments, durationSeconds),
     timeline,
     visualSegments: timeline,
   };
+}
+
+function normalizeTags(
+  tags: Record<string, unknown>,
+  primaryCategory: string | null,
+) {
+  const normalized = Object.fromEntries(
+    Object.entries(tags).map(([category, labels]) => [
+      category,
+      limitArray(
+        asStringArray(labels)?.filter(
+          (label) => !primaryCategory || !PRIMARY_TAG_SET.has(label),
+        ) ?? labels,
+        5,
+      ),
+    ]),
+  );
+  if (primaryCategory) {
+    const scene = Array.isArray(normalized.scene) ? normalized.scene : [];
+    normalized.scene = limitArray([primaryCategory, ...scene], 5);
+  }
+  return normalized;
 }
 
 function appendUnique(
@@ -452,13 +532,17 @@ function extractChatText(payload: unknown) {
   const content = candidate.choices?.[0]?.message?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map((item) => item.text ?? "").join("");
-  auditLog("vlm_extract_chat_text_failed", "warn", {
-    payload_keys: Object.keys(candidate),
-    choices_length: candidate.choices?.length,
-    first_choice: candidate.choices?.[0]
-      ? { message_keys: Object.keys(candidate.choices[0].message ?? {}) }
-      : null,
-  });
+  auditLog(
+    "vlm_extract_chat_text_failed",
+    {
+      payload_keys: Object.keys(candidate),
+      choices_length: candidate.choices?.length,
+      first_choice: candidate.choices?.[0]
+        ? { message_keys: Object.keys(candidate.choices[0].message ?? {}) }
+        : null,
+    },
+    "warn",
+  );
   throw new AppError("model_response_invalid");
 }
 
@@ -473,11 +557,15 @@ function extractResponsesText(payload: unknown) {
     .map((item) => item.text ?? "")
     .join("");
   if (text) return text;
-  auditLog("vlm_extract_responses_text_failed", "warn", {
-    payload_keys: Object.keys(candidate),
-    has_output_text: typeof candidate.output_text,
-    output_length: candidate.output?.length,
-  });
+  auditLog(
+    "vlm_extract_responses_text_failed",
+    {
+      payload_keys: Object.keys(candidate),
+      has_output_text: typeof candidate.output_text,
+      output_length: candidate.output?.length,
+    },
+    "warn",
+  );
   throw new AppError("model_response_invalid");
 }
 
@@ -676,15 +764,19 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         try {
           return parseAnalysisText(text, media.durationSeconds);
         } catch (error) {
-          auditLog("vlm_response_parse_failed", "warn", {
-            model: model.name,
-            media_type: input.mediaType,
-            asset_id: input.assetId,
-            correction_used: correctionUsed,
-            raw_text: text,
-            parse_error:
-              error instanceof Error ? error.message : String(error),
-          });
+          auditLog(
+            "vlm_response_parse_failed",
+            {
+              model: model.name,
+              media_type: input.mediaType,
+              asset_id: input.assetId,
+              correction_used: correctionUsed,
+              raw_text: text,
+              parse_error:
+                error instanceof Error ? error.message : String(error),
+            },
+            "warn",
+          );
           if (correctionUsed) throw new AppError("model_response_invalid");
           correctionUsed = true;
           invalidText = text;
@@ -735,16 +827,12 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
   ) {
     const prompt = promptFor(input.mediaType, media.durationSeconds);
     const isChat = model.protocol === "openai_chat_completions";
-    const thinking =
-      model.requestOptions.enableThinking === null
-        ? {}
-        : { enable_thinking: model.requestOptions.enableThinking };
     const body = isChat
       ? {
           model: model.name,
           temperature: 0,
           max_tokens: this.config.VLM_MAX_OUTPUT_TOKENS,
-          ...thinking,
+          ...chatThinkingOptions(model),
           messages: [
             {
               role: "user",
@@ -755,7 +843,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       : {
           model: model.name,
           max_output_tokens: this.config.VLM_MAX_OUTPUT_TOKENS,
-          ...thinking,
+          ...responsesThinkingOptions(model),
           input: [
             {
               role: "user",
@@ -784,16 +872,12 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       durationSeconds,
     );
     const isChat = model.protocol === "openai_chat_completions";
-    const thinking =
-      model.requestOptions.enableThinking === null
-        ? {}
-        : { enable_thinking: model.requestOptions.enableThinking };
     const body = isChat
       ? {
           model: model.name,
           temperature: 0,
           max_tokens: this.config.VLM_MAX_OUTPUT_TOKENS,
-          ...thinking,
+          ...chatThinkingOptions(model),
           messages: [
             {
               role: "user",
@@ -804,7 +888,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       : {
           model: model.name,
           max_output_tokens: this.config.VLM_MAX_OUTPUT_TOKENS,
-          ...thinking,
+          ...responsesThinkingOptions(model),
           input: [
             {
               role: "user",

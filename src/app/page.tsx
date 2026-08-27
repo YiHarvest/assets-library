@@ -100,6 +100,7 @@ export default async function OverviewPage({
         user_scope: userScope,
         review_statuses: [
           view === "published" ? "published" : "pending_review",
+          ...(view === "published" && userId ? ["pending_review"] : []),
         ],
       },
       cursor,

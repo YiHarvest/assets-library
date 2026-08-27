@@ -249,7 +249,7 @@ export async function mediaResponse(assetId: string, request: Request) {
   );
 }
 
-/** 返回视频子素材的长期首帧；与媒体本体共享普通 GET 和单段 Range 语义。 */
+/** 返回素材缩略图：视频子素材首帧，图片则直接使用原媒体。 */
 export async function thumbnailResponse(
   assetId: string,
   request: Request,
@@ -257,7 +257,7 @@ export async function thumbnailResponse(
 ) {
   const row = await getAssetThumbnailObject(assetId);
   if (!row || row.asset.reviewStatus === "deleted") {
-    throw new AppError("invalid_request", "视频缩略图不存在。", 404);
+    throw new AppError("invalid_request", "缩略图不存在。", 404);
   }
   if (!mediaIsReady(row.asset)) {
     throw new AppError(
@@ -266,12 +266,16 @@ export async function thumbnailResponse(
       409,
     );
   }
+  // 图片使用原文件名；视频使用 thumbnail 后缀
+  const isImage = row.asset.mediaType === "image";
+  const filename = isImage
+    ? row.asset.originalFilename
+    : `${row.asset.id}-thumbnail.jpg`;
+  const mimeType = isImage ? row.asset.mimeType : row.object.mimeType;
+
   return mediaObjectResponse(
     row.object,
-    {
-      mimeType: row.object.mimeType,
-      filename: `${row.asset.id}-thumbnail.jpg`,
-    },
+    { mimeType, filename },
     request,
     storage,
   );

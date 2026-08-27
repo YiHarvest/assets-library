@@ -162,6 +162,7 @@ compose.override.yaml
 
 # 内部部署文档（含真实地址，不上传 GitHub）
 docs/上线api.md
+docs/mcp-service.md
 
 # Local Metabase deployment secrets and certificate copy.
 ops/metabase/.env

@@ -569,6 +569,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
     );
     const primary = configuredCandidates[0];
     let lastFailure: "request" | "response" = "request";
+    let lastErrorDetails: Record<string, unknown> | undefined;
 
     for (const candidate of candidates) {
       const candidateDeadlineAt =
@@ -589,9 +590,22 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       } catch (error) {
         if (error instanceof ModelRequestError) {
           if (error.kind === "fatal") {
-            throw new AppError("model_request_failed");
+            throw new AppError("model_request_failed", undefined, 400, {
+              status: error.status,
+              gatewayCode: error.gatewayCode,
+              gatewayType: error.gatewayType,
+              message: error.message,
+              model: candidate.name,
+            });
           }
           lastFailure = "request";
+          lastErrorDetails = {
+            status: error.status,
+            gatewayCode: error.gatewayCode,
+            gatewayType: error.gatewayType,
+            message: error.message,
+            model: candidate.name,
+          };
           this.cooldowns.mark(
             candidate,
             this.cooldownDuration(error.kind),
@@ -616,6 +630,9 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
       lastFailure === "response"
         ? "model_response_invalid"
         : "model_request_failed",
+      undefined,
+      400,
+      lastErrorDetails,
     );
   }
 

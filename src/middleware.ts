@@ -53,5 +53,13 @@ export async function middleware(request: NextRequest) {
 export const config = {
   // Keep this broad because the deployed basePath is rewritten before route handling.
   // Classification above strips that prefix and explicitly preserves every API route.
-  matcher: ["/:path*"],
+  //
+  // matcher 排除 API、MCP 与静态资源（裸路径与生产前缀 /feisu/assets-library 两种形式）：
+  // 页面锁只保护 WebUI 页面，这些路径在 middleware 内部本来就直接放行；
+  // 若让它们进入 middleware，Next.js 会克隆请求体并在超过
+  // middlewareClientMaxBodySize 时截断流，导致大文件上传收到
+  // upload_size_mismatch（实测 >10MiB 即触发）。改前缀时需同步更新此处。
+  matcher: [
+    "/((?!api(?:/|$)|_next(?:/|$)|mcp(?:/|$)|feisu/assets-library(?:/api|/_next|/mcp)(?:/|$)).*)",
+  ],
 };

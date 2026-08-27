@@ -36,6 +36,12 @@ const nextConfig: NextConfig = {
     ];
   },
   serverExternalPackages: ["sharp"],
+  experimental: {
+    // 兜底：进入 middleware 的请求体克隆上限（默认 10MiB，超过即截断流，
+    // 曾导致 >10MiB 上传收到 upload_size_mismatch）。上传路径已通过
+    // middleware matcher 排除，此值仅保护仍需经过 middleware 的少数请求。
+    middlewareClientMaxBodySize: 220 * 1024 * 1024,
+  },
 };
 
 export default nextConfig;

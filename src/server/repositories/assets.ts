@@ -747,9 +747,7 @@ function scopeCondition(scope: AssetScope): SQL | undefined {
     return or(isNull(assets.userId), ne(assets.userId, scope.excludeUserId));
   }
   const userId = scope.userId?.trim();
-  if (!userId) return isNull(assets.userId);
-  // 包含用户自己的素材 + 公共素材（user_id 为 NULL）
-  return or(eq(assets.userId, userId), isNull(assets.userId));
+  return userId ? eq(assets.userId, userId) : isNull(assets.userId);
 }
 
 function rowMatchesScope(userId: string | null, scope: AssetScope) {

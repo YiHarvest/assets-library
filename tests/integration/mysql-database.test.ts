@@ -85,6 +85,7 @@ mysqlTest("MySQL 数据层", () => {
   let migrationConnection: DatabaseConnection;
   let repositoryPool: Pool;
   let repository: Repository;
+  let lifecycle: typeof import("@/server/services/task-lifecycle");
 
   beforeAll(async () => {
     if (!testDatabaseUrl) return;
@@ -97,6 +98,7 @@ mysqlTest("MySQL 数据层", () => {
     });
     repository = await import("@/server/repositories/assets");
     ({ pool: repositoryPool } = await import("@/server/db"));
+    lifecycle = await import("@/server/services/task-lifecycle");
   }, 30_000);
 
   beforeEach(async () => {
@@ -1897,5 +1899,81 @@ mysqlTest("MySQL 数据层", () => {
     );
     const semanticCandidateIds = searchAnalysisMock.mock.lastCall?.[2] as string[];
     expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
+  }, 30_000);
+
+  test("将失败的素材错误码与 asset_ids 向上聚合到 item 和 task", async () => {
+    const now = new Date();
+    const taskId = crypto.randomUUID();
+    const itemId = crypto.randomUUID();
+    const okAssetId = crypto.randomUUID();
+    const failedAssetId = crypto.randomUUID();
+    await migrationConnection.db.insert(tasks).values({
+      id: taskId,
+      type: "upload",
+      status: "running",
+      phase: "analyzing",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(taskItems).values({
+      id: itemId,
+      taskId,
+      ordinal: 0,
+      filename: "a.jpg",
+      stagingPath: "/tmp/a.jpg",
+      status: "running",
+      phase: "analyzing",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const insertAsset = (id: string, status: "completed" | "failed") =>
+      migrationConnection.db.insert(assets).values({
+        id,
+        userId: "user-a",
+        taskId,
+        taskItemId: itemId,
+        name: "a",
+        description: "",
+        mediaType: "image",
+        originalFilename: "a.jpg",
+        originalPath: "/tmp/a.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        reviewStatus: "published",
+        processingStatus: status,
+        failureCode: status === "failed" ? "model_response_invalid" : null,
+        failureMessage: status === "failed" ? "模型返回内容无法验证。" : null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    await insertAsset(okAssetId, "completed");
+    await insertAsset(failedAssetId, "failed");
+
+    await lifecycle.refreshTaskForAsset(failedAssetId);
+
+    const [storedItem] = await migrationConnection.db
+      .select()
+      .from(taskItems)
+      .where(eq(taskItems.id, itemId));
+    expect(storedItem).toBeDefined();
+    expect(storedItem?.status).toBe("failed");
+    expect(storedItem?.errorCode).toBe("model_response_invalid");
+    expect(storedItem?.errorDetails).toMatchObject({
+      codes: ["model_response_invalid"],
+      failedAssetIds: [failedAssetId],
+    });
+
+    const [storedTask] = await migrationConnection.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(storedTask).toBeDefined();
+    expect(storedTask?.status).toBe("failed");
+    expect(storedTask?.errorCode).toBe("model_response_invalid");
+    expect(storedTask?.errorDetails).toMatchObject({
+      codes: ["model_response_invalid"],
+      failedItems: 1,
+      failedAssetIds: [failedAssetId],
+    });
   }, 30_000);
 });

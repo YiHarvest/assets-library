@@ -296,7 +296,7 @@ describe("model adapter", () => {
       );
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(response("灯光在 wet 路面形成光斑"))
+      .mockResolvedValueOnce(response("Wet road lighting on the ground"))
       .mockResolvedValueOnce(response("灯光在湿润路面形成光斑"));
 
     const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
@@ -312,7 +312,7 @@ describe("model adapter", () => {
     ) as { messages: Array<{ content: Array<{ type: string; text?: string }> }> };
     expect(repairBody.messages[0]?.content).toHaveLength(1);
     expect(repairBody.messages[0]?.content[0]?.type).toBe("text");
-    expect(repairBody.messages[0]?.content[0]?.text).toContain("wet 路面");
+    expect(repairBody.messages[0]?.content[0]?.text).toContain("Wet road");
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -1197,6 +1197,163 @@ describe("model adapter", () => {
       new OpenAICompatibleAnalyzer(config).analyze(input),
     ).rejects.toMatchObject({ code: "model_response_invalid" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("promotes an explicit primaryCategory to the leading scene tag and removes duplicates", async () => {
+    const { root, input } = await createImageFixture("asset-primary-field-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_ENABLE_THINKING: "false",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        chatContentResponse(
+          JSON.stringify({
+            kind: "image",
+            primaryCategory: "科技",
+            description: "客户反馈记录表截图，记录了技术bug与用户体验问题",
+            tags: {
+              scene: ["户外", "城市", "科技"],
+              object: ["建筑", "数据表格"],
+              person: [],
+              style: [],
+              color_composition: [],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
+          }),
+        ),
+      );
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("image");
+    if (outcome.result.kind === "image") {
+      expect(outcome.result.tags.scene[0]).toBe("科技");
+      expect(outcome.result.tags.scene).toEqual(["科技", "户外", "城市"]);
+      expect(outcome.result.tags.object).toEqual(["数据表格"]);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("accepts quoted English terms in the description while keeping tags strict", async () => {
+    const { root, input } = await createImageFixture("asset-narrative-latin-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "qwen3.7-plus",
+      VLM_ENABLE_THINKING: "false",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        chatContentResponse(
+          JSON.stringify({
+            kind: "image",
+            primaryCategory: "科技",
+            description:
+              "软件界面截图，记录了技术bug与AI功能优化两条反馈，内容涉及用户体验和内容创作",
+            tags: {
+              scene: ["科技"],
+              object: ["数据表格", "管理系统界面"],
+              person: [],
+              style: ["扁平化设计"],
+              color_composition: [],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
+          }),
+        ),
+      );
+
+    const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    expect(outcome.result.kind).toBe("image");
+    if (outcome.result.kind === "image") {
+      expect(outcome.result.tags.scene[0]).toBe("科技");
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("disables thinking through chat_template_kwargs for llama.cpp-hosted models", async () => {
+    const { root, input } = await createImageFixture("asset-thinking-kwargs-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "Qwythos",
+      VLM_ENABLE_THINKING: "false",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        chatContentResponse(
+          JSON.stringify({
+            kind: "image",
+            primaryCategory: "科技",
+            description: "测试图片",
+            tags: {
+              scene: ["科技"],
+              object: [],
+              person: [],
+              style: [],
+              color_composition: [],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
+          }),
+        ),
+      );
+
+    await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      model: "Qwythos",
+      enable_thinking: false,
+      chat_template_kwargs: { enable_thinking: false },
+    });
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("instructs the model to cap ocr.text length and to emit primaryCategory", async () => {
+    const { root, input } = await createImageFixture("asset-prompt-cap-");
+    const config = loadConfig({
+      MEDIA_ROOT: root,
+      VLM_BASE_URL: "https://vision.example/v1",
+      VLM_NAME: "primary-model",
+      VLM_ENABLE_THINKING: "false",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        chatContentResponse(
+          JSON.stringify({
+            kind: "image",
+            primaryCategory: "社会场景",
+            description: "测试图片",
+            tags: {
+              scene: ["社会场景"],
+              object: [],
+              person: [],
+              style: [],
+              color_composition: [],
+            },
+            ocr: { text: null, unavailableReason: "无文字" },
+          }),
+        ),
+      );
+
+    await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+    const requestBody = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body),
+    ) as { messages: Array<{ content: Array<{ text?: string }> }> };
+    const prompt = requestBody.messages[0]?.content[0]?.text ?? "";
+    expect(prompt).toContain("primaryCategory");
+    expect(prompt).toContain("最多 600 字");
     await fs.rm(root, { recursive: true, force: true });
   });
 });

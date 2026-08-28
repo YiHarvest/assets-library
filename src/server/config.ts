@@ -142,6 +142,8 @@ const envSchema = z
     VLM_API_KEY: z.string().optional(),
     VLM_NAME: z.string().optional(),
     VLM_FALLBACK_NAMES: z.string().optional(),
+    VLM_FALLBACK_BASE_URL: z.string().url().optional().or(z.literal("")),
+    VLM_FALLBACK_API_KEY: z.string().optional(),
     VLM_ENABLE_THINKING: optionalBooleanSchema,
     VLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
     VLM_VIDEO_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
@@ -357,11 +359,18 @@ function configuredModelCandidates(
   primaryName: string | undefined,
   fallbackNames: string | undefined,
   enableThinking: string | undefined,
+  fallbackBaseUrl: string | undefined = undefined,
+  fallbackApiKey: string | undefined = undefined,
 ) {
-  return candidateNames(primaryName, fallbackNames)
-    .map((name) =>
-      modelTarget(role, protocol, baseUrl, apiKey, name, enableThinking),
-    )
+  const names = candidateNames(primaryName, fallbackNames);
+
+  return names
+    .map((name, index) => {
+      const isPrimary = index === 0 && primaryName?.trim();
+      const targetBaseUrl = isPrimary ? baseUrl : (fallbackBaseUrl || baseUrl);
+      const targetApiKey = isPrimary ? apiKey : (fallbackApiKey || apiKey);
+      return modelTarget(role, protocol, targetBaseUrl, targetApiKey, name, enableThinking);
+    })
     .filter((target): target is ConfiguredModelTarget => target.configured);
 }
 
@@ -403,6 +412,11 @@ export function loadConfig(
     parsed.VLM_NAME,
     parsed.VLM_ENABLE_THINKING,
   );
+  const vlmFallbackBaseUrl = internalServiceUrl(
+    parsed.VLM_FALLBACK_BASE_URL,
+    parsed.APP_MODE,
+    parsed.PRD_INTERNAL_SERVICE_HOST,
+  );
   const vlmCandidates = configuredModelCandidates(
     "vlm",
     parsed.VLM_PROTOCOL,
@@ -411,6 +425,8 @@ export function loadConfig(
     parsed.VLM_NAME,
     parsed.VLM_FALLBACK_NAMES,
     parsed.VLM_ENABLE_THINKING,
+    vlmFallbackBaseUrl,
+    parsed.VLM_FALLBACK_API_KEY,
   );
   const llmBaseUrl = configuredLlmBaseUrl || vlm.baseUrl;
   const llmApiKey = optionalValue(parsed.LLM_API_KEY) ?? vlm.apiKey;

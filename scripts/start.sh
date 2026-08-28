@@ -51,6 +51,18 @@ case "$APP_MODE" in
     ;;
 esac
 
+# 生产模式使用 /tmp 中的 Node.js 22
+if [ "$APP_MODE" = "prd" ]; then
+  NODE22_PATH="/tmp/node-v22.20.0-linux-x64/bin"
+  if [ -x "$NODE22_PATH/node" ]; then
+    export PATH="$NODE22_PATH:$PATH"
+    c_info "生产模式：使用 Node.js $(node --version)"
+  else
+    c_err "生产模式需要 Node.js 22，但未找到 $NODE22_PATH/node"
+    exit 1
+  fi
+fi
+
 # prd 缺少页面锁密钥时必须在数据库迁移、worker 和 Web 启动前终止。
 # 中间件仍会在运行时重复校验，防止绕过此标准启动脚本后意外放行。
 c_info "校验 WebUI 页面锁 ..."

@@ -163,9 +163,10 @@ paths:
       operationId: createCompatibilitySegmentMatch
       summary: 异步对齐 ASR/LLM 分段并匹配素材
       description: >-
-        接收旧剪辑业务的 ASR 逐词时间与字符串化 LLM segments。Worker 按顺序
-        生成 start_time、end_time 和 group_id，并复用现有描述语义匹配函数为每段
-        选择至多一个素材。请求中的未知顶层字段会原样透传到终态回调。
+        兼容两种旧剪辑业务格式：存在 ASR transcripts 时，Worker 按顺序生成
+        start_time、end_time 和 group_id；ASR 为空时，直接复用 LLM segments 已有的
+        时间轴字段。两种格式都复用现有描述语义匹配函数为每段选择至多一个素材。
+        请求中的未知顶层字段会原样透传到终态回调。
       requestBody:
         required: true
         content:
@@ -200,7 +201,9 @@ paths:
       tags: [Assets]
       operationId: queryAssets
       summary: 浏览或语义搜索素材
-      description: 统一游标分页、语义搜索、受控 filter 和标签统计。
+      description: >-
+        统一游标分页、语义搜索、受控 filter 和标签统计。public 范围单独搜索
+        AI/AIGC/人工智能宽泛别名时会扩展到公共及全部个人素材；显式用户范围不变。
       requestBody:
         required: true
         content:
@@ -669,9 +672,9 @@ components:
       required: [asr, llm, callback_url]
       properties:
         asr:
+          description: 可传 ASR transcripts；LLM segments 已带时间轴时也可传空对象。
           type: object
           additionalProperties: true
-          required: [transcripts]
           properties:
             transcripts:
               type: array
@@ -724,11 +727,28 @@ components:
                       high_light_word: { type: string }
                       keyword: { type: string }
                       level: { type: integer, minimum: 0 }
+                      group_id:
+                        type: array
+                        minItems: 2
+                        maxItems: 2
+                        prefixItems:
+                          - { type: number }
+                          - { type: number }
+                      start_time: { type: number }
+                      end_time: { type: number }
         text: { type: string }
         asset_url_list:
           type: array
           default: []
-          items: { type: string, format: uri }
+          items:
+            oneOf:
+              - { type: string, format: uri }
+              - type: object
+                additionalProperties: true
+                required: [file_url, type]
+                properties:
+                  file_url: { type: string, format: uri }
+                  type: { type: string }
         callback_url:
           type: string
           format: uri

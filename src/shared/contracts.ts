@@ -288,6 +288,9 @@ const compatibilityLlmSegmentSchema = z
     high_light_word: z.string().max(1_000).optional(),
     keyword: z.string().max(1_000).optional(),
     level: z.number().int().nonnegative(),
+    group_id: z.tuple([z.number(), z.number()]).optional(),
+    start_time: z.number().optional(),
+    end_time: z.number().optional(),
   })
   .passthrough();
 
@@ -306,7 +309,17 @@ const compatibilityLlmSchema = z.preprocess((value) => {
   }
 }, compatibilityLlmPayloadSchema);
 
-/** 旧剪辑业务的 ASR + LLM 分段匹配请求；未知顶层字段会透传到结果回调。 */
+const compatibilityAssetUrlSchema = z.union([
+  z.string().url(),
+  z
+    .object({
+      file_url: z.string().url(),
+      type: z.string(),
+    })
+    .passthrough(),
+]);
+
+/** 旧剪辑业务的分段匹配请求；兼容 ASR 对齐和 LLM 已带时间轴两种格式。 */
 export const compatibilityMatchRequestSchema = z
   .object({
     asr: z
@@ -323,12 +336,16 @@ export const compatibilityMatchRequestSchema = z
               .passthrough(),
           )
           .min(1)
-          .max(20),
+          .max(20)
+          .optional(),
       })
       .passthrough(),
     llm: compatibilityLlmSchema,
     text: z.string().max(1_000_000).optional(),
-    asset_url_list: z.array(z.string().url()).max(10_000).default([]),
+    asset_url_list: z
+      .array(compatibilityAssetUrlSchema)
+      .max(10_000)
+      .default([]),
     callback_url: z
       .string()
       .url()

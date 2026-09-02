@@ -1962,9 +1962,10 @@ mysqlTest("MySQL 数据层", () => {
       relevantAiAsset,
       irrelevantAiAsset,
       thirdAiAsset,
+      suppressedAiAsset,
     ]);
     expect(lowSemanticAiSearch).toMatchObject({
-      total: 3,
+      total: 4,
       search: {
         mode: "keyword",
         threshold: 0.6,
@@ -1980,7 +1981,7 @@ mysqlTest("MySQL 数据层", () => {
     ).toBe(true);
     expect(
       lowSemanticAiSearch.items.some((item) => item.id === suppressedAiAsset),
-    ).toBe(false);
+    ).toBe(true);
 
     const semanticCallsBeforeFallback = searchAnalysisMock.mock.calls.length;
     semanticSearchEnabledMock.mockReturnValueOnce(false);
@@ -1989,7 +1990,7 @@ mysqlTest("MySQL 数据层", () => {
       limit: 100,
     });
     expect(searchAnalysisMock).toHaveBeenCalledTimes(semanticCallsBeforeFallback);
-    expect(unavailableSemanticAiSearch.items).toHaveLength(3);
+    expect(unavailableSemanticAiSearch.items).toHaveLength(4);
     expect(unavailableSemanticAiSearch.search).toMatchObject({
       mode: "keyword",
       threshold: 0.6,

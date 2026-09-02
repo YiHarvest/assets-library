@@ -39,7 +39,10 @@ export interface ApiV1Service {
   sealUploadTask(taskId: string): Promise<TaskStatusResponse>;
   getTask(taskId: string, expectedUserId?: string): Promise<TaskStatusResponse>;
   listTasks(userId: string, input: ListTasksInput): Promise<TaskListResponse>;
-  queryAssets(input: AssetQuery): Promise<AssetQueryResponse>;
+  queryAssets(
+    input: AssetQuery,
+    options?: { expandPublicBroadAi?: boolean },
+  ): Promise<AssetQueryResponse>;
   getUserStorageUsage(userId: string): Promise<UserStorageUsageResponse>;
   listUserMedia(
     userId: string,

@@ -1137,9 +1137,6 @@ interface KeywordMatches {
   semanticText?: string;
 }
 
-/** 语义无法可靠去噪时，只展示少量强词法候选，避免宽泛标签铺满结果页。 */
-const broadQueryLexicalFallbackLimit = 3;
-
 function searchMetadata(
   mode: AssetSearchMeta["mode"],
   threshold: number,
@@ -1420,12 +1417,12 @@ export async function queryAssetsPage({
     const tier = selectBroadQueryRecallTier(
       broadCandidates,
       DEFAULT_RELEVANCE_THRESHOLDS.semantic,
-      broadQueryLexicalFallbackLimit,
+      broadCandidates.length,
     );
     const lexicalFallbackIds = selectBroadQueryRecallTier(
       broadCandidates,
       1,
-      broadQueryLexicalFallbackLimit,
+      broadCandidates.length,
     ).assetIds;
 
     const applyLexicalFallback = () => {
@@ -1464,7 +1461,8 @@ export async function queryAssetsPage({
     };
 
     if (!tier.useSemanticRerank) {
-      // exact/alias 是强证据：语义缺失或整体偏低时不应把 1.0 惩罚成 0.4。
+      // exact/alias 是强证据：语义缺失或整体偏低时返回全部强命中，
+      // 不能把 AI=1 惩罚成 0.4，也不能再人为截断为前三项。
       applyLexicalFallback();
     } else {
       const hybridScores = new Map<string, RankedAssetMatch>();

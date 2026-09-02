@@ -88,9 +88,37 @@ function findSequence(
 export function alignCompatibilitySegments(
   request: CompatibilityMatchRequest,
 ): AlignedCompatibilitySegment[] {
-  const transcript = request.asr.transcripts[0];
+  const transcript = request.asr.transcripts?.[0];
   if (!transcript) {
-    throw new AppError("invalid_request", "ASR transcripts 不能为空。", 400);
+    // 旧调用方可能已在 LLM segments 中完成时间轴对齐，此时直接复用原字段。
+    return request.llm.segments.map((segment) => {
+      const {
+        high_light_word: highlightedKeyword,
+        keyword: suppliedKeyword,
+        ...preserved
+      } = segment;
+      if (
+        !segment.group_id ||
+        typeof segment.start_time !== "number" ||
+        typeof segment.end_time !== "number"
+      ) {
+        throw new AppError(
+          "invalid_request",
+          `分段 ${segment.segment_id} 缺少 group_id、start_time 或 end_time。`,
+          400,
+        );
+      }
+      return {
+        ...preserved,
+        segment_id: segment.segment_id,
+        text: segment.text,
+        keyword: highlightedKeyword ?? suppliedKeyword ?? "",
+        level: segment.level,
+        group_id: segment.group_id,
+        start_time: segment.start_time,
+        end_time: segment.end_time,
+      };
+    });
   }
 
   const sourceCharacters: string[] = [];

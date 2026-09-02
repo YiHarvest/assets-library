@@ -127,6 +127,43 @@ describe("compatibility segment matching", () => {
     expect(() => alignCompatibilitySegments(parsed)).toThrow(/无法按顺序对齐/);
   });
 
+  it("accepts pre-aligned LLM segments when ASR is an empty object", () => {
+    const parsed = compatibilityMatchRequestSchema.parse({
+      callback_url: "https://callback.example.test/match",
+      asr: {},
+      text: "做过生意的人都明白",
+      llm: {
+        segments: [
+          {
+            segment_id: 1,
+            text: "做过生意的人都明白",
+            keyword: "生意",
+            level: 1,
+            group_id: [1, 4],
+            start_time: 0.28,
+            end_time: 1.56,
+          },
+        ],
+      },
+      asset_url_list: [
+        {
+          file_url: "https://media.example.test/source.mp4",
+          type: "video",
+        },
+      ],
+    });
+
+    expect(alignCompatibilitySegments(parsed)).toEqual([
+      expect.objectContaining({
+        segment_id: 1,
+        keyword: "生意",
+        group_id: [1, 4],
+        start_time: 0.28,
+        end_time: 1.56,
+      }),
+    ]);
+  });
+
   it("returns an absolute matched asset URL with its normalized score", async () => {
     const segment = alignCompatibilitySegments(request())[0]!;
     const search = vi.fn(async () => ({

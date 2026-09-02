@@ -125,8 +125,11 @@ export class DefaultApiV1Service implements ApiV1Service {
     return this.services.tasks.listTasks(userId, input);
   }
 
-  queryAssets(input: AssetQuery) {
-    return this.services.assets.queryAssets(input);
+  queryAssets(
+    input: AssetQuery,
+    options?: { expandPublicBroadAi?: boolean },
+  ) {
+    return this.services.assets.queryAssets(input, options);
   }
 
   getUserStorageUsage(userId: string) {

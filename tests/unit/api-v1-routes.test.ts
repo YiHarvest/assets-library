@@ -403,6 +403,57 @@ describe("API v1 contracts and routes", () => {
     );
   });
 
+  it("accepts the legacy pre-aligned compatibility request shape", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const response = await createCompatibilityMatch(
+      new Request("http://internal.invalid/api/v1/compat/segment-match", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-host": "focus.example.com",
+          "x-forwarded-proto": "https",
+        },
+        body: JSON.stringify({
+          callback_url: "https://callback.example.test/legacy",
+          asr: {},
+          text: "做过生意的人都明白",
+          llm: {
+            segments: [
+              {
+                segment_id: 1,
+                text: "做过生意的人都明白",
+                keyword: "",
+                level: 1,
+                group_id: [1, 4],
+                start_time: 0.28,
+                end_time: 1.56,
+              },
+            ],
+          },
+          asset_url_list: [
+            {
+              file_url: "https://media.example.test/source.mp4",
+              type: "video",
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ taskId, status: "processing" });
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        asr: {},
+        asset_url_list: [
+          expect.objectContaining({ type: "video" }),
+        ],
+      }),
+      "https://focus.example.com",
+    );
+  });
+
   it("passes the upload stream to the service without buffering it in the route", async () => {
     const service = fakeService();
     installApiV1Service(service);
@@ -508,12 +559,15 @@ describe("API v1 contracts and routes", () => {
       jsonRequest("http://localhost/api/v1/assets/query", {}),
     );
     expect(response.status).toBe(200);
-    expect(service.queryAssets).toHaveBeenCalledWith({
-      cursor: null,
-      filter: { user_scope: { mode: "public" } },
-      include_tag_statistics: true,
-      limit: 20,
-    });
+    expect(service.queryAssets).toHaveBeenCalledWith(
+      {
+        cursor: null,
+        filter: { user_scope: { mode: "public" } },
+        include_tag_statistics: true,
+        limit: 20,
+      },
+      { expandPublicBroadAi: true },
+    );
   });
 
   it("gets an asset in the requested user scope using snake_case fields", async () => {

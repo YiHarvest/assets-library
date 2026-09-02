@@ -190,6 +190,34 @@ describe("MCP tool registry", () => {
     await client.close();
   });
 
+  it("keeps public AI searches inside the MCP public authorization scope", async () => {
+    const queryAssets = vi.fn(async () => ({
+      items: [],
+      next_cursor: null,
+      has_more: false,
+      tag_statistics: null,
+      search: null,
+    }));
+    const service = { queryAssets } as unknown as ApiV1Service;
+    const client = await connectedClient(testConfig(), service);
+
+    await client.callTool({
+      name: "query_assets",
+      arguments: { scope: "public", keywords: ["AI"] },
+    });
+
+    expect(queryAssets).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keywords: ["AI"],
+        filter: expect.objectContaining({
+          user_scope: { mode: "public" },
+        }),
+      }),
+    );
+    expect(queryAssets.mock.calls[0]).toHaveLength(1);
+    await client.close();
+  });
+
   it("returns media and video thumbnail links as origin-independent relative URLs", async () => {
     const assetId = "00000000-0000-4000-8000-000000000001";
     const getAsset = vi.fn(async () => ({

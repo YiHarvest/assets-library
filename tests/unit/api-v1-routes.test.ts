@@ -26,6 +26,7 @@ import { GET as getThumbnail } from "@/app/api/v1/media/[assetId]/thumbnail/rout
 import { GET as getUserMedia } from "@/app/api/v1/users/[userId]/media/route";
 import { GET as getUserStorageUsage } from "@/app/api/v1/users/[userId]/storage-usage/route";
 import { GET as getOpenApi } from "@/app/api/v1/openapi/route";
+import { GET as getWebUiUsers } from "@/app/api/webui/users/route";
 
 const taskId = "00000000-0000-4000-8000-000000000001";
 const itemId = "00000000-0000-4000-8000-000000000002";
@@ -218,6 +219,7 @@ describe("API v1 contracts and routes", () => {
   afterEach(() => {
     installApiV1Service(undefined);
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("normalizes an empty user_id to the public scope", () => {
@@ -509,6 +511,35 @@ describe("API v1 contracts and routes", () => {
       cursor: null,
       limit: 25,
     }, "http://localhost");
+  });
+
+  it("keeps the WebUI user directory behind the page lock", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const key = "u".repeat(64);
+    vi.stubEnv("APP_MODE", "prd");
+    vi.stubEnv("WEBUI_LOCK_KEY", key);
+
+    const unauthorized = await getWebUiUsers(
+      new Request("http://localhost/api/webui/users"),
+    );
+    expect(unauthorized.status).toBe(401);
+    expect(service.listUsers).not.toHaveBeenCalled();
+
+    const response = await getWebUiUsers(
+      new Request("http://localhost/api/webui/users", {
+        headers: { authorization: `Bearer ${key}` },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toMatchObject({
+      items: [
+        { user_id: "user-7", asset_count: 1 },
+        { user_id: "user-8", display_name: "用户 8", asset_count: 3 },
+      ],
+    });
+    expect(service.listUsers).toHaveBeenCalledOnce();
   });
 
   it("rejects empty, overlong, or malformed encoded user IDs", async () => {

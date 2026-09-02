@@ -429,6 +429,23 @@ export const assetQueryResponseSchema = z.object({
 });
 export type AssetQueryResponse = z.infer<typeof assetQueryResponseSchema>;
 
+/** 受页面锁保护的管理界面用户目录。 */
+export const userDirectoryEntrySchema = z.object({
+  user_id: userIdSchema,
+  display_name: z.string().nullable(),
+  email: z.string().nullable(),
+  department: z.string().nullable(),
+  first_seen_at: apiDateTimeSchema,
+  last_seen_at: apiDateTimeSchema,
+  asset_count: z.number().int().nonnegative(),
+});
+export type UserDirectoryEntry = z.infer<typeof userDirectoryEntrySchema>;
+
+export const userDirectoryResponseSchema = z.object({
+  items: z.array(userDirectoryEntrySchema),
+});
+export type UserDirectoryResponse = z.infer<typeof userDirectoryResponseSchema>;
+
 /** 用户空间统计中的逐素材字节明细。视频的 total_bytes 包含首帧缩略图。 */
 export const userStorageUsageItemSchema = z.object({
   asset_id: z.string().uuid(),

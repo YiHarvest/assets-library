@@ -9,6 +9,7 @@ import type {
   UpdateAssetTask,
   UserMediaListQuery,
   UserMediaListResponse,
+  UserDirectoryEntry,
   UserScope,
   UserStorageUsageResponse,
 } from "@/shared/contracts";
@@ -40,17 +41,7 @@ export interface ApiV1Service {
     origin: string,
   ): Promise<UserMediaListResponse>;
   getAsset(assetId: string, scope: UserScope): Promise<ApiV1AssetDetail>;
-  listUsers(): Promise<
-    Array<{
-      user_id: string;
-      display_name: string | null;
-      email: string | null;
-      department: string | null;
-      first_seen_at: string;
-      last_seen_at: string;
-      asset_count: number;
-    }>
-  >;
+  listUsers(): Promise<UserDirectoryEntry[]>;
   updateAsset(assetId: string, input: UpdateAssetTask): Promise<TaskAccepted>;
   publishAsset(assetId: string, input: MutationContext): Promise<TaskAccepted>;
   retryAsset(assetId: string, input: MutationContext): Promise<TaskAccepted>;

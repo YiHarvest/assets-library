@@ -10,12 +10,17 @@ import {
   X,
 } from "lucide-react";
 import { AssetOverviewGrid } from "@/components/asset-overview-grid";
+import { AssetScopeSwitcher } from "@/components/asset-scope-switcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { serverApiV1 } from "@/lib/server-api-v1";
+import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
-import type { AssetQueryResponse, UserScope } from "@/shared/contracts";
+import type {
+  AssetQueryResponse,
+  UserDirectoryResponse,
+  UserScope,
+} from "@/shared/contracts";
 
 export const dynamic = "force-dynamic";
 
@@ -92,27 +97,52 @@ export default async function OverviewPage({
   const userScope: UserScope = userId
     ? { mode: "user", user_id: userId }
     : { mode: "public" };
-  const page = await serverApiV1<AssetQueryResponse>("/assets/query", {
-    method: "POST",
-    body: JSON.stringify({
-      ...(tagQuery ? { keywords: [tagQuery] } : {}),
-      filter: {
-        user_scope: userScope,
-        review_statuses: [
-          view === "published" ? "published" : "pending_review",
-          ...(view === "published" && userId ? ["pending_review"] : []),
-        ],
-      },
-      cursor,
-      limit: 8,
-      include_tag_statistics: true,
+  const [page, userDirectory] = await Promise.all([
+    serverApiV1<AssetQueryResponse>("/assets/query", {
+      method: "POST",
+      body: JSON.stringify({
+        ...(tagQuery ? { keywords: [tagQuery] } : {}),
+        filter: {
+          user_scope: userScope,
+          review_statuses: [
+            view === "published" ? "published" : "pending_review",
+            ...(view === "published" && userId ? ["pending_review"] : []),
+          ],
+        },
+        cursor,
+        limit: 8,
+        include_tag_statistics: true,
+      }),
     }),
-  });
+    serverWebUiApi<UserDirectoryResponse>("/users"),
+  ]);
   const common = { view, tag: tagQuery, layout, userId };
   const uploadHref = userId
     ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
     : appUrl("/upload");
   const total = page.tag_statistics?.total_assets ?? page.items.length;
+  const currentUser = userDirectory.items.find(
+    (user) => user.user_id === userId,
+  );
+  const scopeDescription = userId
+    ? currentUser?.display_name
+      ? `${currentUser.display_name} (${userId})`
+      : `用户 ${userId} 的素材`
+    : "公共素材库";
+  const publicScopeHref = overviewHref({
+    view,
+    tag: tagQuery,
+    layout,
+  });
+  const userOptions = userDirectory.items.map((user) => ({
+    ...user,
+    href: overviewHref({
+      view,
+      tag: tagQuery,
+      layout,
+      userId: user.user_id,
+    }),
+  }));
 
   return (
     <main className="mx-auto max-w-7xl px-5 py-7 sm:py-9">
@@ -122,7 +152,7 @@ export default async function OverviewPage({
             素材库
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            {userId ? `用户 ${userId} 的素材` : "公共素材库"}
+            {scopeDescription}
           </p>
         </div>
         <Button asChild>
@@ -131,6 +161,12 @@ export default async function OverviewPage({
           </Link>
         </Button>
       </section>
+
+      <AssetScopeSwitcher
+        currentUserId={userId}
+        publicHref={publicScopeHref}
+        users={userOptions}
+      />
 
       <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
         <nav
@@ -160,7 +196,11 @@ export default async function OverviewPage({
         </nav>
 
         {view === "published" ? (
-          <form action="/" method="get" className="flex flex-1 items-center gap-2">
+          <form
+            action={appUrl("/")}
+            method="get"
+            className="flex flex-1 items-center gap-2"
+          >
             <input type="hidden" name="view" value="published" />
             {layout === "list" && (
               <input type="hidden" name="layout" value="list" />

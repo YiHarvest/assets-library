@@ -4,6 +4,7 @@ import {
   descriptionSearchSchema,
   imageAnalysisSchema,
   mediaTypeSchema,
+  userDirectoryResponseSchema,
   userMediaListResponseSchema,
   userStorageUsageResponseSchema,
   videoAnalysisSchema,
@@ -105,5 +106,28 @@ describe("shared contracts", () => {
         has_more: false,
       }),
     ).toThrow(/thumbnail/);
+  });
+
+  it("validates the WebUI user directory", () => {
+    expect(
+      userDirectoryResponseSchema.parse({
+        items: [
+          {
+            user_id: "user-7",
+            display_name: "剪辑用户",
+            email: "editor@example.com",
+            department: "内容中心",
+            first_seen_at: "2026-08-12T12:00:00+08:00",
+            last_seen_at: "2026-08-13T12:00:00+08:00",
+            asset_count: 3,
+          },
+        ],
+      }),
+    ).toBeTruthy();
+    expect(() =>
+      userDirectoryResponseSchema.parse({
+        items: [{ user_id: "", asset_count: -1 }],
+      }),
+    ).toThrow();
   });
 });

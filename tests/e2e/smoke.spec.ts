@@ -39,6 +39,28 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
   await expect(
     page.getByPlaceholder("搜索标签、场景或风格"),
   ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "公共素材", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "个人素材", exact: true }).click();
+  await expect(
+    page
+      .getByRole("combobox", { name: "选择素材所属用户" })
+      .or(page.getByText("暂无已注册用户", { exact: true })),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "公共素材", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "公共素材", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await page.getByPlaceholder("搜索标签、场景或风格").fill("smoke-search");
+  await page.getByRole("button", { name: "搜索标签" }).click();
+  await expect(page).toHaveURL(/tag=smoke-search/);
+  await expect(page).not.toHaveURL(/\/lock/);
+  await page
+    .getByRole("link", { name: "清除搜索", exact: true })
+    .click();
+  await expect(page).not.toHaveURL(/tag=smoke-search/);
   await page.getByRole("link", { name: "列表视图" }).click();
   await expect(page).toHaveURL(/layout=list/);
   await page.getByRole("link", { name: "画廊视图" }).click();

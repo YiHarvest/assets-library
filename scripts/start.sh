@@ -2,6 +2,8 @@
 # 启动 assets-library 的所有服务：Chroma + 分镜服务 + Next.js Web + worker
 # 模式由 .env 的 APP_MODE 决定（dev 默认 / prd）
 set -euo pipefail
+# Bash 作业控制会为每个后台服务创建独立进程组，Linux/macOS 都无需外部 setsid。
+set -m
 
 cd "$(dirname "$0")/.."
 
@@ -51,16 +53,19 @@ case "$APP_MODE" in
     ;;
 esac
 
-# 生产模式使用 /tmp 中的 Node.js 22
+# 生产模式优先使用 Linux 部署机缓存的 Node.js，否则使用 PATH 中的 Node.js 22+。
 if [ "$APP_MODE" = "prd" ]; then
   NODE22_PATH="/tmp/node-v22.20.0-linux-x64/bin"
-  if [ -x "$NODE22_PATH/node" ]; then
+  if [ "$(uname -s)" = "Linux" ] && [ -x "$NODE22_PATH/node" ]; then
     export PATH="$NODE22_PATH:$PATH"
-    c_info "生产模式：使用 Node.js $(node --version)"
-  else
-    c_err "生产模式需要 Node.js 22，但未找到 $NODE22_PATH/node"
+  fi
+  if ! node_major="$(node -p 'parseInt(process.versions.node, 10)' 2>/dev/null)" \
+    || ! [[ "$node_major" =~ ^[0-9]+$ ]] \
+    || [ "$node_major" -lt 22 ]; then
+    c_err "生产模式需要 Node.js 22+，当前：$(node --version 2>/dev/null || printf '未安装')"
     exit 1
   fi
+  c_info "生产模式：使用 Node.js $(node --version)"
 fi
 
 # prd 缺少页面锁密钥时必须在数据库迁移、worker 和 Web 启动前终止。
@@ -81,7 +86,7 @@ pid_from_file() {
   printf '%s' "$pid"
 }
 
-# 新进程用 setsid 启动，PID 同时也是进程组 ID；僵尸进程不算仍在运行。
+# 后台服务的 PID 同时也是进程组 ID；僵尸进程不算仍在运行。
 managed_pid_running() {
   local pid="$1" process_pid process_group process_state
   while read -r process_pid process_group process_state; do
@@ -191,7 +196,7 @@ prepare_chroma_runtime() {
     return
   fi
 
-  c_info "首次准备 Chroma $CHROMA_VERSION（后续启动将复用本机缓存）..."
+  c_info "首次准备 Chroma ${CHROMA_VERSION}（后续启动将复用本机缓存）..."
   if env UV_INDEX_URL="$CHROMA_INDEX_URL" uvx --from "$package" chroma --version \
     >> "$CHROMA_LOG" 2>&1; then
     return
@@ -208,7 +213,7 @@ prepare_chroma_runtime() {
   fi
 
   show_chroma_failure \
-    "无法准备 Chroma $CHROMA_VERSION。请检查网络/代理，或设置可访问的 CHROMA_INDEX_URL。日志: $CHROMA_LOG"
+    "无法准备 Chroma ${CHROMA_VERSION}。请检查网络/代理，或设置可访问的 CHROMA_INDEX_URL。日志: $CHROMA_LOG"
 }
 
 # ---------- Chroma ----------
@@ -233,14 +238,14 @@ else
   : > "$CHROMA_LOG"
   prepare_chroma_runtime
   c_info "启动 Chroma ..."
-  nohup setsid env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
+  nohup env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY \
     -u all_proxy -u https_proxy -u http_proxy \
     UV_INDEX_URL="$CHROMA_INDEX_URL" \
     uvx --offline --from "chromadb==$CHROMA_VERSION" chroma run \
     --path "$CHROMA_DIR" \
     --host "$CHROMA_LISTEN_HOST" \
     --port "$CHROMA_PORT" \
-    > "$CHROMA_LOG" 2>&1 &
+    < /dev/null > "$CHROMA_LOG" 2>&1 &
   chroma_pid=$!
   echo "$chroma_pid" > "$CHROMA_PID_FILE"
   # 等待端口就绪
@@ -306,7 +311,7 @@ if [ "$SCENE_DETECT_ENABLED" = "true" ]; then
     : > "$SCENE_LOG"
     c_info "启动分镜服务 ..."
     # 直接执行并由 run-scene-service.sh exec 到 uv，PID 文件可可靠控制服务进程。
-    nohup setsid ./scripts/run-scene-service.sh > "$SCENE_LOG" 2>&1 &
+    nohup ./scripts/run-scene-service.sh < /dev/null > "$SCENE_LOG" 2>&1 &
     scene_pid=$!
     echo "$scene_pid" > "$SCENE_PID_FILE"
     scene_ready=false
@@ -348,7 +353,7 @@ APP_LOG_MAX_BYTES="${APP_LOG_MAX_BYTES:-104857600}"
 rotate_app_log_if_needed() {
   [ -f "$APP_LOG" ] || return 0
   local current_size rotated
-  current_size="$(stat -c '%s' "$APP_LOG" 2>/dev/null || printf '0')"
+  current_size="$(wc -c < "$APP_LOG")"
   [ "$current_size" -lt "$APP_LOG_MAX_BYTES" ] || {
     rotated="$PID_DIR/app-$(date -u +%Y%m%dT%H%M%SZ).log"
     mv "$APP_LOG" "$rotated"
@@ -380,8 +385,8 @@ else
   rotate_app_log_if_needed
   if [ "$APP_MODE" = "dev" ]; then
     c_info "启动 Web + worker [dev/turbopack] ..."
-    nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
-      pnpm run dev >> "$APP_LOG" 2>&1 &
+    nohup env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
+      pnpm run dev < /dev/null >> "$APP_LOG" 2>&1 &
   else
     # prd: 确保 build 产物存在
     if [ ! -d ".next" ] || [ ! -f ".next/BUILD_ID" ]; then
@@ -389,8 +394,8 @@ else
       pnpm run build
     fi
     c_info "启动 Web + worker [prd] ..."
-    nohup setsid env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
-      pnpm run start:all >> "$APP_LOG" 2>&1 &
+    nohup env PORT="$PORT" HOSTNAME="$WEB_LISTEN_HOST" \
+      pnpm run start:all < /dev/null >> "$APP_LOG" 2>&1 &
   fi
   app_pid=$!
   echo "$app_pid" > "$APP_PID_FILE"

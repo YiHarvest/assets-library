@@ -4,7 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool, RowDataPacket } from "mysql2/promise";
-import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import {
   closeDatabase,
   inspectDatabaseConnection,
@@ -21,13 +30,19 @@ import {
   videoSources,
 } from "@/server/db/schema";
 import type { ObjectStorage } from "@/server/storage/object-storage";
+import {
+  bindIntegrationDatabaseEnvironment,
+  integrationApplicationTables as applicationTables,
+  truncateIntegrationTables,
+} from "../helpers/integration-database";
 
 const searchAnalysisMock = vi.hoisted(() => vi.fn());
 const deleteAnalysisMock = vi.hoisted(() => vi.fn(async () => undefined));
+const semanticSearchEnabledMock = vi.hoisted(() => vi.fn(() => true));
 vi.mock("@/server/search/chroma", () => ({
   searchAnalysis: searchAnalysisMock,
   deleteAnalysis: deleteAnalysisMock,
-  semanticSearchEnabled: () => true,
+  semanticSearchEnabled: semanticSearchEnabledMock,
 }));
 
 try {
@@ -40,47 +55,7 @@ try {
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const mysqlTest = testDatabaseUrl ? describe : describe.skip;
 
-const applicationTables = [
-  "analysis_results",
-  "asset_tag_rejections",
-  "asset_tags",
-  "assets",
-  "callback_deliveries",
-  "idempotency_requests",
-  "jobs",
-  "media_objects",
-  "outbox_events",
-  "search_index_state",
-  "tags",
-  "task_item_segments",
-  "task_items",
-  "tasks",
-  "users",
-  "video_sources",
-] as const;
-
 type Repository = typeof import("@/server/repositories/assets");
-
-function assertDedicatedTestDatabase(url: string) {
-  const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
-  if (!name.endsWith("_test")) {
-    throw new Error("TEST_DATABASE_URL 必须指向以 _test 结尾的独立测试库。");
-  }
-}
-
-/** 仅清空专用测试库中的业务表，绝不删除数据库或生产 schema。 */
-async function truncateApplicationTables(pool: Pool) {
-  const connection = await pool.getConnection();
-  try {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 0");
-    for (const table of applicationTables) {
-      await connection.query(`TRUNCATE TABLE \`${table}\``);
-    }
-  } finally {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 1");
-    connection.release();
-  }
-}
 
 mysqlTest("MySQL 数据层", () => {
   let migrationConnection: DatabaseConnection;
@@ -90,8 +65,8 @@ mysqlTest("MySQL 数据层", () => {
 
   beforeAll(async () => {
     if (!testDatabaseUrl) return;
-    assertDedicatedTestDatabase(testDatabaseUrl);
-    process.env.DATABASE_URL = testDatabaseUrl;
+    // 必须先同步模式库名，否则 loadConfig 会把已校验 URL 覆写回开发库。
+    bindIntegrationDatabaseEnvironment(testDatabaseUrl);
     migrationConnection = await initializeDatabase({
       url: testDatabaseUrl,
       sslCaPath: process.env.DATABASE_SSL_CA_PATH || undefined,
@@ -103,12 +78,26 @@ mysqlTest("MySQL 数据层", () => {
   }, 30_000);
 
   beforeEach(async () => {
-    await truncateApplicationTables(migrationConnection.pool);
+    semanticSearchEnabledMock.mockReset().mockReturnValue(true);
+    await truncateIntegrationTables(migrationConnection.pool);
+  });
+
+  afterEach(async () => {
+    // 即使用例断言失败也清理，避免最后一个 seedAsset 留在下次启动的 WebUI 中。
+    if (migrationConnection) {
+      await truncateIntegrationTables(migrationConnection.pool);
+    }
   });
 
   afterAll(async () => {
-    if (repositoryPool) await repositoryPool.end();
-    if (migrationConnection) await closeDatabase(migrationConnection);
+    try {
+      if (migrationConnection) {
+        await truncateIntegrationTables(migrationConnection.pool);
+      }
+    } finally {
+      if (repositoryPool) await repositoryPool.end();
+      if (migrationConnection) await closeDatabase(migrationConnection);
+    }
   });
 
   async function insertSchedulingTask(id: string, createdAt: Date) {
@@ -1901,6 +1890,14 @@ mysqlTest("MySQL 数据层", () => {
       name: "ai-irrelevant",
       tags: [{ category: "object", value: "AI" }],
     });
+    const thirdAiAsset = await seedAsset({
+      name: "ai-third",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    const suppressedAiAsset = await seedAsset({
+      name: "ai-suppressed",
+      tags: [{ category: "object", value: "AI" }],
+    });
     searchAnalysisMock.mockImplementation(
       async (_query: string, _limit: number, candidateIds?: string[]) =>
         new Map(
@@ -1942,39 +1939,126 @@ mysqlTest("MySQL 数据层", () => {
       false,
     );
 
-    const typoAsset = await seedAsset({
-      name: "typo-fallback",
-      tags: [{ category: "scene", value: "城市" }],
-    });
-    const weakContainsAsset = await seedAsset({
-      name: "weak-contains",
-      tags: [{ category: "style", value: "古城巿风光" }],
-    });
-    const typoSearch = await repository.queryAssetsPage({
-      keywords: ["城巿"],
+    searchAnalysisMock.mockImplementation(
+      async (_query: string, _limit: number, candidateIds?: string[]) =>
+        new Map(
+          (candidateIds ?? []).map((assetId) => [
+            assetId,
+            assetId === relevantAiAsset
+              ? 0.4
+              : assetId === irrelevantAiAsset
+                ? 0.3
+                : assetId === thirdAiAsset
+                  ? 0.2
+                  : 0.1,
+          ]),
+        ),
+    );
+    const lowSemanticAiSearch = await repository.queryAssetsPage({
+      keywords: ["ai"],
       limit: 100,
     });
-    expect(typoSearch.items.map((item) => item.id)).toEqual([typoAsset]);
-    expect(typoSearch).toMatchObject({
-      total: 1,
+    expect(lowSemanticAiSearch.items.map((item) => item.id)).toEqual([
+      relevantAiAsset,
+      irrelevantAiAsset,
+      thirdAiAsset,
+    ]);
+    expect(lowSemanticAiSearch).toMatchObject({
+      total: 3,
       search: {
         mode: "keyword",
-        threshold: 0.4,
-        max_score: 0.55,
+        threshold: 0.6,
+        max_score: 1,
         reason: "matched",
         message: null,
       },
     });
-    expect(typoSearch.items[0]).toMatchObject({
-      searchScore: 0.55,
-      keywordScore: 0.55,
-      matchType: "typo",
-      matchedTerms: ["城巿"],
-      matchedCategories: ["scene"],
+    expect(
+      lowSemanticAiSearch.items.every(
+        (item) => item.searchScore === 1 && item.matchType === "exact",
+      ),
+    ).toBe(true);
+    expect(
+      lowSemanticAiSearch.items.some((item) => item.id === suppressedAiAsset),
+    ).toBe(false);
+
+    const semanticCallsBeforeFallback = searchAnalysisMock.mock.calls.length;
+    semanticSearchEnabledMock.mockReturnValueOnce(false);
+    const unavailableSemanticAiSearch = await repository.queryAssetsPage({
+      keywords: ["AI"],
+      limit: 100,
     });
-    expect(typoSearch.items.some((item) => item.id === weakContainsAsset)).toBe(
-      false,
+    expect(searchAnalysisMock).toHaveBeenCalledTimes(semanticCallsBeforeFallback);
+    expect(unavailableSemanticAiSearch.items).toHaveLength(3);
+    expect(unavailableSemanticAiSearch.search).toMatchObject({
+      mode: "keyword",
+      threshold: 0.6,
+      max_score: 1,
+      reason: "matched",
+      message: null,
+    });
+
+    const exactCityAsset = await seedAsset({
+      name: "exact-city",
+      userId: "city-scope",
+      tags: [{ category: "scene", value: "城市" }],
+    });
+    const containsCityAsset = await seedAsset({
+      name: "contains-city",
+      userId: "city-scope",
+      tags: [{ category: "style", value: "古城市风光" }],
+    });
+    const citySearch = await repository.queryAssetsPage({
+      userId: "city-scope",
+      keywords: ["城市"],
+      limit: 100,
+    });
+    expect(new Set(citySearch.items.map((item) => item.id))).toEqual(
+      new Set([exactCityAsset, containsCityAsset]),
     );
+    expect(citySearch.items.find((item) => item.id === containsCityAsset)).toMatchObject({
+      searchScore: 0.648,
+      matchType: "contains",
+    });
+
+    const wholeTypoAsset = await seedAsset({
+      name: "whole-query-typo",
+      userId: "typo-scope",
+      tags: [{ category: "style", value: "古城巿风光" }],
+    });
+    const wholeTypoSearch = await repository.queryAssetsPage({
+      userId: "typo-scope",
+      keywords: ["古城市风光"],
+      limit: 100,
+    });
+    expect(wholeTypoSearch.items.map((item) => item.id)).toEqual([
+      wholeTypoAsset,
+    ]);
+    expect(wholeTypoSearch.items[0]).toMatchObject({
+      searchScore: 0.495,
+      keywordScore: 0.495,
+      matchType: "typo",
+      matchedTerms: ["古城市风光"],
+    });
+
+    const tokenAsset = await seedAsset({
+      name: "one-exact-token",
+      userId: "token-scope",
+      tags: [{ category: "object", value: "小船" }],
+    });
+    for (const query of ["blue 小船", "小船 dsfj"]) {
+      const tokenSearch = await repository.queryAssetsPage({
+        userId: "token-scope",
+        keywords: [query],
+        limit: 100,
+      });
+      expect(tokenSearch.items.map((item) => item.id)).toEqual([tokenAsset]);
+      expect(tokenSearch.items[0]).toMatchObject({
+        searchScore: 0.85,
+        matchType: "exact",
+        matchedTerms: ["小船"],
+      });
+    }
 
     searchAnalysisMock.mockImplementation(
       async (_query: string, _limit: number, candidateIds?: string[]) =>

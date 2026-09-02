@@ -10,6 +10,7 @@ import {
   normalizeSearchText,
   normalizeSemanticText,
   scoreKeywordRelevance,
+  selectBroadQueryRecallTier,
   tokenizeKeywordQuery,
 } from "@/server/search/relevance";
 
@@ -120,6 +121,41 @@ describe("search relevance", () => {
     ]);
   });
 
+  it("keeps exact evidence eligible when other query tokens do not match", () => {
+    for (const query of ["blue 小船", "小船 dsfj"]) {
+      expect(
+        scoreKeywordRelevance(query, [
+          { value: "小船", category: "object" },
+        ]),
+      ).toMatchObject({
+        score: 0.85,
+        coverage: 0.5,
+        matchedTokens: ["小船"],
+      });
+    }
+  });
+
+  it("recalls contains matches and preserves whole-query typo evidence", () => {
+    expect(
+      scoreKeywordRelevance("城市", [
+        { value: "古城市风光", category: "scene" },
+      ]),
+    ).toMatchObject({ score: 0.72, matchedTokens: ["城市"] });
+
+    const typo = scoreKeywordRelevance(
+      "古城市风光",
+      [{ value: "古城巿风光", category: "style" }],
+      { allowTypo: true },
+    );
+    expect(typo).toMatchObject({
+      score: 0.495,
+      coverage: 1,
+      matchedTokens: ["古城市风光"],
+      unmatchedTokens: [],
+    });
+    expect(typo.evidence[0]).toMatchObject({ matchType: "typo" });
+  });
+
   it("chooses the strongest tag evidence for each query token", () => {
     const result = scoreKeywordRelevance("夜景", [
       { value: "城市夜景", category: "scene" },
@@ -144,9 +180,36 @@ describe("search relevance", () => {
     expect(hybridRelevanceScore(null, null)).toBe(0);
   });
 
+  it("uses semantic gating for broad AI terms without penalizing exact fallback", () => {
+    expect(
+      selectBroadQueryRecallTier(
+        [
+          { assetId: "relevant", lexicalScore: 1, semanticScore: 0.9 },
+          { assetId: "irrelevant", lexicalScore: 1, semanticScore: 0.1 },
+        ],
+        0.55,
+      ),
+    ).toEqual({ assetIds: ["relevant"], useSemanticRerank: true });
+
+    expect(
+      selectBroadQueryRecallTier(
+        [
+          { assetId: "best-low", lexicalScore: 1, semanticScore: 0.4 },
+          { assetId: "second-low", lexicalScore: 1, semanticScore: 0.2 },
+          { assetId: "third-low", lexicalScore: 1 },
+          { assetId: "suppressed", lexicalScore: 1, semanticScore: 0.1 },
+        ],
+        0.55,
+      ),
+    ).toEqual({
+      assetIds: ["best-low", "second-low", "suppressed"],
+      useSemanticRerank: false,
+    });
+  });
+
   it("exports separate defaults for strong, typo, semantic, and hybrid paths", () => {
     expect(DEFAULT_RELEVANCE_THRESHOLDS).toEqual({
-      strongKeyword: 0.7,
+      strongKeyword: 0.6,
       typoFallback: 0.4,
       semantic: 0.55,
       hybrid: 0.65,

@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ChevronDown, Globe2, UserRound, UsersRound } from "lucide-react";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
+import { WebUiLink } from "@/components/webui-link";
 import type { UserDirectoryEntry } from "@/shared/contracts";
 
 interface UserOption extends UserDirectoryEntry {
@@ -26,9 +25,8 @@ export function AssetScopeSwitcher({
   publicHref: string;
   users: UserOption[];
 }) {
-  const router = useRouter();
   const [pickerOpen, setPickerOpen] = useState(Boolean(currentUserId));
-  const [isPending, startTransition] = useTransition();
+  const [isNavigating, setIsNavigating] = useState(false);
   const isPersonal = Boolean(currentUserId);
   const currentUserIsRegistered = users.some(
     (user) => user.user_id === currentUserId,
@@ -41,7 +39,9 @@ export function AssetScopeSwitcher({
   const selectUser = (userId: string) => {
     const user = users.find((candidate) => candidate.user_id === userId);
     if (!user) return;
-    startTransition(() => router.push(user.href));
+    setIsNavigating(true);
+    // rewrite 部署下必须整页跳转，确保公开前缀和 WebUI Cookie 一起交给服务端。
+    window.location.assign(user.href);
   };
 
   return (
@@ -63,7 +63,7 @@ export function AssetScopeSwitcher({
         className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1 dark:bg-white/[0.10]"
         aria-label="素材库范围"
       >
-        <Link
+        <WebUiLink
           href={publicHref}
           aria-current={!isPersonal ? "page" : undefined}
           onClick={() => setPickerOpen(false)}
@@ -75,7 +75,7 @@ export function AssetScopeSwitcher({
         >
           <Globe2 className="size-3.5" aria-hidden="true" />
           公共素材
-        </Link>
+        </WebUiLink>
         <button
           type="button"
           aria-pressed={isPersonal}
@@ -104,12 +104,12 @@ export function AssetScopeSwitcher({
               <select
                 id="asset-user"
                 value={currentUserIsRegistered ? currentUserId : ""}
-                disabled={isPending}
+                disabled={isNavigating}
                 onChange={(event) => selectUser(event.target.value)}
                 className="h-10 w-full appearance-none rounded-full border border-black/[0.08] bg-white/85 py-2 pl-4 pr-10 text-sm text-slate-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 disabled:opacity-60 dark:border-white/[0.12] dark:bg-white/[0.10] dark:text-slate-100"
               >
                 <option value="" disabled>
-                  {isPending ? "正在切换用户" : "请选择用户"}
+                  {isNavigating ? "正在切换用户" : "请选择用户"}
                 </option>
                 {users.map((user) => (
                   <option key={user.user_id} value={user.user_id}>

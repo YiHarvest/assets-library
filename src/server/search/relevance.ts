@@ -1,7 +1,7 @@
 /** Pure helpers shared by lexical recall and semantic re-ranking. */
 
 export const DEFAULT_RELEVANCE_THRESHOLDS = {
-  strongKeyword: 0.7,
+  strongKeyword: 0.6,
   typoFallback: 0.4,
   semantic: 0.55,
   hybrid: 0.65,
@@ -344,7 +344,7 @@ export function scoreKeywordRelevance(
     ? tokens.filter((token) => !isIntentMarker(token))
     : tokens;
   const effectiveTokens = scoringTokens.length ? scoringTokens : tokens;
-  const evidence = effectiveTokens.flatMap((token) => {
+  const bestEvidence = (token: string) => {
     let best: TagMatchEvidence | null = null;
     for (const tag of tags) {
       const match = classifyTagMatch(token, tag.value, options);
@@ -361,6 +361,10 @@ export function scoreKeywordRelevance(
       };
       if (!best || candidate.score > best.score) best = candidate;
     }
+    return best;
+  };
+  const evidence = effectiveTokens.flatMap((token) => {
+    const best = bestEvidence(token);
     return best ? [best] : [];
   });
   const matched = new Set(evidence.map((item) => item.token));
@@ -368,9 +372,45 @@ export function scoreKeywordRelevance(
   const meanMatched = evidence.length
     ? evidence.reduce((sum, item) => sum + item.score, 0) / evidence.length
     : 0;
+  // 搜索框的一整段自由文本允许夹带无效词；结构化 token 数组仍保留 AND 覆盖率语义。
+  const exactOrAliasFloor = typeof queryOrTokens === "string"
+    ? Math.max(
+        0,
+        ...evidence
+          .filter(
+            (item) => item.matchType === "exact" || item.matchType === "alias",
+          )
+          .map((item) => item.score * 0.85),
+      )
+    : 0;
+  const tokenScore = clampRelevanceScore(
+    Math.max(meanMatched * coverage, exactOrAliasFloor),
+  );
+
+  const wholeQuery = typeof queryOrTokens === "string"
+    ? normalizeSearchText(queryOrTokens)
+    : null;
+  const wholeEvidence = wholeQuery && effectiveTokens.length > 1
+    ? bestEvidence(wholeQuery)
+    : null;
+  // 分词可能把一个仅有一字之差的完整标签拆散；整句 typo 证据优先进入兜底层。
+  if (
+    wholeEvidence &&
+    (wholeEvidence.score > tokenScore ||
+      (wholeEvidence.matchType === "typo" && coverage < 1))
+  ) {
+    return {
+      score: wholeEvidence.score,
+      coverage: 1,
+      matchedTokens: [wholeQuery!],
+      unmatchedTokens: [],
+      evidence: [wholeEvidence],
+    };
+  }
 
   return {
-    score: clampRelevanceScore(meanMatched * coverage),
+    // 自由文本中的 exact/alias 是强证据；其余未命中词只降低排序。
+    score: tokenScore,
     coverage: clampRelevanceScore(coverage),
     matchedTokens: effectiveTokens.filter((token) => matched.has(token)),
     unmatchedTokens: effectiveTokens.filter((token) => !matched.has(token)),
@@ -410,6 +450,64 @@ export function hybridRelevanceScore(
       clampRelevanceScore(semanticScore) * semanticWeight) /
       totalWeight,
   );
+}
+
+export interface BroadQueryRecallCandidate {
+  assetId: string;
+  lexicalScore: number;
+  semanticScore?: number | null;
+}
+
+export interface BroadQueryRecallTier {
+  assetIds: string[];
+  useSemanticRerank: boolean;
+}
+
+/**
+ * 宽泛标签先尝试用语义阈值去噪；如果语义不可用或全部低分，则保留有限数量的
+ * 强词法命中。不能把缺失语义分当成 0 去惩罚 exact 标签，否则 AI=1 会被压成 0.4。
+ */
+export function selectBroadQueryRecallTier(
+  candidates: readonly BroadQueryRecallCandidate[],
+  semanticThreshold: number,
+  lexicalFallbackLimit = 3,
+): BroadQueryRecallTier {
+  const indexed = candidates.map((candidate, index) => ({ candidate, index }));
+  const semanticMatches = indexed
+    .filter(
+      ({ candidate }) =>
+        candidate.semanticScore !== null &&
+        candidate.semanticScore !== undefined &&
+        candidate.semanticScore > semanticThreshold,
+    )
+    .sort(
+      (left, right) =>
+        (right.candidate.semanticScore ?? 0) -
+          (left.candidate.semanticScore ?? 0) ||
+        right.candidate.lexicalScore - left.candidate.lexicalScore ||
+        left.index - right.index,
+    );
+  if (semanticMatches.length) {
+    return {
+      assetIds: semanticMatches.map(({ candidate }) => candidate.assetId),
+      useSemanticRerank: true,
+    };
+  }
+
+  const safeFallbackLimit = Math.max(0, Math.floor(lexicalFallbackLimit));
+  return {
+    assetIds: indexed
+      .sort(
+        (left, right) =>
+          (right.candidate.semanticScore ?? -1) -
+            (left.candidate.semanticScore ?? -1) ||
+          right.candidate.lexicalScore - left.candidate.lexicalScore ||
+          left.index - right.index,
+      )
+      .slice(0, safeFallbackLimit)
+      .map(({ candidate }) => candidate.assetId),
+    useSemanticRerank: false,
+  };
 }
 
 export type SearchInputMode = "keyword" | "semantic";

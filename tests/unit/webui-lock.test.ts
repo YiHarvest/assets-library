@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWebUiSession,
   isProtectedWebUiPath,
+  legacyWebUiCookieDeletion,
   normalizeBasePath,
   readCookie,
   readWebUiLockConfig,
   safeWebUiReturnPath,
   stripAppBasePath,
   verifyWebUiSession,
+  webUiCookiePath,
   WEBUI_LOCK_SESSION_SECONDS,
 } from "@/server/auth/webui-lock";
 import {
@@ -86,6 +88,20 @@ describe("WebUI lock primitives", () => {
     expect(normalizeBasePath(" //feisu//assets-library// ")).toBe(
       "/feisu/assets-library",
     );
+  });
+
+  it("keeps the signed session on both sides of the rewrite boundary", () => {
+    expect(
+      webUiCookiePath({ NEXT_PUBLIC_BASE_PATH: "/feisu/assets-library" }),
+    ).toBe("/");
+    expect(webUiCookiePath({ NEXT_PUBLIC_BASE_PATH: "" })).toBe("/");
+    expect(
+      legacyWebUiCookieDeletion({
+        APP_MODE: "prd",
+        NEXT_PUBLIC_BASE_PATH: "/feisu/assets-library",
+      }),
+    ).toContain("Path=/feisu/assets-library");
+    expect(legacyWebUiCookieDeletion({ NEXT_PUBLIC_BASE_PATH: "" })).toBeNull();
   });
 
   it("parses credentials without exposing prefix or timing shortcuts", () => {

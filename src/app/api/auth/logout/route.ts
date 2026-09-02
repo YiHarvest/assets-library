@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  legacyWebUiCookieDeletion,
   webUiCookiePath,
   WEBUI_LOCK_COOKIE_NAME,
 } from "@/server/auth/webui-lock";
@@ -17,6 +18,9 @@ export function POST(request: Request) {
     maxAge: 0,
     path: webUiCookiePath(),
   });
+  // 迁移期间同时删除旧前缀 Cookie，否则退出后访问前缀页面仍可能被旧会话放行。
+  const legacyCookie = legacyWebUiCookieDeletion();
+  if (legacyCookie) response.headers.append("set-cookie", legacyCookie);
   response.headers.set("cache-control", "no-store");
   return response;
 }

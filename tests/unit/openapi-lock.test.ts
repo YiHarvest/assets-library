@@ -48,7 +48,7 @@ describe("OpenAPI and unlock authorization", () => {
     expect(response.status).toBe(200);
   });
 
-  it("sets a scoped secure HttpOnly cookie after a valid unlock", async () => {
+  it("sets a root-scoped secure HttpOnly cookie after a valid unlock", async () => {
     enableLock();
     const body = new URLSearchParams({
       key,
@@ -65,12 +65,19 @@ describe("OpenAPI and unlock authorization", () => {
     expect(response.headers.get("location")).toBe(
       "https://media.example.com/feisu/assets-library/",
     );
-    const cookie = response.headers.get("set-cookie")!;
-    expect(cookie).toContain(`${WEBUI_LOCK_COOKIE_NAME}=`);
-    expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("Secure");
-    expect(cookie).toContain("SameSite=lax");
-    expect(cookie).toContain("Path=/feisu/assets-library");
+    const cookies = response.headers.getSetCookie();
+    const sessionCookie = cookies.find(
+      (cookie) => cookie.includes(`${WEBUI_LOCK_COOKIE_NAME}=`) &&
+        !cookie.includes("Max-Age=0"),
+    );
+    expect(sessionCookie).toContain("HttpOnly");
+    expect(sessionCookie).toContain("Secure");
+    expect(sessionCookie).toContain("SameSite=lax");
+    expect(sessionCookie).toMatch(/(?:^|; )Path=\/(?:;|$)/);
+    expect(cookies).toContainEqual(
+      expect.stringContaining("Path=/feisu/assets-library"),
+    );
+    expect(cookies).toContainEqual(expect.stringContaining("Max-Age=0"));
   });
 
   it("does not share the fallback rate-limit bucket across user agents", async () => {
@@ -97,7 +104,7 @@ describe("OpenAPI and unlock authorization", () => {
     expect((await request(key, "rate-limit-agent-b")).status).toBe(303);
   });
 
-  it("clears the scoped session on logout", () => {
+  it("clears the root-scoped session on logout", () => {
     enableLock();
     const response = logout(
       new Request("https://media.example.com/feisu/assets-library/api/auth/logout", {
@@ -108,10 +115,13 @@ describe("OpenAPI and unlock authorization", () => {
     expect(response.headers.get("location")).toBe(
       "https://media.example.com/feisu/assets-library/lock",
     );
-    const cookie = response.headers.get("set-cookie")!;
-    expect(cookie).toContain(`${WEBUI_LOCK_COOKIE_NAME}=`);
-    expect(cookie).toContain("Max-Age=0");
-    expect(cookie).toContain("Path=/feisu/assets-library");
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toHaveLength(2);
+    expect(cookies).toContainEqual(expect.stringMatching(/Path=\/(?:;|$)/));
+    expect(cookies).toContainEqual(
+      expect.stringContaining("Path=/feisu/assets-library"),
+    );
+    expect(cookies.every((cookie) => cookie.includes("Max-Age=0"))).toBe(true);
   });
 });
 

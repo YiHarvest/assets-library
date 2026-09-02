@@ -179,8 +179,9 @@ export function AssetEditor({
         body: JSON.stringify({ user_id: asset.user_id }),
       });
       await waitForTask(task);
-      router.push(appUrl("/"));
-      router.refresh();
+      // 生产页面前缀由 rewrite 提供，删除后使用整页导航避免 Next Router
+      // 把带前缀地址误判为应用内部路由并触发客户端错误。
+      window.location.assign(appUrl("/"));
     });
 
   return (

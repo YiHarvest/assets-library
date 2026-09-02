@@ -16,6 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
+import { detectSearchInputMode } from "@/server/search/relevance";
 import type {
   AssetQueryResponse,
   UserDirectoryResponse,
@@ -91,6 +92,7 @@ export default async function OverviewPage({
     view === "published"
       ? firstParameter(parameters.tag)?.trim().slice(0, 128) ?? ""
       : "";
+  const searchMode = tagQuery ? detectSearchInputMode(tagQuery) : null;
   const userId = firstParameter(parameters.user_id)?.trim().slice(0, 191) ?? "";
   const cursor = firstParameter(parameters.cursor) ?? null;
   const history = decodeHistory(firstParameter(parameters.history));
@@ -101,7 +103,11 @@ export default async function OverviewPage({
     serverApiV1<AssetQueryResponse>("/assets/query", {
       method: "POST",
       body: JSON.stringify({
-        ...(tagQuery ? { keywords: [tagQuery] } : {}),
+        ...(searchMode === "semantic"
+          ? { query: tagQuery }
+          : searchMode === "keyword"
+            ? { keywords: [tagQuery] }
+            : {}),
         filter: {
           user_scope: userScope,
           review_statuses: [
@@ -274,9 +280,15 @@ export default async function OverviewPage({
                 : "已经完成审核并正式入库的素材。"}
           </p>
         </div>
-        <span className="shrink-0 text-sm tabular-nums text-slate-500 dark:text-slate-400">
-          {total} 项
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-0.5 text-sm tabular-nums text-slate-500 dark:text-slate-400">
+          <span>{total} 项</span>
+          {page.search?.max_score !== null &&
+            page.search?.max_score !== undefined && (
+              <span className="text-xs">
+                最高相关度 {(page.search.max_score * 100).toFixed(0)}%
+              </span>
+            )}
+        </div>
       </div>
 
       {page.items.length === 0 ? (
@@ -294,7 +306,7 @@ export default async function OverviewPage({
             </h2>
             <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
               {tagQuery
-                ? `没有素材匹配“${tagQuery}”。`
+                ? page.search?.message ?? `没有素材匹配“${tagQuery}”。`
                 : "新上传素材完成处理后会显示在对应视图。"}
             </p>
             <Button asChild className="mt-6">

@@ -286,9 +286,23 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 - `{ "mode": "all" }`：公共素材和所有用户素材。
 - `{ "mode": "exclude_user", "user_id": "..." }`：公共素材和除指定用户外的素材。
 
-成功响应包含 `items`、`next_cursor`、`has_more` 和可为 `null` 的
-`tag_statistics`。素材摘要字段全部为 `snake_case`；视频切片会返回
-`parent_video_id` 和 `segment_index`。
+成功响应包含 `items`、`next_cursor`、`has_more`、可为 `null` 的
+`tag_statistics`，以及可为 `null` 的 `search`。素材摘要字段全部为
+`snake_case`；视频切片会返回 `parent_video_id` 和 `segment_index`。
+
+关键词搜索会先分词，再依次执行精确/别名、前缀、包含匹配；只有强匹配没有
+合格结果时才启用错别字兜底。场景、图片风格和视频形式会按标签分类参与权重
+计算。自然语言应放入 `query`，使用完整文本执行语义搜索，不使用关键词分词
+结果代替原句。
+
+所有检索分数统一在 `[0,1]` 范围内。系统先为候选计算最终分数，再过滤未超过
+阈值的素材，之后才统计、排序和分页。因此 `total`、标签统计和实际返回项均不
+包含低于阈值的候选。`AI`、`AIGC`、`人工智能` 等宽泛别名会走关键词与语义
+融合排序，避免仅因拥有相同宽泛标签而全部同分返回。
+
+当前默认展示阈值为：强关键词 `0.70`、仅在强匹配为空时启用的错别字兜底
+`0.40`、自然语言语义搜索 `0.55`、宽泛 AI 词的关键词/语义融合 `0.65`；比较规则
+均为严格大于（`score > threshold`）。
 
 | 素材摘要字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -303,7 +317,67 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 | `tags` | `Tag[]` | 分类、值、来源和可选置信度。 |
 | `media_url` | `string` | 已附带必要用户作用域的媒体相对 URL。 |
 | `created_at` / `updated_at` | `string(date-time)` | 上海时区 ISO 8601 时间。 |
-| `search_score` / `semantic_score` | `number?` | 仅检索命中时可能出现的排序诊断分。 |
+| `search_score` | `number?` | `[0,1]` 最终排序分；检索命中时返回。 |
+| `keyword_score` / `semantic_score` | `number?` | `[0,1]` 关键词分和语义分；未参与计算的分项省略。 |
+| `match_type` | `string?` | `exact`、`alias`、`prefix`、`contains`、`typo`、`semantic` 或 `hybrid`。 |
+| `matched_terms` | `string[]?` | 实际命中的规范化查询词。 |
+| `matched_categories` | `string[]?` | 命中标签所属分类，如 `scene`、`style`、`form`。 |
+
+有合格结果时，`search.message` 为 `null`：
+
+```json
+{
+  "items": [
+    {
+      "asset_id": "00000000-0000-4000-8000-000000000001",
+      "search_score": 0.86,
+      "keyword_score": 1,
+      "semantic_score": 0.767,
+      "match_type": "hybrid",
+      "matched_terms": ["ai"],
+      "matched_categories": ["style"]
+    }
+  ],
+  "next_cursor": null,
+  "has_more": false,
+  "tag_statistics": null,
+  "search": {
+    "mode": "hybrid",
+    "threshold": 0.65,
+    "max_score": 0.86,
+    "reason": "matched",
+    "message": null
+  }
+}
+```
+
+示例仅展示检索相关字段，实际素材项还包含上表中的必填摘要字段。普通浏览时
+`search` 为 `null`。搜索没有可展示素材时，`items` 保持空数组，`search` 提供
+机器可读原因和可直接展示的消息：
+
+```json
+{
+  "items": [],
+  "next_cursor": null,
+  "has_more": false,
+  "tag_statistics": null,
+  "search": {
+    "mode": "semantic",
+    "threshold": 0.55,
+    "max_score": 0.49,
+    "reason": "below_threshold",
+    "message": "找到候选素材，但最高匹配分为 0.490，未超过展示阈值 0.550。"
+  }
+}
+```
+
+`search.reason` 的取值如下：
+
+- `matched`：存在超过阈值的结果，此时 `message` 为 `null`。
+- `no_candidates`：召回阶段没有候选，`max_score` 为 `null`。
+- `below_threshold`：存在候选，但最高分未超过阈值。
+- `semantic_unavailable`：语义服务暂不可用，`max_score` 为 `null`。
+- `fallback_exhausted`：强匹配和错别字兜底均无合格结果。
 
 ### `GET /api/v1/assets/{asset_id}`
 
@@ -340,11 +414,12 @@ worker 会按 LLM 分段顺序在 ASR 文本中逐字对齐，生成秒制
 `group_id`。`high_light_word` 会转换为 `keyword`；LLM 每个 segment 上的其他
 字段会继续保留。若分段文本无法按顺序与 ASR 对齐，任务进入失败终态。
 
-每个分段都复用现有 `searchAssetsByDescription` 描述语义匹配：候选范围是所有
-已发布的公共及个人素材，Chroma 相似度必须大于 `0.45`，按相似度降序只取一个。
-命中后增加 `matched_candidate_url`、`matched_candidate_type` 和
-`matched_candidate_desc`；未达阈值时不返回这三个字段。个人素材 URL 会自动附加
-`user_id`。当前 `asset_url_list` 仅作为旧契约兼容字段接收，不限制候选范围。
+每个分段都复用描述语义匹配：候选范围是所有已发布的公共及个人素材，归一化
+相似度必须严格大于 `0.55`，按相似度降序只取一个。每段始终返回六个
+`matched_candidate_*` 字段。命中时 URL、类型、描述和 `[0,1]` 分数有值，
+`reason` / `message` 为 `null`；未命中时前三项为 `null`，若存在低分候选则
+`score` 返回阈值过滤前最高分，并通过 `reason` / `message` 说明原因。个人素材 URL
+会自动附加 `user_id`。当前 `asset_url_list` 仅作为旧契约兼容字段接收，不限制候选范围。
 
 成功后系统向 `callback_url` 发送：
 
@@ -365,7 +440,10 @@ worker 会按 LLM 分段顺序在 ASR 文本中逐字对齐，生成秒制
         "end_time": 2.2,
         "matched_candidate_url": "https://example.com/api/v1/media/asset-id?v=1",
         "matched_candidate_type": "video",
-        "matched_candidate_desc": "夕阳下女性剪影"
+        "matched_candidate_desc": "夕阳下女性剪影",
+        "matched_candidate_score": 0.91,
+        "matched_candidate_reason": null,
+        "matched_candidate_message": null
       }
     ]
   },

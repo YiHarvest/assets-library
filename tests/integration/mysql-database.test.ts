@@ -27,6 +27,7 @@ const deleteAnalysisMock = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("@/server/search/chroma", () => ({
   searchAnalysis: searchAnalysisMock,
   deleteAnalysis: deleteAnalysisMock,
+  semanticSearchEnabled: () => true,
 }));
 
 try {
@@ -1859,6 +1860,21 @@ mysqlTest("MySQL 数据层", () => {
         limit: 100,
       })).total,
     ).toBe(1);
+    const scopedEmptySearch = await repository.queryAssetsPage({
+      ...options,
+      userId: "user-without-assets",
+      limit: 100,
+    });
+    expect(scopedEmptySearch).toMatchObject({
+      items: [],
+      total: 0,
+      search: {
+        mode: "keyword",
+        reason: "no_candidates",
+        max_score: null,
+      },
+    });
+    expect(scopedEmptySearch.search?.message).toBeTruthy();
     expect(
       (await repository.queryAssetsPage({
         excludeUserId: "user-a",
@@ -1876,6 +1892,89 @@ mysqlTest("MySQL 数据层", () => {
     });
     expect(beyondLastPage.items).toEqual([]);
     expect(beyondLastPage.page).toBe(999);
+
+    const relevantAiAsset = await seedAsset({
+      name: "ai-relevant",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    const irrelevantAiAsset = await seedAsset({
+      name: "ai-irrelevant",
+      tags: [{ category: "object", value: "AI" }],
+    });
+    searchAnalysisMock.mockImplementation(
+      async (_query: string, _limit: number, candidateIds?: string[]) =>
+        new Map(
+          (candidateIds ?? []).map((assetId) => [
+            assetId,
+            assetId === relevantAiAsset ? 0.9 : 0.1,
+          ]),
+        ),
+    );
+    const broadAiSearch = await repository.queryAssetsPage({
+      keywords: ["AI"],
+      limit: 100,
+      includeTagStatistics: true,
+    });
+    expect(broadAiSearch.items.map((item) => item.id)).toEqual([
+      relevantAiAsset,
+    ]);
+    expect(broadAiSearch).toMatchObject({
+      total: 1,
+      totalPages: 1,
+      search: {
+        mode: "hybrid",
+        threshold: 0.65,
+        max_score: 0.94,
+        reason: "matched",
+        message: null,
+      },
+    });
+    expect(broadAiSearch.items[0]).toMatchObject({
+      searchScore: 0.94,
+      keywordScore: 1,
+      semanticScore: 0.9,
+      matchType: "hybrid",
+      matchedTerms: ["ai"],
+      matchedCategories: ["object"],
+    });
+    expect(broadAiSearch.tagStatistics?.total_assets).toBe(1);
+    expect(broadAiSearch.items.some((item) => item.id === irrelevantAiAsset)).toBe(
+      false,
+    );
+
+    const typoAsset = await seedAsset({
+      name: "typo-fallback",
+      tags: [{ category: "scene", value: "城市" }],
+    });
+    const weakContainsAsset = await seedAsset({
+      name: "weak-contains",
+      tags: [{ category: "style", value: "古城巿风光" }],
+    });
+    const typoSearch = await repository.queryAssetsPage({
+      keywords: ["城巿"],
+      limit: 100,
+    });
+    expect(typoSearch.items.map((item) => item.id)).toEqual([typoAsset]);
+    expect(typoSearch).toMatchObject({
+      total: 1,
+      search: {
+        mode: "keyword",
+        threshold: 0.4,
+        max_score: 0.55,
+        reason: "matched",
+        message: null,
+      },
+    });
+    expect(typoSearch.items[0]).toMatchObject({
+      searchScore: 0.55,
+      keywordScore: 0.55,
+      matchType: "typo",
+      matchedTerms: ["城巿"],
+      matchedCategories: ["scene"],
+    });
+    expect(typoSearch.items.some((item) => item.id === weakContainsAsset)).toBe(
+      false,
+    );
 
     searchAnalysisMock.mockImplementation(
       async (_query: string, _limit: number, candidateIds?: string[]) =>
@@ -1896,6 +1995,7 @@ mysqlTest("MySQL 数据层", () => {
       "海边的小船",
       800,
       expect.arrayContaining([first, second]),
+      { minimumSimilarity: 0 },
     );
     const semanticCandidateIds = searchAnalysisMock.mock.lastCall?.[2] as string[];
     expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
@@ -2033,6 +2133,9 @@ mysqlTest("MySQL 数据层", () => {
             transition: "fade",
             matched_candidate_type: "video",
             matched_candidate_desc: "夕阳下女性剪影，符合回忆意境",
+            matched_candidate_score: 0.91,
+            matched_candidate_reason: null,
+            matched_candidate_message: null,
           }),
         ],
       },
@@ -2041,6 +2144,7 @@ mysqlTest("MySQL 数据层", () => {
       "如果能回到二十岁",
       5,
       [assetId],
+      { minimumSimilarity: 0 },
     );
 
     const [generatedCallback] = await migrationConnection.db
@@ -2106,6 +2210,9 @@ mysqlTest("MySQL 数据层", () => {
           expect.objectContaining({
             segment_id: 1,
             matched_candidate_type: "video",
+            matched_candidate_score: 0.91,
+            matched_candidate_reason: null,
+            matched_candidate_message: null,
           }),
         ],
       },

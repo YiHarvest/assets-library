@@ -10,8 +10,9 @@ import {
   failJob,
   getAssetRecord,
   requeueJob,
-  searchAssetsByDescription,
+  searchAssetsByDescriptionDetailed,
   type ClaimedJob,
+  type DescriptionSearchResult,
 } from "@/server/repositories/assets";
 import { persistedTaskError } from "@/server/services/task-lifecycle";
 import {
@@ -45,9 +46,16 @@ export interface AlignedCompatibilitySegment extends Record<string, unknown> {
   group_id: [number, number];
   start_time: number;
   end_time: number;
-  matched_candidate_url?: string;
-  matched_candidate_type?: "image" | "video";
-  matched_candidate_desc?: string;
+}
+
+export interface MatchedCompatibilitySegment
+  extends AlignedCompatibilitySegment {
+  matched_candidate_url: string | null;
+  matched_candidate_type: "image" | "video" | null;
+  matched_candidate_desc: string | null;
+  matched_candidate_score: number | null;
+  matched_candidate_reason: DescriptionSearchResult["reason"] | null;
+  matched_candidate_message: string | null;
 }
 
 const compatibilityJobPayloadSchema = z.object({
@@ -194,18 +202,63 @@ async function mapConcurrent<T, R>(
   return results;
 }
 
-async function matchSegments(
+interface CompatibilityMatchDependencies {
+  search: typeof searchAssetsByDescriptionDetailed;
+  getAsset: (
+    assetId: string,
+  ) => Promise<{ userId: string | null; reviewStatus: string } | null>;
+}
+
+const compatibilityMatchDependencies: CompatibilityMatchDependencies = {
+  search: searchAssetsByDescriptionDetailed,
+  getAsset: getAssetRecord,
+};
+
+function unmatchedSegment(
+  segment: AlignedCompatibilitySegment,
+  diagnostic: Pick<
+    DescriptionSearchResult,
+    "maxScore" | "reason" | "message"
+  >,
+): MatchedCompatibilitySegment {
+  const reason = diagnostic.reason === "matched"
+    ? "no_candidates"
+    : diagnostic.reason;
+  return {
+    ...segment,
+    matched_candidate_url: null,
+    matched_candidate_type: null,
+    matched_candidate_desc: null,
+    matched_candidate_score: diagnostic.maxScore,
+    matched_candidate_reason: reason,
+    matched_candidate_message:
+      diagnostic.message ?? "没有可用的匹配素材。",
+  };
+}
+
+export async function matchCompatibilitySegments(
   segments: AlignedCompatibilitySegment[],
   publicOrigin: string,
+  dependencies: CompatibilityMatchDependencies = compatibilityMatchDependencies,
 ) {
   return mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
-    const [candidate] = await searchAssetsByDescription(
+    const search = await dependencies.search(
       { description: segment.text, keywords: [], limit: 1 },
       { includeAllUsers: true },
     );
-    if (!candidate) return segment;
-    const record = await getAssetRecord(candidate.id);
-    if (!record || record.reviewStatus !== "published") return segment;
+    const [candidate] = search.items;
+    if (!candidate) return unmatchedSegment(segment, search);
+    const record = await dependencies.getAsset(candidate.id);
+    const rawCandidateScore =
+      candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
+    const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
+    if (!record || record.reviewStatus !== "published") {
+      return unmatchedSegment(segment, {
+        maxScore: candidateScore,
+        reason: "no_candidates",
+        message: "匹配到的素材在生成结果前已不可用。",
+      });
+    }
     return {
       ...segment,
       matched_candidate_url: new URL(
@@ -214,7 +267,10 @@ async function matchSegments(
       ).toString(),
       matched_candidate_type: candidate.mediaType,
       matched_candidate_desc: candidate.description,
-    } satisfies AlignedCompatibilitySegment;
+      matched_candidate_score: candidateScore,
+      matched_candidate_reason: null,
+      matched_candidate_message: null,
+    } satisfies MatchedCompatibilitySegment;
   });
 }
 
@@ -245,7 +301,7 @@ async function enqueueCompatibilityCallback(
 async function finishCompatibilityTask(
   taskId: string,
   fields: Record<string, unknown>,
-  segments: AlignedCompatibilitySegment[],
+  segments: MatchedCompatibilitySegment[],
 ) {
   const now = new Date();
   const body = {
@@ -347,7 +403,7 @@ export async function createCompatibilityMatchTask(
   return { taskId, status: "processing" };
 }
 
-/** 执行兼容分段任务；素材召回复用 searchAssetsByDescription 的现有语义阈值和排序。 */
+/** 执行兼容分段任务；素材召回复用详细搜索结果的语义阈值、分数与诊断。 */
 export async function processCompatibilityMatchJob(job: ClaimedJob) {
   if (!job.taskId) {
     await failJob(job);
@@ -382,7 +438,10 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
 
   try {
     const aligned = alignCompatibilitySegments(payload.request);
-    const matched = await matchSegments(aligned, payload.publicOrigin);
+    const matched = await matchCompatibilitySegments(
+      aligned,
+      payload.publicOrigin,
+    );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);
     await completeJob(job);
   } catch (error) {

@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   alignCompatibilitySegments,
   compatibilityCallbackFromJob,
+  matchCompatibilitySegments,
 } from "@/server/services/compatibility-match";
-import { compatibilityMatchRequestSchema } from "@/shared/contracts";
+import {
+  compatibilityMatchRequestSchema,
+  type AssetSummary,
+} from "@/shared/contracts";
 
 function request() {
   return compatibilityMatchRequestSchema.parse({
@@ -68,6 +72,23 @@ function request() {
   });
 }
 
+function candidate(): AssetSummary {
+  return {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "夕阳剪影",
+    description: "夕阳下女性剪影，符合回忆意境",
+    mediaType: "video",
+    processingStatus: "completed",
+    reviewStatus: "published",
+    tags: [],
+    mediaUrl:
+      "/api/v1/media/00000000-0000-4000-8000-000000000001?v=1",
+    createdAt: "2026-09-02T08:00:00.000Z",
+    searchScore: 0.91,
+    semanticScore: 0.91,
+  };
+}
+
 describe("compatibility segment matching", () => {
   it("parses the stringified LLM payload and aligns segment times and groups", () => {
     const parsed = request();
@@ -104,6 +125,98 @@ describe("compatibility segment matching", () => {
     const parsed = request();
     parsed.llm.segments[1]!.text = "完全不存在的内容";
     expect(() => alignCompatibilitySegments(parsed)).toThrow(/无法按顺序对齐/);
+  });
+
+  it("returns an absolute matched asset URL with its normalized score", async () => {
+    const segment = alignCompatibilitySegments(request())[0]!;
+    const search = vi.fn(async () => ({
+      items: [candidate()],
+      threshold: 0.55,
+      maxScore: 0.91,
+      reason: "matched" as const,
+      message: null,
+    }));
+
+    const [matched] = await matchCompatibilitySegments(
+      [segment],
+      "https://focus.example.test",
+      {
+        search,
+        getAsset: async () => ({
+          userId: "759",
+          reviewStatus: "published",
+        }),
+      },
+    );
+
+    expect(search).toHaveBeenCalledWith(
+      { description: segment.text, keywords: [], limit: 1 },
+      { includeAllUsers: true },
+    );
+    expect(matched).toMatchObject({
+      matched_candidate_url:
+        "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=1&user_id=759",
+      matched_candidate_type: "video",
+      matched_candidate_desc: "夕阳下女性剪影，符合回忆意境",
+      matched_candidate_score: 0.91,
+      matched_candidate_reason: null,
+      matched_candidate_message: null,
+    });
+  });
+
+  it("returns explicit null candidate fields and below-threshold diagnostics", async () => {
+    const segment = alignCompatibilitySegments(request())[0]!;
+    const [unmatched] = await matchCompatibilitySegments(
+      [segment],
+      "https://focus.example.test",
+      {
+        search: async () => ({
+          items: [],
+          threshold: 0.55,
+          maxScore: 0.54,
+          reason: "below_threshold",
+          message: "最高匹配分为 0.540，未超过展示阈值 0.550。",
+        }),
+        getAsset: async () => null,
+      },
+    );
+
+    expect(unmatched).toMatchObject({
+      matched_candidate_url: null,
+      matched_candidate_type: null,
+      matched_candidate_desc: null,
+      matched_candidate_score: 0.54,
+      matched_candidate_reason: "below_threshold",
+      matched_candidate_message:
+        "最高匹配分为 0.540，未超过展示阈值 0.550。",
+    });
+  });
+
+  it("explains when semantic matching is unavailable", async () => {
+    const segment = alignCompatibilitySegments(request())[0]!;
+    const [unmatched] = await matchCompatibilitySegments(
+      [segment],
+      "https://focus.example.test",
+      {
+        search: async () => ({
+          items: [],
+          threshold: 0.55,
+          maxScore: null,
+          reason: "semantic_unavailable",
+          message: "语义搜索暂不可用，请稍后重试。",
+        }),
+        getAsset: async () => null,
+      },
+    );
+
+    expect(unmatched).toMatchObject({
+      matched_candidate_url: null,
+      matched_candidate_type: null,
+      matched_candidate_desc: null,
+      matched_candidate_score: null,
+      matched_candidate_reason: "semantic_unavailable",
+      matched_candidate_message: "语义搜索暂不可用，请稍后重试。",
+    });
   });
 
   it("uses a custom callback body only for compatibility callback jobs", () => {

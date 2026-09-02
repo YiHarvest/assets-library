@@ -34,13 +34,27 @@ import {
   canClaimAnalyzeTask,
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
-import { searchAnalysis } from "@/server/search/chroma";
+import { searchAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
+import {
+  DEFAULT_BUSINESS_ALIASES,
+  DEFAULT_RELEVANCE_THRESHOLDS,
+  hybridRelevanceScore,
+  isBroadAiQuery,
+  normalizeSearchText,
+  normalizeSemanticText,
+  scoreKeywordRelevance,
+  tokenizeKeywordQuery,
+  type KeywordRelevance,
+  type LexicalMatchType,
+  type SearchableTag,
+} from "@/server/search/relevance";
 import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
   type AssetDetail,
   type AssetEdit,
   type AssetPage,
+  type AssetSearchMeta,
   type AssetSummary,
   type AssetTag,
   type DescriptionSearch,
@@ -50,8 +64,6 @@ import {
   type ReviewStatus,
   type TagStatistics,
 } from "@/shared/contracts";
-
-const strongSemanticSimilarity = 0.55;
 
 function affectedRows(result: MySqlRawQueryResult) {
   return result[0].affectedRows;
@@ -698,6 +710,7 @@ export interface QueryAssetsOptions extends AssetScope {
 
 export interface AssetQueryPage extends AssetPage {
   tagStatistics?: TagStatistics;
+  search?: AssetSearchMeta | null;
 }
 
 export interface UserStorageItem {
@@ -1021,28 +1034,6 @@ async function assetIdsMatchingExactTags(filters: ExactTagFilter[]) {
   return intersectAssetIdSets(matches);
 }
 
-/** keywords 延续现有标签模糊匹配规则，并以 AND 方式收窄候选集。 */
-async function assetIdsMatchingKeywords(keywords: string[]) {
-  const normalized = [
-    ...new Set(
-      keywords.map((keyword) => normalizeTag(keyword)).filter(Boolean),
-    ),
-  ];
-  if (!normalized.length) {
-    return { assetIds: undefined, scores: undefined };
-  }
-  const matches = await Promise.all(normalized.map(matchingAssetScores));
-  const assetIds = intersectAssetIdSets(matches.map((match) => new Set(match.keys())));
-  const scores = new Map<string, number>();
-  for (const assetId of assetIds ?? []) {
-    scores.set(
-      assetId,
-      matches.reduce((sum, match) => sum + (match.get(assetId) ?? 0), 0),
-    );
-  }
-  return { assetIds, scores };
-}
-
 function processingCondition(statuses: ProcessingStatus[]) {
   if (!statuses.length) return undefined;
   return inArray(assets.processingStatus, statuses);
@@ -1126,64 +1117,171 @@ async function tagStatisticsForAssetIds(assetIds: string[]): Promise<TagStatisti
   };
 }
 
-function tagMatchScore(tag: string, query: string) {
-  if (tag === query) return 1_000;
-  if (requiresExactTagMatch(query)) return 0;
-  if (tag.startsWith(query)) return 800 - (tag.length - query.length);
-  if (tag.includes(query)) return 600 - (tag.length - query.length);
-  if (query.length < 2) return 0;
-  const maximumDistance =
-    query.length <= 4 ? 1 : Math.min(3, Math.floor(query.length / 3));
-  const distance = levenshteinDistance(tag, query);
-  return distance <= maximumDistance ? 300 - distance * 50 : 0;
+interface RankedAssetMatch {
+  finalScore: number;
+  keywordScore?: number;
+  semanticScore?: number;
+  matchType: LexicalMatchType | "semantic" | "hybrid";
+  matchedTerms: string[];
+  matchedCategories: string[];
 }
 
-function requiresExactTagMatch(query: string) {
-  return /[\p{N}\p{Script=Latin}]$/u.test(query);
+interface KeywordMatches {
+  assetIds?: Set<string>;
+  scores?: Map<string, RankedAssetMatch>;
+  threshold?: number;
+  maxScore?: number | null;
+  reason?: "matched" | "no_candidates" | "fallback_exhausted";
+  broadQuery?: boolean;
+  semanticText?: string;
 }
 
-function levenshteinDistance(left: string, right: string) {
-  const leftCharacters = Array.from(left);
-  const rightCharacters = Array.from(right);
-  let previous = Array.from(
-    { length: rightCharacters.length + 1 },
-    (_, index) => index,
+function searchMetadata(
+  mode: AssetSearchMeta["mode"],
+  threshold: number,
+  maxScore: number | null,
+  reason: AssetSearchMeta["reason"],
+): AssetSearchMeta {
+  const formattedMaximum = maxScore === null ? null : maxScore.toFixed(3);
+  const message =
+    reason === "matched"
+      ? null
+      : reason === "semantic_unavailable"
+        ? "语义搜索暂不可用，请稍后重试。"
+        : reason === "below_threshold"
+          ? `找到候选素材，但最高匹配分为 ${formattedMaximum ?? "0.000"}，未超过展示阈值 ${threshold.toFixed(3)}。`
+          : reason === "fallback_exhausted"
+            ? "强匹配和错别字兜底都没有找到超过展示阈值的素材。"
+            : "没有召回任何候选素材。";
+  return { mode, threshold, max_score: maxScore, reason, message };
+}
+
+function emptyAssetQueryPage(
+  pageSize: number,
+  includeTagStatistics: boolean,
+  search: AssetSearchMeta | null,
+) {
+  return {
+    items: [],
+    page: 1,
+    pageSize,
+    total: 0,
+    totalPages: 1,
+    ...(includeTagStatistics ? { tagStatistics: emptyTagStatistics() } : {}),
+    search,
+  } satisfies AssetQueryPage;
+}
+
+function rankedKeywordMatch(
+  relevance: KeywordRelevance,
+): RankedAssetMatch {
+  const evidence = [...relevance.evidence].sort(
+    (left, right) => right.score - left.score,
   );
-  for (let leftIndex = 1; leftIndex <= leftCharacters.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (
-      let rightIndex = 1;
-      rightIndex <= rightCharacters.length;
-      rightIndex += 1
-    ) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! +
-          (leftCharacters[leftIndex - 1] === rightCharacters[rightIndex - 1]
-            ? 0
-            : 1),
-      );
-    }
-    previous = current;
-  }
-  return previous[rightCharacters.length]!;
+  return {
+    finalScore: relevance.score,
+    keywordScore: relevance.score,
+    matchType: evidence.some((item) => item.matchType === "typo")
+      ? "typo"
+      : (evidence[0]?.matchType ?? "exact"),
+    matchedTerms: relevance.matchedTokens,
+    matchedCategories: [
+      ...new Set(evidence.map((item) => item.category)),
+    ],
+  };
 }
 
-async function matchingAssetScores(tagQuery: string) {
-  const scores = new Map<string, number>();
+function qualifiedMatches(
+  scores: Map<string, RankedAssetMatch>,
+  threshold: number,
+) {
+  return new Map(
+    [...scores].filter(([, match]) => match.finalScore > threshold),
+  );
+}
+
+async function assetIdsMatchingKeywords(keywords: string[]): Promise<KeywordMatches> {
+  const tokens = [
+    ...new Set(keywords.flatMap((keyword) => tokenizeKeywordQuery(keyword))),
+  ];
+  if (!tokens.length) {
+    return { assetIds: undefined, scores: undefined };
+  }
   const tagRows = await db
     .select({
       assetId: assetTags.assetId,
+      category: tags.category,
       normalizedValue: tags.normalizedValue,
     })
     .from(assetTags)
     .innerJoin(tags, eq(assetTags.tagId, tags.id));
+
+  const tagsByAsset = new Map<string, SearchableTag[]>();
   for (const row of tagRows) {
-    const score = tagMatchScore(row.normalizedValue, tagQuery);
-    if (score > (scores.get(row.assetId) ?? 0)) scores.set(row.assetId, score);
+    const current = tagsByAsset.get(row.assetId) ?? [];
+    current.push({ category: row.category, value: row.normalizedValue });
+    tagsByAsset.set(row.assetId, current);
   }
-  return scores;
+
+  const scoreAll = (allowTypo: boolean) => {
+    const scores = new Map<string, RankedAssetMatch>();
+    for (const [assetId, assetTagsForSearch] of tagsByAsset) {
+      const relevance = scoreKeywordRelevance(tokens, assetTagsForSearch, {
+        allowTypo,
+      });
+      if (relevance.score > 0) {
+        scores.set(assetId, rankedKeywordMatch(relevance));
+      }
+    }
+    return scores;
+  };
+
+  const strongScores = scoreAll(false);
+  const strongMatches = qualifiedMatches(
+    strongScores,
+    DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+  );
+  const queryText = keywords.join(" ");
+  const shared = {
+    broadQuery: isBroadAiQuery(tokens),
+    semanticText: isBroadAiQuery(tokens)
+      ? DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
+      : normalizeSemanticText(queryText),
+  };
+  if (strongMatches.size) {
+    return {
+      assetIds: new Set(strongMatches.keys()),
+      scores: strongMatches,
+      threshold: DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
+      maxScore: Math.max(...[...strongScores.values()].map((item) => item.finalScore)),
+      reason: "matched",
+      ...shared,
+    };
+  }
+
+  const fallbackScores = scoreAll(true);
+  const typoScores = new Map(
+    [...fallbackScores].filter(([, match]) => match.matchType === "typo"),
+  );
+  const fallbackMatches = qualifiedMatches(
+    typoScores,
+    DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
+  );
+  const allFallbackScores = [...typoScores.values()].map(
+    (item) => item.finalScore,
+  );
+  return {
+    assetIds: new Set(fallbackMatches.keys()),
+    scores: fallbackMatches,
+    threshold: DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
+    maxScore: allFallbackScores.length ? Math.max(...allFallbackScores) : null,
+    reason: fallbackMatches.size
+      ? "matched"
+      : tagRows.length
+        ? "fallback_exhausted"
+        : "no_candidates",
+    ...shared,
+  };
 }
 
 /**
@@ -1217,30 +1315,166 @@ export async function queryAssetsPage({
     conditions.push(inArray(assets.reviewStatus, reviewStatuses));
   }
 
-  const [exactTagIds, keywordMatches] = await Promise.all([
+  const [exactTagIds, initialKeywordMatches] = await Promise.all([
     assetIdsMatchingExactTags(exactTags),
     assetIdsMatchingKeywords(keywords),
   ]);
+  let keywordMatches = initialKeywordMatches;
   const candidateSets = [exactTagIds, keywordMatches.assetIds].filter(
     (value): value is Set<string> => value !== undefined,
   );
-  const candidateIds = intersectAssetIdSets(candidateSets);
+  let candidateIds = intersectAssetIdSets(candidateSets);
   if (candidateIds && candidateIds.size === 0) {
-    return {
-      items: [],
-      page: 1,
-      pageSize: safeLimit,
-      total: 0,
-      totalPages: 1,
-      ...(includeTagStatistics
-        ? { tagStatistics: emptyTagStatistics() }
-        : {}),
-    };
+    const mode = semanticQuery?.trim() ? "semantic" : "keyword";
+    const threshold = semanticQuery?.trim()
+      ? DEFAULT_RELEVANCE_THRESHOLDS.semantic
+      : (keywordMatches.threshold ??
+        DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword);
+    return emptyAssetQueryPage(
+      safeLimit,
+      includeTagStatistics,
+      searchMetadata(
+        mode,
+        threshold,
+        keywordMatches.maxScore ?? null,
+        mode === "keyword"
+          ? (keywordMatches.reason ?? "no_candidates")
+          : "no_candidates",
+      ),
+    );
   }
+
+  let keywordSearchMeta = keywordMatches.threshold
+    ? searchMetadata(
+        "keyword",
+        keywordMatches.threshold,
+        keywordMatches.maxScore ?? null,
+        keywordMatches.reason ?? "matched",
+      )
+    : null;
+
+  if (
+    !semanticQuery?.trim() &&
+    keywordMatches.broadQuery &&
+    keywordMatches.scores &&
+    candidateIds
+  ) {
+    const broadWhere = and(...conditions, inArray(assets.id, [...candidateIds]));
+    const eligibleRows = await db
+      .select({ id: assets.id })
+      .from(assets)
+      .where(broadWhere);
+    const eligibleIds = eligibleRows.map((row) => row.id);
+    if (!eligibleIds.length) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "hybrid",
+          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          null,
+          "no_candidates",
+        ),
+      );
+    }
+    if (!semanticSearchEnabled()) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "hybrid",
+          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
+    let semanticScores: Map<string, number>;
+    try {
+      semanticScores = await searchAnalysis(
+        keywordMatches.semanticText ?? keywords.join(" "),
+        Math.min(800, Math.max(safeLimit * 8, eligibleIds.length * 5)),
+        eligibleIds,
+        { minimumSimilarity: 0 },
+      );
+    } catch {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "hybrid",
+          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
+    const hybridScores = new Map<string, RankedAssetMatch>();
+    for (const assetId of eligibleIds) {
+      const lexical = keywordMatches.scores.get(assetId);
+      if (!lexical) continue;
+      const semanticScore = semanticScores.get(assetId) ?? 0;
+      hybridScores.set(assetId, {
+        ...lexical,
+        finalScore: hybridRelevanceScore(
+          lexical.keywordScore,
+          semanticScore,
+        ),
+        semanticScore,
+        matchType: "hybrid",
+      });
+    }
+    const allHybridScores = [...hybridScores.values()].map(
+      (match) => match.finalScore,
+    );
+    const maxScore = allHybridScores.length
+      ? Math.max(...allHybridScores)
+      : null;
+    const qualified = qualifiedMatches(
+      hybridScores,
+      DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+    );
+    candidateIds = new Set(qualified.keys());
+    keywordMatches = {
+      ...keywordMatches,
+      assetIds: candidateIds,
+      scores: qualified,
+      threshold: DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+      maxScore,
+      reason: qualified.size ? "matched" : "fallback_exhausted",
+    };
+    keywordSearchMeta = searchMetadata(
+      "hybrid",
+      DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
+      maxScore,
+      qualified.size ? "matched" : "below_threshold",
+    );
+    if (!qualified.size) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        keywordSearchMeta,
+      );
+    }
+  }
+
   if (candidateIds) conditions.push(inArray(assets.id, [...candidateIds]));
   const where = conditions.length ? and(...conditions) : undefined;
 
   if (semanticQuery?.trim()) {
+    const semanticThreshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
+    if (!semanticSearchEnabled()) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
     const rows = await db
       .select()
       .from(assets)
@@ -1248,24 +1482,56 @@ export async function queryAssetsPage({
       .orderBy(desc(assets.createdAt), desc(assets.id));
     const filteredIds = rows.map((row) => row.id);
     if (!filteredIds.length) {
-      return {
-        items: [],
-        page: 1,
-        pageSize: safeLimit,
-        total: 0,
-        totalPages: 1,
-        ...(includeTagStatistics
-          ? { tagStatistics: emptyTagStatistics() }
-          : {}),
-      };
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "no_candidates",
+        ),
+      );
     }
-    const semanticScores = await searchAnalysis(
-      semanticQuery.trim(),
-      // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
-      Math.max(safeLimit * 8, safeLimit),
-      filteredIds,
+    let semanticScores: Map<string, number>;
+    try {
+      semanticScores = await searchAnalysis(
+        normalizeSemanticText(semanticQuery),
+        // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
+        Math.max(safeLimit * 8, safeLimit),
+        filteredIds,
+        { minimumSimilarity: 0 },
+      );
+    } catch {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          null,
+          "semantic_unavailable",
+        ),
+      );
+    }
+    const rawScores = [...semanticScores.values()];
+    const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+    const qualifiedScores = new Map(
+      [...semanticScores].filter(([, score]) => score > semanticThreshold),
     );
-    const rankedIds = [...semanticScores.entries()]
+    if (!qualifiedScores.size) {
+      return emptyAssetQueryPage(
+        safeLimit,
+        includeTagStatistics,
+        searchMetadata(
+          "semantic",
+          semanticThreshold,
+          maxScore,
+          semanticScores.size ? "below_threshold" : "no_candidates",
+        ),
+      );
+    }
+    const rankedIds = [...qualifiedScores.entries()]
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, safeLimit)
       .map(([assetId]) => assetId);
@@ -1274,12 +1540,15 @@ export async function queryAssetsPage({
     const items = rankedIds.flatMap((assetId) => {
       const row = rowsById.get(assetId);
       if (!row) return [];
-      const semanticScore = semanticScores.get(assetId) ?? 0;
+      const semanticScore = qualifiedScores.get(assetId) ?? 0;
       return [
         {
           ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-          searchScore: Math.round(semanticScore * 250),
+          searchScore: semanticScore,
           semanticScore,
+          matchType: "semantic" as const,
+          matchedTerms: [],
+          matchedCategories: [],
         },
       ];
     });
@@ -1292,6 +1561,12 @@ export async function queryAssetsPage({
       ...(includeTagStatistics
         ? { tagStatistics: await tagStatisticsForAssetIds(rankedIds) }
         : {}),
+      search: searchMetadata(
+        "semantic",
+        semanticThreshold,
+        maxScore,
+        "matched",
+      ),
     };
   }
 
@@ -1300,6 +1575,18 @@ export async function queryAssetsPage({
     .from(assets)
     .where(where);
   const total = countRow?.value ?? 0;
+  if (total === 0 && keywordSearchMeta) {
+    return emptyAssetQueryPage(
+      safeLimit,
+      includeTagStatistics,
+      searchMetadata(
+        keywordSearchMeta.mode,
+        keywordSearchMeta.threshold,
+        null,
+        "no_candidates",
+      ),
+    );
+  }
   const totalPages = Math.max(1, Math.ceil(total / safeLimit));
   const statisticsPromise = includeTagStatistics
     ? db
@@ -1321,6 +1608,7 @@ export async function queryAssetsPage({
       ...(statisticsPromise
         ? { tagStatistics: await statisticsPromise }
         : {}),
+      search: keywordSearchMeta,
     };
   }
   const safePage = requestedPage;
@@ -1336,8 +1624,8 @@ export async function queryAssetsPage({
     rows = matchingRows
       .sort((left, right) => {
         const scoreDifference =
-          (keywordMatches.scores?.get(right.id) ?? 0) -
-          (keywordMatches.scores?.get(left.id) ?? 0);
+          (keywordMatches.scores?.get(right.id)?.finalScore ?? 0) -
+          (keywordMatches.scores?.get(left.id)?.finalScore ?? 0);
         if (scoreDifference !== 0) return scoreDifference;
         const createdDifference =
           right.createdAt.getTime() - left.createdAt.getTime();
@@ -1356,12 +1644,22 @@ export async function queryAssetsPage({
   }
   const tagMap = await getTagsForAssets(rows.map((row) => row.id));
   return {
-    items: rows.map((row) => ({
-      ...summaryFromRow(row, tagMap.get(row.id) ?? []),
-      ...(keywordMatches.scores?.has(row.id)
-        ? { searchScore: keywordMatches.scores.get(row.id) }
-        : {}),
-    })),
+    items: rows.map((row) => {
+      const match = keywordMatches.scores?.get(row.id);
+      return {
+        ...summaryFromRow(row, tagMap.get(row.id) ?? []),
+        ...(match
+          ? {
+              searchScore: match.finalScore,
+              keywordScore: match.keywordScore,
+              semanticScore: match.semanticScore,
+              matchType: match.matchType,
+              matchedTerms: match.matchedTerms,
+              matchedCategories: match.matchedCategories,
+            }
+          : {}),
+      };
+    }),
     page: safePage,
     pageSize: safeLimit,
     total,
@@ -1369,6 +1667,7 @@ export async function queryAssetsPage({
     ...(statisticsPromise
       ? { tagStatistics: await statisticsPromise }
       : {}),
+    search: keywordSearchMeta,
   };
 }
 
@@ -1380,91 +1679,25 @@ export async function listAssets({
   tagQuery,
   ...scope
 }: ListAssetsOptions = {}): Promise<AssetPage> {
-  const safeLimit = Math.min(Math.max(limit, 1), 50);
-  const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
-  const normalizedTagQuery =
-    view === "published"
-      ? tagQuery?.trim().toLocaleLowerCase().slice(0, 128)
-      : undefined;
-  const conditions: SQL[] = [
-    eq(
-      assets.reviewStatus,
+  const result = await queryAssetsPage({
+    page,
+    limit: Math.min(Math.max(limit, 1), 50),
+    reviewStatuses: [
       view === "published" ? "published" : "pending_review",
-    ),
-  ];
-  const ownership = scopeCondition(scope);
-  if (ownership) conditions.push(ownership);
-
-  const scores = normalizedTagQuery
-    ? await matchingAssetScores(normalizedTagQuery)
-    : undefined;
-  const exactTagMatchOnly = normalizedTagQuery
-    ? requiresExactTagMatch(normalizedTagQuery)
-    : false;
-  const semanticScores = new Map<string, number>();
-  if (normalizedTagQuery) {
-    try {
-      const foundSemanticScores = await searchAnalysis(
-        normalizedTagQuery,
-        safeLimit * 5,
-      );
-      for (const [assetId, score] of foundSemanticScores) {
-        if (exactTagMatchOnly && !scores?.has(assetId)) continue;
-        if (score <= strongSemanticSimilarity && !scores?.has(assetId)) continue;
-        semanticScores.set(assetId, score);
-        scores?.set(assetId, Math.max(scores.get(assetId) ?? 0, score * 250));
-      }
-    } catch (error) {
-      console.error("Semantic search unavailable; falling back to tag matching.", error);
-    }
-    if (!scores?.size) {
-      return {
-        items: [],
-        page: 1,
-        pageSize: safeLimit,
-        total: 0,
-        totalPages: 1,
-      };
-    }
-    conditions.push(inArray(assets.id, [...scores.keys()]));
-  }
-
-  const [countRow] = await db
-    .select({ value: sql<number>`count(*)`.mapWith(Number) })
-    .from(assets)
-    .where(and(...conditions));
-  const total = countRow?.value ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / safeLimit));
-  const safePage = Math.min(requestedPage, totalPages);
-  const matchingRows = await db
-    .select()
-    .from(assets)
-    .where(and(...conditions))
-    .orderBy(desc(assets.createdAt));
-  const rows = scores
-    ? matchingRows
-        .sort(
-          (left, right) =>
-            (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0),
-        )
-        .slice((safePage - 1) * safeLimit, safePage * safeLimit)
-    : matchingRows.slice(
-        (safePage - 1) * safeLimit,
-        safePage * safeLimit,
-      );
-  const tagMap = await getTagsForAssets(rows.map((row) => row.id));
+    ],
+    keywords:
+      view === "published" && tagQuery?.trim()
+        ? [tagQuery.trim().slice(0, 128)]
+        : [],
+    includeTagStatistics: false,
+    ...scope,
+  });
   return {
-    items: rows.map((row) => ({
-      ...summaryFromRow(row, tagMap.get(row.id) ?? []),
-      ...(scores?.has(row.id) ? { searchScore: scores.get(row.id) } : {}),
-      ...(semanticScores.has(row.id)
-        ? { semanticScore: semanticScores.get(row.id) }
-        : {}),
-    })),
-    page: safePage,
-    pageSize: safeLimit,
-    total,
-    totalPages,
+    items: result.items,
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    totalPages: result.totalPages,
   };
 }
 
@@ -1483,14 +1716,8 @@ async function publishedAssetIdsMatchingKeywords(
         .where(and(...conditions))
     ).map((row) => row.id);
   }
-  const matchesByKeyword = await Promise.all(
-    keywords.map((keyword) => matchingAssetScores(keyword)),
-  );
-  const firstMatches = matchesByKeyword[0];
-  if (!firstMatches?.size) return [];
-  const matchedAssetIds = [...firstMatches.keys()].filter((assetId) =>
-    matchesByKeyword.every((matches) => matches.has(assetId)),
-  );
+  const keywordMatches = await assetIdsMatchingKeywords(keywords);
+  const matchedAssetIds = [...(keywordMatches.assetIds ?? [])];
   if (!matchedAssetIds.length) return [];
   const conditions: SQL[] = [
     eq(assets.reviewStatus, "published"),
@@ -1505,28 +1732,72 @@ async function publishedAssetIdsMatchingKeywords(
   ).map((row) => row.id);
 }
 
-export async function searchAssetsByDescription(
+export interface DescriptionSearchResult {
+  items: AssetSummary[];
+  threshold: number;
+  maxScore: number | null;
+  reason: AssetSearchMeta["reason"];
+  message: string | null;
+}
+
+export async function searchAssetsByDescriptionDetailed(
   { description, keywords = [], limit }: DescriptionSearch,
   scope: AssetScope = {},
-) {
+): Promise<DescriptionSearchResult> {
+  const threshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
+  const result = (
+    items: AssetSummary[],
+    maxScore: number | null,
+    reason: AssetSearchMeta["reason"],
+  ): DescriptionSearchResult => {
+    const metadata = searchMetadata("semantic", threshold, maxScore, reason);
+    return {
+      items,
+      threshold,
+      maxScore,
+      reason,
+      message: metadata.message,
+    };
+  };
+
   const normalizedKeywords = [
-    ...new Set(keywords.map((keyword) => keyword.toLocaleLowerCase())),
+    ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
   ];
   const candidateIds = await publishedAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
   );
-  if (!candidateIds.length) return [];
-  const scores = await searchAnalysis(
-    description,
-    Math.max(limit * 5, limit),
-    candidateIds,
+  if (!candidateIds.length) return result([], null, "no_candidates");
+  if (!semanticSearchEnabled()) {
+    return result([], null, "semantic_unavailable");
+  }
+  let scores: Map<string, number>;
+  try {
+    scores = await searchAnalysis(
+      normalizeSemanticText(description),
+      Math.max(limit * 5, limit),
+      candidateIds,
+      { minimumSimilarity: 0 },
+    );
+  } catch {
+    return result([], null, "semantic_unavailable");
+  }
+  const rawScores = [...scores.values()];
+  const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+  const qualifiedScores = new Map(
+    [...scores].filter(([, score]) => score > threshold),
   );
-  const rankedIds = [...scores.entries()]
+  const rankedIds = [...qualifiedScores.entries()]
     .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
     .slice(0, limit)
     .map(([assetId]) => assetId);
-  if (!rankedIds.length) return [];
+  if (!rankedIds.length) {
+    return result(
+      [],
+      maxScore,
+      scores.size ? "below_threshold" : "no_candidates",
+    );
+  }
   const rows = await db
     .select()
     .from(assets)
@@ -1538,17 +1809,29 @@ export async function searchAssetsByDescription(
     );
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const tagMap = await getTagsForAssets(rankedIds);
-  return rankedIds.flatMap((assetId) => {
+  const items = rankedIds.flatMap((assetId) => {
     const row = rowsById.get(assetId);
     if (!row) return [];
+    const semanticScore = qualifiedScores.get(assetId) ?? 0;
     return [
       {
         ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-        searchScore: Math.round((scores.get(assetId) ?? 0) * 250),
-        semanticScore: scores.get(assetId),
+        searchScore: semanticScore,
+        semanticScore,
+        matchType: "semantic" as const,
+        matchedTerms: [],
+        matchedCategories: [],
       },
     ];
   });
+  return result(items, maxScore, "matched");
+}
+
+export async function searchAssetsByDescription(
+  input: DescriptionSearch,
+  scope: AssetScope = {},
+) {
+  return (await searchAssetsByDescriptionDetailed(input, scope)).items;
 }
 
 /** 获取素材详情；默认只能读取公共素材，内部调用可显式 includeAllUsers。 */

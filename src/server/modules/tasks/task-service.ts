@@ -52,7 +52,9 @@ export interface TaskRepository {
     userId: string,
     options: {
       statuses?: Array<"queued" | "running" | "done" | "failed">;
-      types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+      types?: Array<
+        "upload" | "delete" | "publish" | "update" | "retry" | "match"
+      >;
       before?: { createdAt: Date; id: string };
       limit: number;
     },
@@ -63,7 +65,9 @@ export interface ListTasksInput {
   cursor?: string | null;
   limit: number;
   statuses?: Array<"queued" | "running" | "done" | "failed">;
-  types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+  types?: Array<
+    "upload" | "delete" | "publish" | "update" | "retry" | "match"
+  >;
 }
 
 export interface TaskListResponse {
@@ -126,6 +130,7 @@ function apiPhase(phase: string, status: string): ApiTaskPhase {
     "updating",
     "retrying",
     "deleting",
+    "matching",
     "notifying",
     "finished",
   ]);

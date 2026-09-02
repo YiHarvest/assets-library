@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   callback: vi.fn(),
+  compatibilityMatch: vi.fn(),
   completeJob: vi.fn().mockResolvedValue(1),
   failJob: vi.fn().mockResolvedValue(1),
   heartbeatJob: vi.fn().mockResolvedValue(1),
@@ -29,6 +30,9 @@ vi.mock("@/server/services/upload-pipeline", () => ({
 vi.mock("@/server/services/mutation-pipeline", () => ({
   processMutationJob: mocks.mutation,
 }));
+vi.mock("@/server/services/compatibility-match", () => ({
+  processCompatibilityMatchJob: mocks.compatibilityMatch,
+}));
 vi.mock("@/server/services/callbacks", () => ({
   processCallbackJob: mocks.callback,
 }));
@@ -53,7 +57,10 @@ function job(type: ClaimedJob["type"]): ClaimedJob {
   return {
     id: crypto.randomUUID(),
     taskId: crypto.randomUUID(),
-    assetId: type === "validate" || type === "callback" ? null : crypto.randomUUID(),
+    assetId:
+      type === "validate" || type === "callback" || type === "match"
+        ? null
+        : crypto.randomUUID(),
     type,
     attempt: 1,
     payload:
@@ -88,5 +95,11 @@ describe("worker dispatcher", () => {
     const claimed = job("callback");
     await processJob(claimed, analyzer, undefined, undefined, storage);
     expect(mocks.callback).toHaveBeenCalledWith(claimed);
+  });
+
+  it("把 match 作业交给兼容分段匹配流水线", async () => {
+    const claimed = job("match");
+    await processJob(claimed, analyzer, undefined, undefined, storage);
+    expect(mocks.compatibilityMatch).toHaveBeenCalledWith(claimed);
   });
 });

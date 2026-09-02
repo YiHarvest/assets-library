@@ -50,7 +50,14 @@ export const tasks = mysqlTable(
   "tasks",
   {
     id: uuid("id").primaryKey(),
-    type: mysqlEnum("type", ["upload", "delete", "publish", "update", "retry"]).notNull(),
+    type: mysqlEnum("type", [
+      "upload",
+      "delete",
+      "publish",
+      "update",
+      "retry",
+      "match",
+    ]).notNull(),
     status: mysqlEnum("status", ["queued", "running", "done", "failed"])
       .notNull()
       .default("queued"),
@@ -405,6 +412,7 @@ export const jobs = mysqlTable(
       "publish",
       "update",
       "retry",
+      "match",
       "callback",
     ]).notNull(),
     status: mysqlEnum("status", ["queued", "running", "done", "failed"])

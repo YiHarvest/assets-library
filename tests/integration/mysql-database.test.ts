@@ -1901,6 +1901,228 @@ mysqlTest("MySQL 数据层", () => {
     expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
   }, 30_000);
 
+  test("兼容匹配任务持久化、复用语义召回并投递 camelCase 回调", async () => {
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({
+      assetId,
+      userId: "759",
+      name: "夕阳下的人物",
+      originalFilename: "sunset.mp4",
+      originalPath: `/tmp/${assetId}`,
+      mimeType: "video/mp4",
+      mediaType: "video",
+      sizeBytes: 10,
+      directPublish: true,
+      enqueueAnalysis: false,
+    });
+    await repository.updateAssetMetadata(
+      assetId,
+      {
+        name: "夕阳下的人物",
+        description: "夕阳下女性剪影，符合回忆意境",
+        tags: [],
+      },
+      { includeAllUsers: true },
+    );
+    await migrationConnection.db
+      .update(assets)
+      .set({ processingStatus: "completed", reviewStatus: "published" })
+      .where(eq(assets.id, assetId));
+    searchAnalysisMock.mockResolvedValue(new Map([[assetId, 0.91]]));
+
+    const { compatibilityMatchRequestSchema } = await import("@/shared/contracts");
+    const { processCompatibilityMatchJob } = await import(
+      "@/server/services/compatibility-match"
+    );
+    const { processCallbackJob } = await import("@/server/services/callbacks");
+    const request = compatibilityMatchRequestSchema.parse({
+      asr: {
+        transcripts: [
+          {
+            sentences: [
+              {
+                text: "如果能回到二十岁",
+                words: [
+                  {
+                    text: "如果能回到二十岁",
+                    begin_time: 320,
+                    end_time: 1600,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      asset_url_list: [],
+      callback_url: "https://callback.invalid/api/media/callback",
+      llm: JSON.stringify({
+        segments: [
+          {
+            segment_id: 1,
+            text: "如果能回到二十岁",
+            high_light_word: "回到二十岁",
+            level: 1,
+            transition: "fade",
+          },
+        ],
+      }),
+      text: "如果能回到二十岁",
+      business_id: "business-42",
+    });
+
+    const taskId = crypto.randomUUID();
+    const matchJobId = crypto.randomUUID();
+    const now = new Date();
+    const matchPayload = {
+      request,
+      publicOrigin: "https://focus.example.com",
+      callbackFields: { business_id: "business-42" },
+    };
+    await migrationConnection.db.insert(tasks).values({
+      id: taskId,
+      type: "match",
+      status: "running",
+      phase: "matching",
+      callbackUrl: request.callback_url,
+      totalItems: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(jobs).values({
+      id: matchJobId,
+      taskId,
+      type: "match",
+      status: "running",
+      phase: "matching",
+      payload: matchPayload,
+      attempt: 1,
+      availableAt: now,
+      claimedAt: now,
+      leaseOwner: "compatibility-match-test",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await processCompatibilityMatchJob({
+      id: matchJobId,
+      taskId,
+      assetId: null,
+      type: "match",
+      attempt: 1,
+      payload: matchPayload,
+      claimedAt: now,
+      leaseOwner: "compatibility-match-test",
+    });
+
+    const [completedTask] = await migrationConnection.db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId));
+    expect(completedTask).toMatchObject({
+      type: "match",
+      status: "done",
+      phase: "finished",
+      result: {
+        segments: [
+          expect.objectContaining({
+            segment_id: 1,
+            keyword: "回到二十岁",
+            group_id: [1, 1],
+            start_time: 0.32,
+            end_time: 1.6,
+            transition: "fade",
+            matched_candidate_type: "video",
+            matched_candidate_desc: "夕阳下女性剪影，符合回忆意境",
+          }),
+        ],
+      },
+    });
+    expect(searchAnalysisMock).toHaveBeenCalledWith(
+      "如果能回到二十岁",
+      5,
+      [assetId],
+    );
+
+    const [generatedCallback] = await migrationConnection.db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.taskId, taskId), eq(jobs.type, "callback")))
+      .limit(1);
+    expect(generatedCallback?.payload).toMatchObject({
+      compatibilityCallback: {
+        business_id: "business-42",
+        taskId,
+        status: "success",
+      },
+    });
+    const callbackJobId = crypto.randomUUID();
+    await migrationConnection.db.insert(jobs).values({
+      id: callbackJobId,
+      taskId,
+      type: "callback",
+      status: "running",
+      phase: "notifying",
+      payload: generatedCallback!.payload,
+      attempt: 1,
+      availableAt: now,
+      claimedAt: now,
+      leaseOwner: "compatibility-callback-test",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const callbackJob = {
+      id: callbackJobId,
+      taskId,
+      assetId: null,
+      type: "callback" as const,
+      attempt: 1,
+      payload: generatedCallback!.payload,
+      claimedAt: now,
+      leaseOwner: "compatibility-callback-test",
+    };
+    const callbackFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    let callbackBodyJson = "";
+    try {
+      await processCallbackJob(callbackJob!);
+      expect(callbackFetch).toHaveBeenCalledTimes(1);
+      const [, fetchInit] = callbackFetch.mock.calls[0]!;
+      callbackBodyJson = String(fetchInit?.body);
+    } finally {
+      callbackFetch.mockRestore();
+    }
+    const callbackBody = JSON.parse(callbackBodyJson) as {
+      completed_at: string;
+      result: { segments: Array<{ matched_candidate_url: string }> };
+      [key: string]: unknown;
+    };
+    expect(callbackBody).toMatchObject({
+      business_id: "business-42",
+      taskId,
+      status: "success",
+      result: {
+        segments: [
+          expect.objectContaining({
+            segment_id: 1,
+            matched_candidate_type: "video",
+          }),
+        ],
+      },
+    });
+    expect(callbackBody.completed_at).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}$/,
+    );
+    expect(callbackBody).not.toHaveProperty("asr");
+    expect(callbackBody).not.toHaveProperty("llm");
+    const matchedUrl = new URL(
+      callbackBody.result.segments[0].matched_candidate_url,
+    );
+    expect(matchedUrl.origin).toBe("https://focus.example.com");
+    expect(matchedUrl.pathname).toContain(`/api/v1/media/${assetId}`);
+    expect(matchedUrl.searchParams.get("user_id")).toBe("759");
+  }, 30_000);
+
   test("将失败的素材错误码与 asset_ids 向上聚合到 item 和 task", async () => {
     const now = new Date();
     const taskId = crypto.randomUUID();

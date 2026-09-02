@@ -2,6 +2,8 @@ import type {
   ApiV1AssetDetail,
   AssetQuery,
   AssetQueryResponse,
+  CompatibilityMatchAccepted,
+  CompatibilityMatchRequest,
   CreateUploadTask,
   MutationContext,
   TaskAccepted,
@@ -28,6 +30,10 @@ export interface ReceiveUploadItemInput {
 }
 
 export interface ApiV1Service {
+  createCompatibilityMatchTask(
+    input: CompatibilityMatchRequest,
+    publicOrigin: string,
+  ): Promise<CompatibilityMatchAccepted>;
   createUploadTask(input: CreateUploadTask): Promise<TaskStatusResponse>;
   receiveUploadItem(input: ReceiveUploadItemInput): Promise<TaskStatusResponse>;
   sealUploadTask(taskId: string): Promise<TaskStatusResponse>;

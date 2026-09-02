@@ -163,6 +163,7 @@ export const apiTaskTypeSchema = z.enum([
   "publish",
   "update",
   "retry",
+  "match",
 ]);
 export type ApiTaskType = z.infer<typeof apiTaskTypeSchema>;
 
@@ -177,6 +178,7 @@ export const apiTaskPhaseSchema = z.enum([
   "updating",
   "retrying",
   "deleting",
+  "matching",
   "notifying",
   "finished",
 ]);
@@ -252,6 +254,97 @@ export const callbackUrlSchema = z
   }, "callback_url 仅支持 HTTP 或 HTTPS。")
   .nullable()
   .default(null);
+
+const compatibilityAsrWordSchema = z
+  .object({
+    text: z.string(),
+    begin_time: z.number().int().nonnegative(),
+    end_time: z.number().int().nonnegative(),
+    punctuation: z.string().optional(),
+  })
+  .refine((word) => word.end_time >= word.begin_time, {
+    message: "ASR 词语的 end_time 不得早于 begin_time。",
+  })
+  .passthrough();
+
+const compatibilityAsrSentenceSchema = z
+  .object({
+    text: z.string(),
+    words: z.array(compatibilityAsrWordSchema).min(1).max(10_000),
+    begin_time: z.number().int().nonnegative().optional(),
+    end_time: z.number().int().nonnegative().optional(),
+    sentence_id: z.number().int().nonnegative().optional(),
+  })
+  .passthrough();
+
+const compatibilityLlmSegmentSchema = z
+  .object({
+    segment_id: z.number().int().positive(),
+    text: z.string().trim().min(1).max(10_000),
+    high_light_word: z.string().max(1_000).optional(),
+    keyword: z.string().max(1_000).optional(),
+    level: z.number().int().nonnegative(),
+  })
+  .passthrough();
+
+const compatibilityLlmPayloadSchema = z
+  .object({
+    segments: z.array(compatibilityLlmSegmentSchema).min(1).max(500),
+  })
+  .passthrough();
+
+const compatibilityLlmSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}, compatibilityLlmPayloadSchema);
+
+/** 旧剪辑业务的 ASR + LLM 分段匹配请求；未知顶层字段会透传到结果回调。 */
+export const compatibilityMatchRequestSchema = z
+  .object({
+    asr: z
+      .object({
+        transcripts: z
+          .array(
+            z
+              .object({
+                sentences: z
+                  .array(compatibilityAsrSentenceSchema)
+                  .min(1)
+                  .max(10_000),
+              })
+              .passthrough(),
+          )
+          .min(1)
+          .max(20),
+      })
+      .passthrough(),
+    llm: compatibilityLlmSchema,
+    text: z.string().max(1_000_000).optional(),
+    asset_url_list: z.array(z.string().url()).max(10_000).default([]),
+    callback_url: z
+      .string()
+      .url()
+      .max(2_048)
+      .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+        message: "callback_url 仅支持 HTTP 或 HTTPS。",
+      }),
+  })
+  .passthrough();
+export type CompatibilityMatchRequest = z.infer<
+  typeof compatibilityMatchRequestSchema
+>;
+
+export const compatibilityMatchAcceptedSchema = z.object({
+  taskId: z.string().uuid(),
+  status: z.literal("processing"),
+});
+export type CompatibilityMatchAccepted = z.infer<
+  typeof compatibilityMatchAcceptedSchema
+>;
 
 export const MAX_UPLOAD_TASK_ITEMS = 100;
 export const MAX_UPLOAD_TASK_BYTES = 2 * 1024 * 1024 * 1024;

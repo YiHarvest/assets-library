@@ -46,6 +46,7 @@ function apiOperation(request: Request) {
     "PUT /api/v1/uploads/:id/items/:id": "upload_item_bytes",
     "POST /api/v1/uploads/:id": "seal_upload_task",
     "GET /api/v1/tasks/:id": "get_task_status",
+    "POST /api/v1/compat/segment-match": "create_compatibility_match_task",
     "POST /api/v1/assets/query": "query_assets",
     "GET /api/v1/assets/:id": "get_asset",
     "PATCH /api/v1/assets/:id": "update_asset",

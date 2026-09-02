@@ -14,6 +14,7 @@ import { PUT as receiveUploadItem } from "@/app/api/v1/uploads/[taskId]/items/[i
 import { POST as sealUploadTask } from "@/app/api/v1/uploads/[taskId]/route";
 import { GET as getTask } from "@/app/api/v1/tasks/[taskId]/route";
 import { POST as queryAssets } from "@/app/api/v1/assets/query/route";
+import { POST as createCompatibilityMatch } from "@/app/api/v1/compat/segment-match/route";
 import {
   DELETE as deleteAsset,
   GET as getAsset,
@@ -98,6 +99,10 @@ function task(
 
 function fakeService() {
   return {
+    createCompatibilityMatchTask: vi.fn(async () => ({
+      taskId,
+      status: "processing" as const,
+    })),
     createUploadTask: vi.fn(async () => task()),
     receiveUploadItem: vi.fn(async () =>
       task({ received_bytes: 3, progress_percent: 100 }),
@@ -332,6 +337,68 @@ describe("API v1 contracts and routes", () => {
     expect(body).not.toHaveProperty("receivedBytes");
     expect(service.createUploadTask).toHaveBeenCalledWith(
       expect.objectContaining({ user_id: "user-7", auto_publish: false }),
+    );
+  });
+
+  it("accepts the legacy ASR/LLM match body and keeps its camelCase contract", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const input = {
+      asr: {
+        transcripts: [
+          {
+            sentences: [
+              {
+                text: "如果能回到二十岁。",
+                words: [
+                  {
+                    text: "如果能回到二十岁",
+                    begin_time: 320,
+                    end_time: 1_600,
+                    punctuation: "。",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      llm: JSON.stringify({
+        segments: [
+          {
+            segment_id: 1,
+            text: "如果能回到二十岁",
+            high_light_word: "二十岁",
+            level: 2,
+          },
+        ],
+      }),
+      text: "如果能回到二十岁。",
+      asset_url_list: [],
+      callback_url: "https://callback.example.test/legacy",
+      business_id: "biz-7",
+    };
+    const response = await createCompatibilityMatch(
+      new Request("http://internal.invalid/api/v1/compat/segment-match", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-host": "focus.example.com",
+          "x-forwarded-proto": "https",
+        },
+        body: JSON.stringify(input),
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.headers.get("location")).toBe(`/api/v1/tasks/${taskId}`);
+    expect(await response.json()).toEqual({ taskId, status: "processing" });
+    expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        business_id: "biz-7",
+        llm: expect.objectContaining({ segments: expect.any(Array) }),
+      }),
+      "https://focus.example.com",
     );
   });
 

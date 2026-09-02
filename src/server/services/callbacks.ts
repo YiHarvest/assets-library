@@ -9,6 +9,7 @@ import {
   requeueJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
+import { compatibilityCallbackFromJob } from "@/server/services/compatibility-match";
 
 const maximumAttempts = 5;
 const maximumResponseCharacters = 4_096;
@@ -90,7 +91,9 @@ export async function processCallbackJob(job: ClaimedJob) {
     ids.push(asset.id);
     assetIdsByItem.set(asset.taskItemId, ids);
   }
-  const body = callbackBody(task, items, assetIdsByItem);
+  const body =
+    compatibilityCallbackFromJob(job) ??
+    callbackBody(task, items, assetIdsByItem);
   const deliveryId = crypto.randomUUID();
   const startedAt = new Date();
   await db.insert(callbackDeliveries).values({

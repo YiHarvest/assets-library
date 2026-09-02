@@ -216,7 +216,9 @@ export async function listTaskItemAssetIds(taskId: string) {
 
 export interface ListUserTaskIdsOptions {
   statuses?: Array<"queued" | "running" | "done" | "failed">;
-  types?: Array<"upload" | "delete" | "publish" | "update" | "retry">;
+  types?: Array<
+    "upload" | "delete" | "publish" | "update" | "retry" | "match"
+  >;
   before?: { createdAt: Date; id: string };
   limit: number;
 }
@@ -1831,6 +1833,7 @@ const nonAnalysisClaimableTypes = [
   "delete",
   "cleanup",
   "callback",
+  "match",
   "publish",
   "update",
   "retry",

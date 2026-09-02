@@ -20,6 +20,8 @@ tags:
     description: 支持 Range 的媒体流
   - name: Users
     description: 用户素材空间统计和展示列表
+  - name: Compatibility
+    description: 旧剪辑业务兼容接口
   - name: Specification
 paths:
   /api/v1/openapi:
@@ -143,7 +145,7 @@ paths:
       tags: [Tasks]
       operationId: getTask
       summary: 查询任意异步任务的总体和逐文件进度
-      description: 统一查询 upload、update、publish、retry、delete 任务。
+      description: 统一查询 upload、update、publish、retry、delete、match 任务。
       parameters:
         - $ref: "#/components/parameters/TaskId"
       responses:
@@ -154,6 +156,44 @@ paths:
               schema: { $ref: "#/components/schemas/TaskStatus" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/compat/segment-match:
+    post:
+      tags: [Compatibility]
+      operationId: createCompatibilitySegmentMatch
+      summary: 异步对齐 ASR/LLM 分段并匹配素材
+      description: >-
+        接收旧剪辑业务的 ASR 逐词时间与字符串化 LLM segments。Worker 按顺序
+        生成 start_time、end_time 和 group_id，并复用现有描述语义匹配函数为每段
+        选择至多一个素材。请求中的未知顶层字段会原样透传到终态回调。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompatibilityMatchRequest" }
+      callbacks:
+        matchFinished:
+          '{$request.body#/callback_url}':
+            post:
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema: { $ref: "#/components/schemas/CompatibilityMatchCallback" }
+              responses:
+                "200": { description: 回调已接收；任意 2xx 均视为成功 }
+      responses:
+        "202":
+          description: 匹配任务已持久化并进入队列
+          headers:
+            Location:
+              schema: { type: string }
+              description: 统一任务查询地址
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompatibilityMatchAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/ContentTooLarge" }
 
   /api/v1/assets/query:
     post:
@@ -579,7 +619,7 @@ components:
       enum: [queued, running, done, failed]
     TaskType:
       type: string
-      enum: [upload, delete, publish, update, retry]
+      enum: [upload, delete, publish, update, retry, match]
     TaskPhase:
       type: string
       enum:
@@ -593,6 +633,7 @@ components:
         - updating
         - retrying
         - deleting
+        - matching
         - notifying
         - finished
     MediaType:
@@ -621,6 +662,126 @@ components:
           pattern: '^https?://'
         - type: "null"
       default: null
+
+    CompatibilityMatchRequest:
+      type: object
+      additionalProperties: true
+      required: [asr, llm, callback_url]
+      properties:
+        asr:
+          type: object
+          additionalProperties: true
+          required: [transcripts]
+          properties:
+            transcripts:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                additionalProperties: true
+                required: [sentences]
+                properties:
+                  sentences:
+                    type: array
+                    minItems: 1
+                    items:
+                      type: object
+                      additionalProperties: true
+                      required: [text, words]
+                      properties:
+                        text: { type: string }
+                        words:
+                          type: array
+                          minItems: 1
+                          items:
+                            type: object
+                            additionalProperties: true
+                            required: [text, begin_time, end_time]
+                            properties:
+                              text: { type: string }
+                              begin_time: { type: integer, minimum: 0 }
+                              end_time: { type: integer, minimum: 0 }
+                              punctuation: { type: string }
+        llm:
+          description: 包含 segments 数组的 JSON 字符串，也兼容直接传对象。
+          oneOf:
+            - { type: string }
+            - type: object
+              additionalProperties: true
+              required: [segments]
+              properties:
+                segments:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    additionalProperties: true
+                    required: [segment_id, text, level]
+                    properties:
+                      segment_id: { type: integer, minimum: 1 }
+                      text: { type: string, minLength: 1 }
+                      high_light_word: { type: string }
+                      keyword: { type: string }
+                      level: { type: integer, minimum: 0 }
+        text: { type: string }
+        asset_url_list:
+          type: array
+          default: []
+          items: { type: string, format: uri }
+        callback_url:
+          type: string
+          format: uri
+          pattern: '^https?://'
+
+    CompatibilityMatchAccepted:
+      type: object
+      additionalProperties: false
+      required: [taskId, status]
+      properties:
+        taskId: { type: string, format: uuid }
+        status: { type: string, const: processing }
+
+    CompatibilityMatchSegment:
+      type: object
+      additionalProperties: true
+      required:
+        [segment_id, text, keyword, level, group_id, start_time, end_time]
+      properties:
+        segment_id: { type: integer, minimum: 1 }
+        text: { type: string }
+        keyword: { type: string }
+        level: { type: integer, minimum: 0 }
+        group_id:
+          type: array
+          minItems: 2
+          maxItems: 2
+          prefixItems:
+            - { type: integer, minimum: 1 }
+            - { type: integer, minimum: 1 }
+        start_time: { type: number, minimum: 0 }
+        end_time: { type: number, minimum: 0 }
+        matched_candidate_url: { type: string, format: uri }
+        matched_candidate_type: { $ref: "#/components/schemas/MediaType" }
+        matched_candidate_desc: { type: string }
+
+    CompatibilityMatchCallback:
+      type: object
+      additionalProperties: true
+      required: [taskId, status, completed_at]
+      properties:
+        taskId: { type: string, format: uuid }
+        status: { type: string, enum: [success, failed] }
+        result:
+          type: object
+          additionalProperties: false
+          required: [segments]
+          properties:
+            segments:
+              type: array
+              items: { $ref: "#/components/schemas/CompatibilityMatchSegment" }
+        error: { $ref: "#/components/schemas/ApiError" }
+        completed_at: { type: string }
     Tag:
       type: object
       additionalProperties: false

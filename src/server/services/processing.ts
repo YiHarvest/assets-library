@@ -43,6 +43,7 @@ import { indexAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
 import { SceneDetectClient } from "@/server/scene/client";
 import { processCallbackJob } from "@/server/services/callbacks";
 import { processMutationJob } from "@/server/services/mutation-pipeline";
+import { processCompatibilityMatchJob } from "@/server/services/compatibility-match";
 import {
   failMutationTask,
   finishMutationTask,
@@ -594,6 +595,10 @@ export async function processJob(
     }
     if (job.type === "embed") {
       await processEmbeddingJob(job);
+      return;
+    }
+    if (job.type === "match") {
+      await processCompatibilityMatchJob(job);
       return;
     }
     if (["update", "publish", "retry", "delete"].includes(job.type)) {

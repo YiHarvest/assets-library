@@ -10,8 +10,10 @@ import { TaskService } from "@/server/modules/tasks/task-service";
 import { UploadService } from "@/server/modules/uploads/upload-service";
 import { UserService } from "@/server/modules/users/user-service";
 import * as assetRepository from "@/server/repositories/assets";
+import { createCompatibilityMatchTask } from "@/server/services/compatibility-match";
 import type {
   AssetQuery,
+  CompatibilityMatchRequest,
   CreateUploadTask,
   MutationContext,
   UpdateAssetTask,
@@ -95,6 +97,13 @@ export class DefaultApiV1Service implements ApiV1Service {
     private readonly services: ApiV1DomainServices =
       createApiV1DomainServices(),
   ) {}
+
+  createCompatibilityMatchTask(
+    input: CompatibilityMatchRequest,
+    publicOrigin: string,
+  ) {
+    return createCompatibilityMatchTask(input, publicOrigin);
+  }
 
   createUploadTask(input: CreateUploadTask) {
     return this.services.uploads.createUploadTask(input);

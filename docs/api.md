@@ -172,7 +172,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 
 ### `GET /api/v1/tasks/{task_id}`
 
-统一查询上传、更新、发布、重试、删除任务。任务历史默认保留 7 天。
+统一查询上传、更新、发布、重试、删除和兼容匹配任务。任务历史默认保留 7 天。
 
 ```json
 {
@@ -215,7 +215,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `task_id` | `string(uuid)` | 全局任务 ID，所有后续轮询都使用它。 |
-| `task_type` | `upload\|update\|publish\|retry\|delete` | 异步操作类型。 |
+| `task_type` | `upload\|update\|publish\|retry\|delete\|match` | 异步操作类型。 |
 | `status` | `queued\|running\|done\|failed` | 稳定总体状态。 |
 | `phase` | `TaskPhase` | 当前细粒度阶段。 |
 | `progress_percent` | `number` | 0–100 的总体进度。 |
@@ -235,7 +235,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 稳定任务状态只有 `queued`、`running`、`done`、`failed`。更细的执行位置由
 `phase` 表示：`receiving`、`waiting_for_seal`、`validating`、`splitting`、
 `persisting`、`analyzing`、`publishing`、`updating`、`retrying`、`deleting`、
-`notifying`、`finished`。
+`matching`、`notifying`、`finished`。
 
 如果提供 `callback_url`，系统在任务进入 `done` 或 `failed` 后以 `POST JSON`
 发送任务快照（不重复发送 `callback_url`），并附带 `X-Assets-Task-Id`。回调失败
@@ -321,7 +321,63 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 `visual_segments`、`key_moments` 和 `timeline`；这些分析只属于子视频，父视频
 没有详情接口和分析结果。
 
-## 7. 异步素材变更
+## 7. 旧业务分段匹配兼容
+
+### `POST /api/v1/compat/segment-match`
+
+接收旧剪辑业务的 ASR 逐词时间、字符串化 `llm.segments` 和
+`callback_url`，持久化为异步 `match` 任务。接口立即返回 `202 Accepted`：
+
+```json
+{
+  "taskId": "ff34e53d-884e-4945-a2d3-3caadfbb6e28",
+  "status": "processing"
+}
+```
+
+worker 会按 LLM 分段顺序在 ASR 文本中逐字对齐，生成秒制
+`start_time` / `end_time`，并按 ASR 原句生成 `[句内序号, 句内总数]` 形式的
+`group_id`。`high_light_word` 会转换为 `keyword`；LLM 每个 segment 上的其他
+字段会继续保留。若分段文本无法按顺序与 ASR 对齐，任务进入失败终态。
+
+每个分段都复用现有 `searchAssetsByDescription` 描述语义匹配：候选范围是所有
+已发布的公共及个人素材，Chroma 相似度必须大于 `0.45`，按相似度降序只取一个。
+命中后增加 `matched_candidate_url`、`matched_candidate_type` 和
+`matched_candidate_desc`；未达阈值时不返回这三个字段。个人素材 URL 会自动附加
+`user_id`。当前 `asset_url_list` 仅作为旧契约兼容字段接收，不限制候选范围。
+
+成功后系统向 `callback_url` 发送：
+
+```json
+{
+  "business_id": "调用方自定义字段会透传",
+  "taskId": "ff34e53d-884e-4945-a2d3-3caadfbb6e28",
+  "status": "success",
+  "result": {
+    "segments": [
+      {
+        "segment_id": 1,
+        "text": "如果能回到二十岁",
+        "keyword": "",
+        "level": 1,
+        "group_id": [1, 3],
+        "start_time": 0.32,
+        "end_time": 2.2,
+        "matched_candidate_url": "https://example.com/api/v1/media/asset-id?v=1",
+        "matched_candidate_type": "video",
+        "matched_candidate_desc": "夕阳下女性剪影"
+      }
+    ]
+  },
+  "completed_at": "2026-09-02T07:59:38.839000"
+}
+```
+
+请求中除 `asr`、`llm`、`text`、`asset_url_list`、`callback_url` 外的未知顶层
+字段会原样放入回调；这些体积较大的已知输入字段不重复回传。匹配作业失败可重试
+最多 3 次，终态回调沿用统一回调投递器，失败指数退避、最多投递 5 次。
+
+## 8. 异步素材变更
 
 以下接口均返回 `202 Accepted` 和 `TaskAccepted`，并通过响应头 `Location` 指向
 `/api/v1/tasks/{task_id}`。请求可带 `callback_url`。
@@ -368,7 +424,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 - 视频切片独立删除；删除同一父视频的最后一个切片时，同时回收父视频对象和
   父视频记录。
 
-## 8. 用户资源占用与展示列表
+## 9. 用户资源占用与展示列表
 
 这两个接口都只处理指定 `user_id` 的个人素材，不会混入 `user_id IS NULL` 的
 公共素材。路径中的 `user_id` 会先进行 URL 解码，解码后必须为 1–191 个字符。
@@ -405,7 +461,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 origin 为主机），不含 base64、密钥、签名或过期时间，可直接用于 `<img>` 和
 `<video>`。`user_id` 只限定数据范围，不提供身份认证能力。
 
-## 9. 媒体读取
+## 10. 媒体读取
 
 ### `GET /api/v1/media/{asset_id}`
 
@@ -431,7 +487,7 @@ origin 为主机），不含 base64、密钥、签名或过期时间，可直接
 直接使用用户媒体列表返回的 `thumbnail_url`，点击播放后切换到对应
 `media_url`。
 
-## 10. OpenAPI
+## 11. OpenAPI
 
 `GET /api/v1/openapi` 返回 OpenAPI 3.1 YAML。启用 WebUI 页面锁后，浏览器需先
 通过 `/lock` 建立 HttpOnly Cookie 会话；curl 或自动同步脚本可发送

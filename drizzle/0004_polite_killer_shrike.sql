@@ -1,0 +1,2 @@
+ALTER TABLE `jobs` MODIFY COLUMN `type` enum('validate','scene_detect','persist','analyze','embed','delete','cleanup','publish','update','retry','match','callback') NOT NULL;--> statement-breakpoint
+ALTER TABLE `tasks` MODIFY COLUMN `type` enum('upload','delete','publish','update','retry','match') NOT NULL;

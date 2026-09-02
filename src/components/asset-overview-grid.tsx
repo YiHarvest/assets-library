@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -14,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
+import { WebUiLink } from "@/components/webui-link";
 import { appUrl } from "@/lib/paths";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -255,12 +255,12 @@ function GalleryCard({
       </button>
       <CardContent className="space-y-3 p-4 pt-4">
         <div className="flex items-center justify-between gap-3">
-          <Link
+          <WebUiLink
             href={detailHref(asset)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
-          </Link>
+          </WebUiLink>
           <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
             {asset.review_status === "published" ? "已入库" : "待审核"}
           </span>
@@ -311,12 +311,12 @@ function ListRow({
       </button>
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex items-center gap-3">
-          <Link
+          <WebUiLink
             href={detailHref(asset)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
-          </Link>
+          </WebUiLink>
           <span className="hidden shrink-0 text-xs text-slate-400 dark:text-slate-500 sm:inline">
             {asset.media_type === "image" ? "图片" : "视频"}
           </span>
@@ -389,12 +389,12 @@ function PreviewDialog({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Link
+            <WebUiLink
               href={detailHref(asset)}
               className="rounded-full bg-white/15 px-3 py-2 text-sm hover:bg-white/25"
             >
               查看详情
-            </Link>
+            </WebUiLink>
             <Button
               variant="ghost"
               size="sm"

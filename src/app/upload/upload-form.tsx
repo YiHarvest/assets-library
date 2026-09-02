@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
@@ -14,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { WebUiLink } from "@/components/webui-link";
 import { appUrl } from "@/lib/paths";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -462,14 +462,14 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                         </div>
                       )}
                       {item.assetIds[0] && (
-                        <Link
+                        <WebUiLink
                           href={appUrl(`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
                             ? `查看 ${item.assetIds.length} 个分镜素材`
                             : "查看素材详情"}
-                        </Link>
+                        </WebUiLink>
                       )}
                     </div>
                   </li>

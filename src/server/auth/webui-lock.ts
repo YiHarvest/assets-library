@@ -31,7 +31,29 @@ export function readWebUiLockConfig(
 }
 
 export function webUiCookiePath(env: WebUiLockEnvironment = process.env) {
-  return normalizeBasePath(env.NEXT_PUBLIC_BASE_PATH) || "/";
+  void env;
+  /*
+   * 页面前缀由 rewrite 提供，并不是 Next.js basePath。客户端路由/RSC 请求可能
+   * 使用重写前的带前缀路径，也可能使用重写后的根路径；Cookie 若只绑定公开前缀，
+   * 后一种请求会丢失登录态并被再次送回密钥页。签名会话因此覆盖同源根路径。
+   */
+  return "/";
+}
+
+export function legacyWebUiCookieDeletion(
+  env: WebUiLockEnvironment = process.env,
+  secure = env.APP_MODE === "prd",
+) {
+  const legacyPath = normalizeBasePath(env.NEXT_PUBLIC_BASE_PATH);
+  if (!legacyPath) return null;
+  return [
+    `${WEBUI_LOCK_COOKIE_NAME}=`,
+    "HttpOnly",
+    ...(secure ? ["Secure"] : []),
+    "SameSite=Lax",
+    "Max-Age=0",
+    `Path=${legacyPath}`,
+  ].join("; ");
 }
 
 export function stripAppBasePath(
@@ -76,9 +98,8 @@ export function safeWebUiReturnPath(
   const internalPath = stripAppBasePath(url.pathname, env);
   if (!isProtectedWebUiPath(internalPath)) return fallback;
 
-  // A session cookie is intentionally scoped to basePath. Normalize legacy or
-  // hand-authored return paths such as `/` and `/upload` into that same scope,
-  // otherwise a successful unlock immediately loses its cookie on redirect.
+  // 页面地址仍统一规范为公开前缀，确保解锁后由外部入口访问；会话 Cookie 则覆盖
+  // 根路径，从而兼容 rewrite 前后的两种请求路径。
   const alreadyPrefixed =
     !basePath ||
     url.pathname === basePath ||

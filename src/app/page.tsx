@@ -1,4 +1,3 @@
-import Link from "next/link";
 import {
   ArrowRight,
   ChevronLeft,
@@ -14,6 +13,7 @@ import { AssetScopeSwitcher } from "@/components/asset-scope-switcher";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { WebUiLink } from "@/components/webui-link";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
 import { detectSearchInputMode } from "@/server/search/relevance";
@@ -162,9 +162,9 @@ export default async function OverviewPage({
           </p>
         </div>
         <Button asChild>
-          <Link href={uploadHref}>
+          <WebUiLink href={uploadHref}>
             添加新素材 <ArrowRight className="size-4" />
-          </Link>
+          </WebUiLink>
         </Button>
       </section>
 
@@ -184,20 +184,20 @@ export default async function OverviewPage({
             variant={view === "published" ? "default" : "ghost"}
             size="sm"
           >
-            <Link href={overviewHref({ ...common, view: "published" })}>
+            <WebUiLink href={overviewHref({ ...common, view: "published" })}>
               已入库
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
             variant={view === "pending" ? "default" : "ghost"}
             size="sm"
           >
-            <Link
+            <WebUiLink
               href={overviewHref({ ...common, view: "pending", tag: "" })}
             >
               待入库
-            </Link>
+            </WebUiLink>
           </Button>
         </nav>
 
@@ -229,9 +229,9 @@ export default async function OverviewPage({
             </Button>
             {tagQuery && (
               <Button asChild variant="ghost" size="sm" aria-label="清除搜索">
-                <Link href={overviewHref({ ...common, tag: "" })}>
+                <WebUiLink href={overviewHref({ ...common, tag: "" })}>
                   <X className="size-4" />
-                </Link>
+                </WebUiLink>
               </Button>
             )}
           </form>
@@ -250,9 +250,9 @@ export default async function OverviewPage({
             size="sm"
             aria-label="画廊视图"
           >
-            <Link href={overviewHref({ ...common, layout: "gallery" })}>
+            <WebUiLink href={overviewHref({ ...common, layout: "gallery" })}>
               <LayoutGrid className="size-3.5" />
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
@@ -260,9 +260,9 @@ export default async function OverviewPage({
             size="sm"
             aria-label="列表视图"
           >
-            <Link href={overviewHref({ ...common, layout: "list" })}>
+            <WebUiLink href={overviewHref({ ...common, layout: "list" })}>
               <List className="size-3.5" />
-            </Link>
+            </WebUiLink>
           </Button>
         </div>
       </div>
@@ -310,9 +310,9 @@ export default async function OverviewPage({
                 : "新上传素材完成处理后会显示在对应视图。"}
             </p>
             <Button asChild className="mt-6">
-              <Link href={tagQuery ? overviewHref({ ...common, tag: "" }) : uploadHref}>
+              <WebUiLink href={tagQuery ? overviewHref({ ...common, tag: "" }) : uploadHref}>
                 {tagQuery ? "清除搜索条件" : "开始上传"}
-              </Link>
+              </WebUiLink>
             </Button>
           </CardContent>
         </Card>
@@ -331,7 +331,7 @@ export default async function OverviewPage({
             size="sm"
             className={history.length === 0 ? "pointer-events-none opacity-50" : ""}
           >
-            <Link
+            <WebUiLink
               href={overviewHref({
                 ...common,
                 cursor: history.at(-1) ?? null,
@@ -340,7 +340,7 @@ export default async function OverviewPage({
               aria-disabled={history.length === 0}
             >
               <ChevronLeft className="size-4" /> 上一页
-            </Link>
+            </WebUiLink>
           </Button>
           <Button
             asChild
@@ -348,7 +348,7 @@ export default async function OverviewPage({
             size="sm"
             className={!page.has_more ? "pointer-events-none opacity-50" : ""}
           >
-            <Link
+            <WebUiLink
               href={overviewHref({
                 ...common,
                 cursor: page.next_cursor,
@@ -357,7 +357,7 @@ export default async function OverviewPage({
               aria-disabled={!page.has_more}
             >
               下一页 <ChevronRight className="size-4" />
-            </Link>
+            </WebUiLink>
           </Button>
         </nav>
       )}

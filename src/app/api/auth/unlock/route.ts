@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   createWebUiSession,
+  legacyWebUiCookieDeletion,
   normalizeBasePath,
   readWebUiLockConfig,
   safeWebUiReturnPath,
@@ -81,6 +82,10 @@ export async function POST(request: Request) {
     maxAge: WEBUI_LOCK_SESSION_SECONDS,
     path: webUiCookiePath(),
   });
+  // 清掉旧版本写在公开前缀下的同名 Cookie，避免浏览器同时发送两个值，
+  // 中间件误读到旧会话后再次跳转密钥页。
+  const legacyCookie = legacyWebUiCookieDeletion(process.env, origin.isSecure);
+  if (legacyCookie) response.headers.append("set-cookie", legacyCookie);
   response.headers.set("cache-control", "no-store");
   return response;
 }

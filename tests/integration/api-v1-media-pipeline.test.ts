@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { eq } from "drizzle-orm";
-import type { Pool } from "mysql2/promise";
 import sharp from "sharp";
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -21,6 +21,10 @@ import type {
   ObjectStorage,
   StoreFileInput,
 } from "@/server/storage/object-storage";
+import {
+  bindIntegrationDatabaseEnvironment,
+  truncateIntegrationTables,
+} from "../helpers/integration-database";
 
 const execFileAsync = promisify(execFile);
 const semanticSearchEnabledMock = vi.hoisted(() => vi.fn(() => false));
@@ -41,51 +45,12 @@ try {
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 const mysqlPipeline = testDatabaseUrl ? describe : describe.skip;
-const applicationTables = [
-  "analysis_results",
-  "asset_tag_rejections",
-  "asset_tags",
-  "assets",
-  "callback_deliveries",
-  "idempotency_requests",
-  "jobs",
-  "media_objects",
-  "outbox_events",
-  "search_index_state",
-  "tags",
-  "task_item_segments",
-  "task_items",
-  "tasks",
-  "users",
-  "video_sources",
-] as const;
-
 type DatabaseModule = typeof import("@/server/db");
 type Repository = typeof import("@/server/repositories/assets");
 type Schema = typeof import("@/server/db/schema");
 type Processing = typeof import("@/server/services/processing");
 type ApiService = typeof import("@/server/api/v1/default-service");
 type SceneClient = import("@/server/scene/client").SceneDetectClient;
-
-function assertDedicatedTestDatabase(url: string) {
-  const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
-  if (!name.endsWith("_test")) {
-    throw new Error("TEST_DATABASE_URL 必须指向以 _test 结尾的专用测试库。");
-  }
-}
-
-async function truncateApplicationTables(pool: Pool) {
-  const connection = await pool.getConnection();
-  try {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 0");
-    for (const table of applicationTables) {
-      await connection.query(`TRUNCATE TABLE \`${table}\``);
-    }
-  } finally {
-    await connection.query("SET FOREIGN_KEY_CHECKS = 1");
-    connection.release();
-  }
-}
 
 function body(bytes: Uint8Array) {
   return new ReadableStream<Uint8Array>({
@@ -273,9 +238,9 @@ mysqlPipeline("API v1 完整媒体管线", () => {
 
   beforeAll(async () => {
     if (!testDatabaseUrl) return;
-    assertDedicatedTestDatabase(testDatabaseUrl);
+    // 必须先同步模式库名，确保后续动态导入的数据库单例仍绑定测试库。
+    bindIntegrationDatabaseEnvironment(testDatabaseUrl);
     temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "assets-pipeline-"));
-    process.env.DATABASE_URL = testDatabaseUrl;
     process.env.MEDIA_ROOT = path.join(temporaryRoot, "media");
     process.env.SCENE_DETECT_WORKSPACE_ROOT = path.join(temporaryRoot, "scenes");
     process.env.SCENE_DETECT_ENABLED = "true";
@@ -301,7 +266,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
 
   beforeEach(async () => {
     storage = new MemoryObjectStorage();
-    await truncateApplicationTables(database.pool);
+    await truncateIntegrationTables(database.pool);
     await fs.rm(process.env.MEDIA_ROOT!, { recursive: true, force: true });
     await fs.rm(process.env.SCENE_DETECT_WORKSPACE_ROOT!, {
       recursive: true,
@@ -310,9 +275,29 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     vi.clearAllMocks();
   });
 
+  afterEach(async () => {
+    // 断言失败时仍回收数据库和临时媒体，避免测试夹具泄漏到后续 WebUI。
+    if (database?.pool) await truncateIntegrationTables(database.pool);
+    if (process.env.MEDIA_ROOT) {
+      await fs.rm(process.env.MEDIA_ROOT, { recursive: true, force: true });
+    }
+    if (process.env.SCENE_DETECT_WORKSPACE_ROOT) {
+      await fs.rm(process.env.SCENE_DETECT_WORKSPACE_ROOT, {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
   afterAll(async () => {
-    if (database?.pool) await database.pool.end();
-    if (temporaryRoot) await fs.rm(temporaryRoot, { recursive: true, force: true });
+    try {
+      if (database?.pool) await truncateIntegrationTables(database.pool);
+    } finally {
+      if (database?.pool) await database.pool.end();
+      if (temporaryRoot) {
+        await fs.rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
   });
 
   async function createAndSeal(filename: string, bytes: Buffer) {

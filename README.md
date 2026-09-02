@@ -131,7 +131,7 @@ PRD_INTERNAL_SERVICE_HOST=
 DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
 DEV_DATABASE_NAME=assets_library_dev_test
 PRD_DATABASE_NAME=assets_library
-TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_dev_test
+TEST_DATABASE_URL=mysql://<user>:<url-encoded-password>@<INTERNAL_SERVER_IP>:<MYSQL_PORT>/assets_library_test
 ```
 
 `DATABASE_URL` 的主机和认证信息由两种模式共用，库名会被模式专用配置强制替换：dev 使用
@@ -333,7 +333,7 @@ pnpm test:unit
 uv run --project scene-detect-service pytest -q
 ```
 
-数据库集成测试和 E2E 测试会清空 `TEST_DATABASE_URL` 所指 `_test` 库中的业务表：
+数据库集成测试会清空 `TEST_DATABASE_URL` 所指独立 `_test` 库中的业务表：
 
 ```bash
 pnpm test:integration
@@ -341,8 +341,9 @@ pnpm test:e2e
 pnpm build
 ```
 
-测试入口会拒绝库名不以 `_test` 结尾的连接，但它仍会删除测试库数据。当前 dev 和测试若
-共用 `assets_library_dev_test`，运行集成/E2E 前应确认其中没有需要保留的开发数据。上述测试
+测试入口会拒绝库名不以 `_test` 结尾的连接，也会拒绝与 WebUI
+`DATABASE_URL` 指向同一数据库。该测试库必须独立创建并执行 migration；每个用例前后和
+测试套件退出时都会清理业务表，测试进程被强制终止时则由下一次运行的前置清理兜底。上述测试
 不会、也不允许操作正式 `assets_library`。
 
 ## 部署

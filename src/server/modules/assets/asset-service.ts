@@ -155,9 +155,21 @@ export class AssetService {
       ...(asset.searchScore === undefined
         ? {}
         : { search_score: asset.searchScore }),
+      ...(asset.keywordScore === undefined
+        ? {}
+        : { keyword_score: asset.keywordScore }),
       ...(asset.semanticScore === undefined
         ? {}
         : { semantic_score: asset.semanticScore }),
+      ...(asset.matchType === undefined
+        ? {}
+        : { match_type: asset.matchType }),
+      ...(asset.matchedTerms === undefined
+        ? {}
+        : { matched_terms: asset.matchedTerms }),
+      ...(asset.matchedCategories === undefined
+        ? {}
+        : { matched_categories: asset.matchedCategories }),
     } satisfies ApiV1AssetSummary;
   }
 
@@ -194,6 +206,7 @@ export class AssetService {
       tag_statistics: input.include_tag_statistics
         ? (result.tagStatistics ?? null)
         : null,
+      search: result.search ?? null,
     };
   }
 

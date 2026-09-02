@@ -204,10 +204,14 @@ function Diagnostics({ asset }: { asset: ApiV1AssetSummary }) {
   if (asset.search_score === undefined) return null;
   return (
     <div className="flex flex-wrap gap-2 border-t border-black/[0.06] pt-3 text-xs text-slate-500 dark:border-white/[0.10] dark:text-slate-400">
-      <span>排序分：{asset.search_score.toFixed(1)}</span>
+      <span>相关度：{asset.search_score.toFixed(3)}</span>
+      {asset.keyword_score !== undefined && (
+        <span>关键词分：{asset.keyword_score.toFixed(3)}</span>
+      )}
       {asset.semantic_score !== undefined && (
         <span>语义分：{asset.semantic_score.toFixed(3)}</span>
       )}
+      {asset.match_type !== undefined && <span>匹配：{asset.match_type}</span>}
     </div>
   );
 }

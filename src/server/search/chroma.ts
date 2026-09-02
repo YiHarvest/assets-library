@@ -4,6 +4,11 @@ import type { AnalysisResult } from "@/shared/contracts";
 type ChromaCollection = { id: string; name: string };
 const semanticSimilarityThreshold = 0.45;
 
+export interface SearchAnalysisOptions {
+  /** 调用方需要最终层诊断时可传 0，默认仍保持历史阈值。 */
+  minimumSimilarity?: number;
+}
+
 function chromaBaseUrl() {
   return loadConfig().CHROMA_URL.replace(/\/$/, "");
 }
@@ -131,6 +136,7 @@ export async function searchAnalysis(
   query: string,
   limit: number,
   assetIds?: string[],
+  options: SearchAnalysisOptions = {},
 ) {
   if (!semanticSearchEnabled()) return new Map<string, number>();
   if (assetIds && assetIds.length === 0) return new Map<string, number>();
@@ -149,13 +155,21 @@ export async function searchAnalysis(
       ...(assetIds ? { where: { assetId: { $in: assetIds } } } : {}),
     }),
   });
+  const minimumSimilarity =
+    Math.min(
+      1,
+      Math.max(0, options.minimumSimilarity ?? semanticSimilarityThreshold),
+    );
+  const allowedAssetIds = assetIds ? new Set(assetIds) : null;
   const scores = new Map<string, number>();
   for (const [index, metadata] of (result.metadatas?.[0] ?? []).entries()) {
     const assetId = metadata?.assetId;
     const distance = result.distances?.[0]?.[index];
     if (!assetId || distance === null || distance === undefined) continue;
-    const similarity = 1 / (1 + distance);
-    if (similarity <= semanticSimilarityThreshold) continue;
+    // 即使向量库错误地忽略了 where，也不能让范围外素材进入上层召回。
+    if (allowedAssetIds && !allowedAssetIds.has(assetId)) continue;
+    const similarity = Math.max(0, Math.min(1, 1 / (1 + distance)));
+    if (similarity <= minimumSimilarity) continue;
     scores.set(
       assetId,
       Math.max(scores.get(assetId) ?? 0, similarity),

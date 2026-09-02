@@ -746,7 +746,10 @@ components:
       type: object
       additionalProperties: true
       required:
-        [segment_id, text, keyword, level, group_id, start_time, end_time]
+        [segment_id, text, keyword, level, group_id, start_time, end_time,
+         matched_candidate_url, matched_candidate_type, matched_candidate_desc,
+         matched_candidate_score, matched_candidate_reason,
+         matched_candidate_message]
       properties:
         segment_id: { type: integer, minimum: 1 }
         text: { type: string }
@@ -761,9 +764,35 @@ components:
             - { type: integer, minimum: 1 }
         start_time: { type: number, minimum: 0 }
         end_time: { type: number, minimum: 0 }
-        matched_candidate_url: { type: string, format: uri }
-        matched_candidate_type: { $ref: "#/components/schemas/MediaType" }
-        matched_candidate_desc: { type: string }
+        matched_candidate_url:
+          oneOf:
+            - { type: string, format: uri }
+            - { type: "null" }
+        matched_candidate_type:
+          oneOf:
+            - { $ref: "#/components/schemas/MediaType" }
+            - { type: "null" }
+        matched_candidate_desc:
+          oneOf:
+            - { type: string }
+            - { type: "null" }
+        matched_candidate_score:
+          description: 命中分数；未命中但存在低分候选时为阈值过滤前最高分。
+          oneOf:
+            - { type: number, minimum: 0, maximum: 1 }
+            - { type: "null" }
+        matched_candidate_reason:
+          description: 命中时为 null；未命中时说明原因。
+          oneOf:
+            - type: string
+              enum: [no_candidates, below_threshold, semantic_unavailable,
+                     fallback_exhausted]
+            - { type: "null" }
+        matched_candidate_message:
+          description: 命中时为 null；未命中时为可直接展示的说明。
+          oneOf:
+            - { type: string }
+            - { type: "null" }
 
     CompatibilityMatchCallback:
       type: object
@@ -1159,8 +1188,65 @@ components:
           description: 已带必要 user_id 作用域的媒体读取相对 URL。
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-        search_score: { type: number }
-        semantic_score: { type: number, minimum: 0, maximum: 1 }
+        search_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 最终排序分；仅检索结果出现，且仅超过 search.threshold 的素材会返回。
+        keyword_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 关键词匹配分；语义-only 结果可以省略。
+        semantic_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 语义相似度；关键词-only 结果可以省略。
+        match_type:
+          type: string
+          enum: [exact, alias, prefix, contains, typo, semantic, hybrid]
+          description: 生成最终分数的主要匹配方式。
+        matched_terms:
+          type: array
+          items: { type: string }
+          description: 实际命中的规范化查询词。
+        matched_categories:
+          type: array
+          items: { type: string }
+          description: 命中标签所属分类，例如 scene、style 或 form。
+    AssetSearchMeta:
+      type: object
+      additionalProperties: false
+      required: [mode, threshold, max_score, reason, message]
+      description: 本次检索的阈值和结果说明；普通浏览时响应中的 search 为 null。
+      properties:
+        mode:
+          type: string
+          enum: [keyword, semantic, hybrid]
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 本次最终展示阈值；结果必须严格大于该值。
+        max_score:
+          description: 阈值过滤前的最高候选分；没有候选或语义服务不可用时为 null。
+          oneOf:
+            - { type: number, minimum: 0, maximum: 1 }
+            - { type: "null" }
+        reason:
+          type: string
+          enum:
+            - matched
+            - no_candidates
+            - below_threshold
+            - semantic_unavailable
+            - fallback_exhausted
+        message:
+          description: matched 时为 null；空结果或服务不可用时提供可直接展示的说明。
+          oneOf:
+            - { type: string }
+            - { type: "null" }
     TagStatistic:
       type: object
       required: [category, value, asset_count, asset_share]
@@ -1200,8 +1286,8 @@ components:
     AssetQueryResponse:
       type: object
       additionalProperties: false
-      description: 游标分页结果；无下一页时 next_cursor 为 null。
-      required: [items, next_cursor, has_more, tag_statistics]
+      description: 游标分页或语义 top-k 结果；无下一页时 next_cursor 为 null。
+      required: [items, next_cursor, has_more, tag_statistics, search]
       properties:
         items:
           type: array
@@ -1212,6 +1298,11 @@ components:
         tag_statistics:
           oneOf:
             - { $ref: "#/components/schemas/TagStatistics" }
+            - { type: "null" }
+        search:
+          description: 检索诊断和空结果消息；未提供 query/keywords 的普通浏览为 null。
+          oneOf:
+            - { $ref: "#/components/schemas/AssetSearchMeta" }
             - { type: "null" }
 
     UserStorageUsageItem:

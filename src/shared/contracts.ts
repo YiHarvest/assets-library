@@ -121,7 +121,11 @@ export interface AssetSummary {
   mediaUrl: string;
   createdAt: string;
   searchScore?: number;
+  keywordScore?: number;
   semanticScore?: number;
+  matchType?: "exact" | "alias" | "prefix" | "contains" | "typo" | "semantic" | "hybrid";
+  matchedTerms?: string[];
+  matchedCategories?: string[];
 }
 
 export interface AssetDetail extends AssetSummary {
@@ -485,10 +489,37 @@ export const apiV1AssetSummarySchema = z.object({
   media_url: z.string(),
   created_at: apiDateTimeSchema,
   updated_at: apiDateTimeSchema,
-  search_score: z.number().optional(),
+  search_score: z.number().min(0).max(1).optional(),
+  keyword_score: z.number().min(0).max(1).optional(),
   semantic_score: z.number().min(0).max(1).optional(),
+  match_type: z
+    .enum(["exact", "alias", "prefix", "contains", "typo", "semantic", "hybrid"])
+    .optional(),
+  matched_terms: z.array(z.string()).optional(),
+  matched_categories: z.array(z.string()).optional(),
 });
 export type ApiV1AssetSummary = z.infer<typeof apiV1AssetSummarySchema>;
+
+export const assetSearchModeSchema = z.enum(["keyword", "semantic", "hybrid"]);
+export type AssetSearchMode = z.infer<typeof assetSearchModeSchema>;
+
+export const assetSearchReasonSchema = z.enum([
+  "matched",
+  "no_candidates",
+  "below_threshold",
+  "semantic_unavailable",
+  "fallback_exhausted",
+]);
+export type AssetSearchReason = z.infer<typeof assetSearchReasonSchema>;
+
+export const assetSearchMetaSchema = z.object({
+  mode: assetSearchModeSchema,
+  threshold: z.number().min(0).max(1),
+  max_score: z.number().min(0).max(1).nullable(),
+  reason: assetSearchReasonSchema,
+  message: z.string().nullable(),
+});
+export type AssetSearchMeta = z.infer<typeof assetSearchMetaSchema>;
 
 export const tagStatisticSchema = z.object({
   category: z.string(),
@@ -519,6 +550,7 @@ export const assetQueryResponseSchema = z.object({
   next_cursor: z.string().nullable(),
   has_more: z.boolean(),
   tag_statistics: tagStatisticsSchema.nullable(),
+  search: assetSearchMetaSchema.nullable(),
 });
 export type AssetQueryResponse = z.infer<typeof assetQueryResponseSchema>;
 

@@ -109,12 +109,13 @@ function fakeService() {
     ),
     sealUploadTask: vi.fn(async () => task()),
     getTask: vi.fn(async () => task()),
-    queryAssets: vi.fn(async () => ({
-      items: [],
-      next_cursor: null,
-      has_more: false,
-      tag_statistics: null,
-    })),
+  queryAssets: vi.fn(async () => ({
+    items: [],
+    next_cursor: null,
+    has_more: false,
+    tag_statistics: null,
+    search: null,
+  })),
     getUserStorageUsage: vi.fn(async (userId: string) => ({
       user_id: userId,
       total_files: 2,

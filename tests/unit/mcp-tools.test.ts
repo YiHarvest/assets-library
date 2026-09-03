@@ -190,7 +190,7 @@ describe("MCP tool registry", () => {
     await client.close();
   });
 
-  it("keeps public AI searches inside the MCP public authorization scope", async () => {
+  it("excludes the current uploader from MCP public searches", async () => {
     const queryAssets = vi.fn(async () => ({
       items: [],
       next_cursor: null,
@@ -210,7 +210,7 @@ describe("MCP tool registry", () => {
       expect.objectContaining({
         keywords: ["AI"],
         filter: expect.objectContaining({
-          user_scope: { mode: "public" },
+          user_scope: { mode: "exclude_user", user_id: "user_mcp_test" },
         }),
       }),
     );
@@ -352,7 +352,6 @@ describe("MCP tool registry", () => {
           { url: "https://cdn.example.com/a.png", filename: "a.png" },
           { url: "https://cdn.example.com/b.mp4", filename: "b.mp4" },
         ],
-        auto_publish: true,
       },
     });
 
@@ -360,7 +359,6 @@ describe("MCP tool registry", () => {
     expect(createUploadTask).toHaveBeenCalledWith({
       user_id: "user_mcp_test",
       callback_url: null,
-      auto_publish: true,
       items: [
         { filename: "a.png", size_bytes: 3, content_type: null },
         { filename: "b.mp4", size_bytes: 3, content_type: null },

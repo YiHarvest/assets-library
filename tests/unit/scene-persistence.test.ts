@@ -85,10 +85,14 @@ function fakeStorage() {
     };
   });
   const downloadToFile = vi.fn(async (key: string) => headObject(key));
+  const copyObject = vi.fn(async () => {
+    throw new Error("not used");
+  });
   return {
     objects,
     storage: {
       storeFile,
+      copyObject,
       headObject,
       getObject,
       downloadToFile,

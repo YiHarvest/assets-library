@@ -4,18 +4,19 @@
 
 - 核对环境：目标 Metabase 数据源（数据库 ID 以部署配置为准）
 - 数据库：MySQL 8.4
-- 范围：16 张应用表、1 张 Drizzle 迁移表、2 个报表视图、195 个物理字段、21 条外键
+- 范围：17 张当前应用表、1 张 Drizzle 迁移表、5 个运行时统一视图、2 个报表视图
 - 结构来源：生产库 `information_schema` 与 [`src/server/db/schema.ts`](../../../src/server/db/schema.ts)
 
-> 所有业务时间均按 UTC 写入 MySQL 的 `datetime(3)` 字段。Metabase 以 `Asia/Shanghai` 展示时，需要注意查询条件中的时区转换。`user_id IS NULL` 通常表示公共素材或公共作用域。
+> 所有业务时间均按 UTC 写入 MySQL 的 `datetime(3)` 字段。Metabase 以 `Asia/Shanghai` 展示时，需要注意查询条件中的时区转换。公共素材存放在 `public_assets`，私人素材存放在 `private_assets`。
 
 ## 表目录
 
 | 分类 | 表 | 用途 |
 | --- | --- | --- |
 | 用户 | `users` | 应用观察到的用户 ID、活动时间及预留资料 |
-| 素材核心 | `assets` | 可浏览、检索和发布的图片或视频切片素材 |
-| 素材核心 | `analysis_results` | 每个素材的模型分析结果 |
+| 素材核心 | `public_assets` | 公共审核、浏览和检索的图片或视频切片 |
+| 素材核心 | `private_assets` | 用户个人图片或视频切片，与公共副本相互独立 |
+| 素材核心 | `analysis_results` | 公私素材各自的模型分析结果 |
 | 素材核心 | `tags` | 规范化标签字典 |
 | 素材核心 | `asset_tags` | 素材与标签的多对多关系 |
 | 素材核心 | `asset_tag_rejections` | 人工拒绝过的模型标签，防止重新补回 |
@@ -38,7 +39,7 @@
 ```mermaid
 flowchart LR
   users -. user_id 作用域 .-> tasks
-  users -. user_id 作用域 .-> assets
+  users -. user_id 作用域 .-> private_assets
   users -. user_id 作用域 .-> video_sources
   tasks --> task_items
   tasks --> jobs
@@ -48,15 +49,23 @@ flowchart LR
   task_items --> task_item_segments
   video_sources --> task_item_segments
   media_objects --> video_sources
-  task_item_segments --> assets
-  video_sources --> assets
-  media_objects --> assets
-  assets --> analysis_results
-  assets --> asset_tags
+  task_item_segments --> public_assets
+  task_item_segments --> private_assets
+  video_sources --> public_assets
+  video_sources --> private_assets
+  media_objects --> public_assets
+  media_objects --> private_assets
+  public_assets --> analysis_results
+  private_assets --> analysis_results
+  public_assets --> asset_tags
+  private_assets --> asset_tags
   tags --> asset_tags
-  assets --> asset_tag_rejections
-  assets --> jobs
-  assets --> search_index_state
+  public_assets --> asset_tag_rejections
+  private_assets --> asset_tag_rejections
+  public_assets --> jobs
+  private_assets --> jobs
+  public_assets --> search_index_state
+  private_assets --> search_index_state
 ```
 
 删除规则分为两类：任务明细等临时追溯关系多使用 `SET NULL`，保留素材本体；强归属明细多使用 `CASCADE`；素材所引用的长期媒体对象使用 `RESTRICT`，避免误删真实文件。
@@ -80,48 +89,37 @@ flowchart LR
 | 媒体对象状态 | `deleting` | 正在删除对象 |
 | 媒体对象状态 | `deleted` | 对象已删除 |
 
-## 1. `assets` — 素材主表
+## 1. `public_assets` / `private_assets` — 素材主表
 
-可检索素材的核心实体。图片一条记录对应一个图片；视频素材只保存分镜后的子视频，完整父视频在 `video_sources`。`user_id` 为空表示公共素材。
+两个表共享任务来源、媒体对象、视频切片、素材信息、处理状态和时间字段。图片一条记录对应一个图片；视频只保存分镜后的切片，完整父视频在 `video_sources`。公私副本使用不同 UUID 和不同媒体对象。
 
-重要约束：主键 `id`；`task_item_segment_id` 唯一；`video_source_id + segment_index` 唯一；媒体对象删除受 `RESTRICT` 保护。
+| 表/字段 | 约束/默认 | 含义 |
+| --- | --- | --- |
+| `public_assets.id` | UUID PK | 公共素材 ID。 |
+| `public_assets.uploader_user_id` | 可空 | 私人上传产生的公共副本记录上传者；公共直传为空，仅用于列表排除本人。 |
+| `public_assets.review_status` | 默认 `pending_review` | 公共审核状态：`pending_review/published/deleted`。 |
+| `private_assets.id` | UUID PK | 私人素材 ID。 |
+| `private_assets.public_asset_id` | UNIQUE，FK → `public_assets.id`，删除公共副本时置空 | 初次上传时的配对公共副本；后续编辑、标签、重试和删除不联动。 |
+| `private_assets.user_id` | 非空 | 私人素材所有者。 |
+| `task_id/task_item_id/task_item_segment_id/video_source_id` | 可空 FK，删除来源时置空 | 创建任务与视频切片追溯；两个素材表分别保证切片唯一。 |
+| `media_object_id/thumbnail_media_object_id` | 可空 FK，删除受限 | 本侧独立的主体和缩略图对象。 |
+| `segment_index/segment_start_ms/segment_end_ms` | 可空 | 视频切片序号和时间范围。 |
+| `name/description/media_type/original_filename/original_path/mime_type/size_bytes` | 非空 | 素材展示与文件信息。 |
+| `processing_status` | 默认 `queued` | `queued/validating/analyzing/completed/failed`。 |
+| `failure_code/failure_message` | 可空 | 处理失败详情。 |
+| `created_at/updated_at/deleted_at` | UTC `datetime(3)` | 生命周期时间。 |
 
-| 字段 | 类型 | 约束/默认 | 含义 |
-| --- | --- | --- | --- |
-| `id` | `varchar(36)` | PK，非空 | 素材 UUID，业务接口中的 `asset_id`。 |
-| `user_id` | `varchar(191)` | 可空 | 素材所属用户；为空表示公共素材。 |
-| `task_id` | `varchar(36)` | FK → `tasks.id`，可空，删除任务时置空 | 创建或最近操作该素材的任务，用于追溯。 |
-| `task_item_id` | `varchar(36)` | FK → `task_items.id`，可空，删除明细时置空 | 素材来源的上传文件明细。 |
-| `task_item_segment_id` | `varchar(36)` | FK → `task_item_segments.id`，可空、唯一，删除切片时置空 | 视频素材来源的分镜切片；图片通常为空。 |
-| `video_source_id` | `varchar(36)` | FK → `video_sources.id`，可空，删除父视频时置空 | 视频子素材所属的完整父视频；图片为空。 |
-| `media_object_id` | `varchar(36)` | FK → `media_objects.id`，可空，删除受限 | 素材主体文件对应的长期媒体对象。 |
-| `segment_index` | `int unsigned` | 可空 | 子视频在父视频中的从零开始切片序号；图片为空。 |
-| `segment_start_ms` | `bigint unsigned` | 可空 | 子视频在父视频中的开始时间，单位毫秒。 |
-| `segment_end_ms` | `bigint unsigned` | 可空 | 子视频在父视频中的结束时间，单位毫秒。 |
-| `name` | `varchar(255)` | 非空 | 素材展示名称，可由模型生成或人工修改。 |
-| `description` | `text` | 非空 | 素材内容描述，用于展示和文本/语义检索。 |
-| `media_type` | `enum('image','video')` | 非空 | 素材类型：图片或视频切片。 |
-| `original_filename` | `varchar(255)` | 非空 | 用户上传时的原始文件名。 |
-| `original_path` | `varchar(1024)` | 非空 | 原始文件或生成切片的来源路径，用于处理追溯。 |
-| `mime_type` | `varchar(255)` | 非空 | 实际媒体 MIME 类型，例如 `image/png`、`video/mp4`。 |
-| `size_bytes` | `bigint unsigned` | 非空 | 素材主体文件大小，单位字节。 |
-| `direct_publish` | `tinyint(1)` | 非空，默认 `0` | 是否采用直接发布流程；`1` 表示无需常规人工审核步骤。 |
-| `processing_status` | `enum('queued','validating','analyzing','completed','failed')` | 非空，默认 `queued` | 素材处理链状态。 |
-| `review_status` | `enum('pending_review','published','deleted')` | 非空，默认 `pending_review` | 人工审核/发布状态。 |
-| `failure_code` | `varchar(64)` | 可空 | 处理失败的稳定错误码；成功时为空。 |
-| `failure_message` | `text` | 可空 | 面向排查的失败说明；成功时为空。 |
-| `created_at` | `datetime(3)` | 非空 | 素材创建时间（UTC）。 |
-| `updated_at` | `datetime(3)` | 非空 | 素材最后更新时间（UTC）。 |
-| `deleted_at` | `datetime(3)` | 可空 | 逻辑删除时间；未删除时为空。 |
-| `thumbnail_media_object_id` | `varchar(36)` | FK → `media_objects.id`，可空，删除受限 | 视频子素材首帧缩略图对象；图片直接使用原媒体，通常为空。 |
+`private_assets` 不保存审核字段，报表和统一视图将活跃私人素材映射为 `review_status='published'`。
 
 ## 2. `analysis_results` — 模型分析结果
 
-每个素材最多一条分析结果，保存模型协议、模型名称和完整 JSON 输出。素材删除时级联删除。
+每个公私素材最多一条分析结果，保存模型协议、模型名称和完整 JSON 输出。素材删除时级联删除。
 
 | 字段 | 类型 | 约束/默认 | 含义 |
 | --- | --- | --- | --- |
-| `asset_id` | `varchar(36)` | PK、FK → `assets.id`，非空 | 被分析的素材 UUID，同时保证一素材一结果。 |
+| `id` | `varchar(36)` | PK、非空 | 分析记录 UUID。 |
+| `public_asset_id` | `varchar(36)` | 可空、唯一，FK → `public_assets.id` | 公共素材目标。 |
+| `private_asset_id` | `varchar(36)` | 可空、唯一，FK → `private_assets.id` | 私人素材目标。 |
 | `schema_version` | `int unsigned` | 非空，默认 `1` | `result_json` 的结构版本，用于兼容后续格式升级。 |
 | `result_json` | `json` | 非空 | 模型的结构化分析结果；图片通常含描述/OCR，视频通常含分段、关键时刻和时间轴。 |
 | `model_protocol` | `varchar(64)` | 非空 | 调用模型所使用的协议或适配器标识。 |
@@ -142,22 +140,24 @@ flowchart LR
 
 ## 4. `asset_tags` — 素材标签关系
 
-连接素材和标签的多对多关系。复合主键 `asset_id + tag_id` 防止重复关联；任一端删除时关系级联删除。
+连接素材和标签的多对多关系。独立 `id` 为主键，公共/私人目标列必须恰有一个非空，各目标与 `tag_id` 分别唯一；任一端删除时级联删除。
 
 | 字段 | 类型 | 约束/默认 | 含义 |
 | --- | --- | --- | --- |
-| `asset_id` | `varchar(36)` | 复合 PK、FK → `assets.id`，非空 | 被标记的素材。 |
+| `id` | `varchar(36)` | PK、非空 | 关系 UUID。 |
+| `public_asset_id/private_asset_id` | 二选一，分别 FK 到对应素材表 | 被标记的公共或私人素材。 |
 | `tag_id` | `varchar(36)` | 复合 PK、FK → `tags.id`，非空 | 关联的标签。 |
 | `source` | `enum('model','human')` | 非空 | 标签来源：模型自动生成或人工添加/确认。 |
 | `confidence` | `double` | 可空 | 模型标签置信度；人工标签或无置信度时可为空。 |
 
 ## 5. `asset_tag_rejections` — 被拒绝标签
 
-记录人工从素材上拒绝过的标签规范值，避免后续模型重跑时再次自动加入。复合主键覆盖全部三个字段；素材删除时级联删除。
+记录人工从素材上拒绝过的标签规范值，避免后续模型重跑时再次自动加入。独立 `id` 为主键，公共/私人目标列必须恰有一个非空；素材删除时级联删除。
 
 | 字段 | 类型 | 约束/默认 | 含义 |
 | --- | --- | --- | --- |
-| `asset_id` | `varchar(36)` | 复合 PK、FK → `assets.id`，非空 | 拒绝该标签的素材。 |
+| `id` | `varchar(36)` | PK、非空 | 拒绝记录 UUID。 |
+| `public_asset_id/private_asset_id` | 二选一，分别 FK 到对应素材表 | 拒绝该标签的公共或私人素材。 |
 | `category` | `varchar(64)` | 复合 PK，非空 | 被拒绝标签的分类。 |
 | `normalized_value` | `varchar(128)` | 复合 PK，非空 | 被拒绝标签的规范化值。 |
 
@@ -191,7 +191,8 @@ flowchart LR
 | `task_id` | `varchar(36)` | FK → `tasks.id`，可空，删除任务时置空 | 创建父视频的上传任务。 |
 | `task_item_id` | `varchar(36)` | FK → `task_items.id`，可空、唯一，删除明细时置空 | 对应的上传文件明细；一条明细最多一个父视频。 |
 | `user_id` | `varchar(191)` | 可空 | 父视频所属用户；公共作用域可为空。 |
-| `media_object_id` | `varchar(36)` | FK → `media_objects.id`，可空，删除对象时置空 | 完整父视频对应的媒体对象。 |
+| `public_media_object_id` | `varchar(36)` | FK → `media_objects.id`，可空，删除对象时置空 | 公共侧完整父视频对象。 |
+| `private_media_object_id` | `varchar(36)` | FK → `media_objects.id`，可空，删除对象时置空 | 私人侧完整父视频对象。 |
 | `original_filename` | `varchar(255)` | 非空 | 上传时的原始视频文件名。 |
 | `mime_type` | `varchar(255)` | 非空 | 父视频 MIME 类型。 |
 | `size_bytes` | `bigint unsigned` | 非空 | 完整视频大小，单位字节。 |
@@ -208,7 +209,7 @@ flowchart LR
 
 ## 8. `task_item_segments` — 视频切片清单
 
-保存分镜服务返回的切片元数据。只有整批切片校验通过后才会创建对应 `assets`。`video_source_id + segment_index` 唯一。
+保存分镜服务返回的逻辑切片元数据。只有整批切片校验通过后才会创建对应公私素材。`video_source_id + segment_index` 唯一。
 
 | 字段 | 类型 | 约束/默认 | 含义 |
 | --- | --- | --- | --- |
@@ -290,7 +291,8 @@ Worker 可并发抢占的内部作业队列，领取时使用数据库锁和租�
 | --- | --- | --- | --- |
 | `id` | `varchar(36)` | PK，非空 | 作业 UUID。 |
 | `task_id` | `varchar(36)` | FK → `tasks.id`，可空，级联删除 | 作业所属的对外任务；独立清理作业可为空。 |
-| `asset_id` | `varchar(36)` | FK → `assets.id`，可空，级联删除 | 作业处理的素材；素材创建前或非素材作业可为空。 |
+| `public_asset_id` | `varchar(36)` | FK → `public_assets.id`，可空，级联删除 | 公共素材作业目标。 |
+| `private_asset_id` | `varchar(36)` | FK → `private_assets.id`，可空，级联删除 | 私人素材作业目标。 |
 | `type` | `enum('validate','scene_detect','persist','analyze','embed','delete','cleanup','publish','update','retry','callback')` | 非空 | 作业步骤类型。 |
 | `status` | `enum('queued','running','done','failed')` | 非空，默认 `queued` | 作业执行状态。 |
 | `phase` | `varchar(64)` | 非空，默认 `queued` | 作业内更细的执行阶段。 |
@@ -360,11 +362,12 @@ Worker 可并发抢占的内部作业队列，领取时使用数据库锁和租�
 
 ## 15. `search_index_state` — 向量索引状态
 
-记录每个素材在 Chroma 中的最终一致性状态。MySQL 不保存向量本身；一素材一行，素材删除时级联删除。
+记录素材在 Chroma 中的最终一致性状态。MySQL 不保存向量本身；独立 `id` 为主键，公共/私人目标必须恰有一个非空且各自唯一，素材删除时级联删除。
 
 | 字段 | 类型 | 约束/默认 | 含义 |
 | --- | --- | --- | --- |
-| `asset_id` | `varchar(36)` | PK、FK → `assets.id`，非空 | 被索引的素材 UUID。 |
+| `id` | `varchar(36)` | PK、非空 | 索引状态 UUID。 |
+| `public_asset_id/private_asset_id` | `varchar(36)` | 二选一，分别 FK 到对应素材表 | 被索引的公共或私人素材。 |
 | `status` | `enum('queued','running','done','failed','deleted')` | 非空，默认 `queued` | 向量索引的构建或删除状态。 |
 | `content_hash` | `varchar(64)` | 可空 | 本次索引内容的哈希，用于判断素材文本是否变化。 |
 | `indexed_at` | `datetime(3)` | 可空 | 最近一次成功写入向量索引的时间。 |
@@ -411,18 +414,20 @@ Drizzle ORM 自动维护的技术表，用来判断哪些数据库迁移已执�
 - 素材 ID、名称、描述、类型、处理/审核状态、文件名、大小、时间和标签。
 - 父视频 ID、文件名、时长、状态、历史生成切片数、当前切片数和当前有效切片数。
 
+该视图只统计 `private_assets`；公共副本不计入用户个人素材数量和空间。运行时另有 `asset_entries`、`analysis_result_entries`、`asset_tag_entries`、`asset_tag_rejection_entries`、`search_index_entries` 五个内部统一视图，它们不包含旧 `assets` 数据。
+
 两个视图均使用 `SQL SECURITY INVOKER`，查询时继续受 Metabase MySQL 只读账号权限限制。
 
 ## 常用查询入口
 
-- 素材总览：以 `assets` 为主表，关联 `analysis_results`、`asset_tags`、`tags` 和 `media_objects`。
+- 公共素材总览：以 `public_assets` 为主表；个人素材总览：以 `private_assets` 为主表。
 - 用户与素材：直接使用 `reporting_user_assets`，按 `user_id` 搜索或汇总。
 - 数据库概览：直接使用 `reporting_database_tables` 查看表用途和实时行数。
-- 视频追溯：`assets.video_source_id` → `video_sources.id`，再关联 `task_item_segments`。
+- 视频追溯：公私素材的 `video_source_id` → `video_sources.id`，再关联 `task_item_segments`。
 - 队列健康：按 `jobs.status`、`jobs.type`、`available_at`、`updated_at` 统计。
 - 任务成功率：按 `tasks.type`、`tasks.status`、`created_at` 统计，失败详情查看错误字段。
 - 标签质量：连接 `asset_tags` 与 `tags`，按 `source`、`category` 和 `confidence` 分析。
-- 检索一致性：连接 `assets` 与 `search_index_state`，关注缺失记录或长期非 `done` 状态。
+- 检索一致性：通过 `public_asset_id/private_asset_id` 连接素材与 `search_index_state`，关注缺失记录或长期非 `done` 状态。
 
 ## 维护规则
 

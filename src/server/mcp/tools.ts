@@ -155,7 +155,7 @@ async function runIdempotentWrite<T extends Record<string, unknown>>(
 }
 
 async function runUploadFromUrl(
-  input: { url: string; filename?: string; publish?: boolean },
+  input: { url: string; filename?: string },
   config: AppConfig,
   service: ApiV1Service,
 ) {
@@ -165,7 +165,6 @@ async function runUploadFromUrl(
     user_id: userId,
     source_url: input.url,
     requested_filename: input.filename ?? null,
-    publish: input.publish ?? false,
   });
   const sourceStarted = process.hrtime.bigint();
   const source = await resolveIngestSource(input.url, config);
@@ -181,7 +180,6 @@ async function runUploadFromUrl(
     const task = await service.createUploadTask({
       user_id: userId,
       callback_url: null,
-      auto_publish: input.publish ?? false,
       items: [
         {
           filename,
@@ -240,7 +238,7 @@ async function runUploadFromUrl(
       task_id: task.task_id,
       status: sealed.status,
       phase: sealed.phase,
-      note: "素材已接收并进入异步处理，请用 get_task_status 查询终态和 asset_ids。",
+      note: "素材已接收并进入异步处理，请用 get_task_status 查询终态的公私素材 ID。",
     };
   } finally {
     await source.close().catch(() => undefined);
@@ -253,7 +251,7 @@ interface BatchUrlItem {
 }
 
 async function runUploadBatchFromUrls(
-  input: { items: BatchUrlItem[]; auto_publish?: boolean },
+  input: { items: BatchUrlItem[] },
   config: AppConfig,
   service: ApiV1Service,
 ) {
@@ -270,7 +268,6 @@ async function runUploadBatchFromUrls(
   const task = await service.createUploadTask({
     user_id: userId,
     callback_url: null,
-    auto_publish: input.auto_publish ?? false,
     items: sources.map((source) => ({
       filename: source.filename,
       size_bytes: source.sizeBytes,
@@ -322,7 +319,7 @@ async function runUploadBatchFromUrls(
     status: sealed.status,
     phase: sealed.phase,
     total_items: sources.length,
-    note: "全部文件已接收并进入异步处理，请用 list_tasks 或 get_task_status 查询终态和 asset_ids。",
+    note: "全部文件已接收并进入异步处理，请用 list_tasks 或 get_task_status 查询终态的公私素材 ID。",
   };
 }
 
@@ -394,16 +391,12 @@ export function registerTools(
           .max(255)
           .optional()
           .describe("可选，覆盖文件名；扩展名决定媒体类型"),
-        publish: z
-          .boolean()
-          .optional()
-          .describe("分析成功后是否直接发布，默认 false"),
         idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ url, filename, publish, idempotency_key }) => auditedToolCall(
+    async ({ url, filename, idempotency_key }) => auditedToolCall(
       "upload_from_url",
-      { url, filename, publish, idempotency_key },
+      { url, filename, idempotency_key },
       async () => {
         const currentUserId = userId();
         const result = await runIdempotentWrite(
@@ -412,8 +405,8 @@ export function registerTools(
           "upload_from_url",
           currentUserId,
           idempotency_key,
-          { url, filename, publish: publish ?? false },
-          () => runUploadFromUrl({ url, filename, publish }, config, service),
+          { url, filename },
+          () => runUploadFromUrl({ url, filename }, config, service),
         );
         return textResult(result);
       },
@@ -425,7 +418,7 @@ export function registerTools(
     {
       title: "批量从 URL 上传素材",
       description:
-        "从白名单 URL 批量拉取 1–100 个图片/视频，在一个任务中封存；items 只描述 URL/文件名，auto_publish 对整个任务生效。",
+        "从白名单 URL 批量拉取 1–100 个图片/视频，在一个任务中封存。",
       inputSchema: z.object({
         items: z
           .array(
@@ -442,13 +435,12 @@ export function registerTools(
           )
           .min(1)
           .max(config.UPLOAD_MAX_ITEMS),
-        auto_publish: z.boolean().optional().describe("整个任务分析成功后是否直接发布"),
         idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ items, auto_publish, idempotency_key }) => auditedToolCall(
+    async ({ items, idempotency_key }) => auditedToolCall(
       "upload_batch_from_urls",
-      { items, auto_publish, idempotency_key },
+      { items, idempotency_key },
       async () => {
         const currentUserId = userId();
         const result = await runIdempotentWrite(
@@ -457,8 +449,8 @@ export function registerTools(
           "upload_batch_from_urls",
           currentUserId,
           idempotency_key,
-          { items, auto_publish: auto_publish ?? false },
-          () => runUploadBatchFromUrls({ items, auto_publish }, config, service),
+          { items },
+          () => runUploadBatchFromUrls({ items }, config, service),
         );
         return textResult(result);
       },
@@ -486,7 +478,7 @@ export function registerTools(
     {
       title: "列出我的任务",
       description:
-        "按创建时间倒序列出当前用户的任务及逐文件状态，供 agent 重启后恢复 task_id、进度、错误和 asset_ids。",
+        "按创建时间倒序列出当前用户的任务及逐文件状态，供 agent 重启后恢复 task_id、进度、错误和公私素材 ID。",
       inputSchema: z.object({
         statuses: z
           .array(z.enum(["queued", "running", "done", "failed"]))
@@ -559,9 +551,10 @@ export function registerTools(
       }),
     },
     async (input) => auditedToolCall("query_assets", input, async () => {
-      const scope = resolveMcpAssetScope(input, userId(), config, {
-        allowAll: true,
-      });
+      const currentUserId = userId();
+      const scope = input.scope === "public"
+        ? { mode: "exclude_user" as const, user_id: currentUserId }
+        : resolveMcpAssetScope(input, currentUserId, config, { allowAll: true });
       const result = await service.queryAssets({
         query: input.query,
         keywords: input.keywords,
@@ -658,7 +651,7 @@ export function registerTools(
     "publish_asset",
     {
       title: "发布素材",
-      description: "提交异步任务，发布分析成功的素材（进入已发布状态）。",
+      description: "提交异步任务，发布分析成功的公共素材；私人素材无需审核。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
         idempotency_key: idempotencyKeySchema,
@@ -677,7 +670,7 @@ export function registerTools(
         idempotency_key,
         { asset_id },
         () => service.publishAsset(asset_id, {
-          user_id: currentUserId,
+          user_id: null,
           callback_url: null,
         }),
       );
@@ -723,7 +716,7 @@ export function registerTools(
     {
       title: "删除素材",
       description:
-        "软删除本人素材（归属转为公共，保留文件与分析）。公共素材的硬删除不在 MCP 范围内。",
+        "永久删除本人私人素材、分析和存储对象，不影响配对的公共副本。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
         idempotency_key: idempotencyKeySchema,

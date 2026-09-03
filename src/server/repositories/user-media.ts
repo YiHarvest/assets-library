@@ -1,6 +1,17 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/server/db";
-import { assets, mediaObjects } from "@/server/db/schema";
+import { assetEntries, mediaObjects } from "@/server/db/schema";
+
+const thumbnailAssetSelection = {
+  id: assetEntries.id,
+  mediaType: assetEntries.mediaType,
+  originalFilename: assetEntries.originalFilename,
+  mimeType: assetEntries.mimeType,
+  processingStatus: assetEntries.processingStatus,
+  reviewStatus: assetEntries.reviewStatus,
+  failureCode: assetEntries.failureCode,
+  deletedAt: assetEntries.deletedAt,
+};
 
 /**
  * 读取一个素材的缩略图对象。
@@ -11,16 +22,16 @@ import { assets, mediaObjects } from "@/server/db/schema";
 export async function getAssetThumbnailObject(assetId: string) {
   // 先尝试视频缩略图（thumbnailMediaObjectId）
   const [videoRow] = await db
-    .select({ asset: assets, object: mediaObjects })
-    .from(assets)
+    .select({ asset: thumbnailAssetSelection, object: mediaObjects })
+    .from(assetEntries)
     .innerJoin(
       mediaObjects,
-      eq(mediaObjects.id, assets.thumbnailMediaObjectId),
+      eq(mediaObjects.id, assetEntries.thumbnailMediaObjectId),
     )
     .where(
       and(
-        eq(assets.id, assetId),
-        eq(assets.mediaType, "video"),
+        eq(assetEntries.id, assetId),
+        eq(assetEntries.mediaType, "video"),
         eq(mediaObjects.status, "persisted"),
       ),
     )
@@ -29,16 +40,16 @@ export async function getAssetThumbnailObject(assetId: string) {
 
   // 回退：图片缩略图直接使用原图（mediaObjectId）
   const [imageRow] = await db
-    .select({ asset: assets, object: mediaObjects })
-    .from(assets)
+    .select({ asset: thumbnailAssetSelection, object: mediaObjects })
+    .from(assetEntries)
     .innerJoin(
       mediaObjects,
-      eq(mediaObjects.id, assets.mediaObjectId),
+      eq(mediaObjects.id, assetEntries.mediaObjectId),
     )
     .where(
       and(
-        eq(assets.id, assetId),
-        eq(assets.mediaType, "image"),
+        eq(assetEntries.id, assetId),
+        eq(assetEntries.mediaType, "image"),
         eq(mediaObjects.status, "persisted"),
       ),
     )

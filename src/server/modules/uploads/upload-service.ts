@@ -233,7 +233,6 @@ export class UploadService {
       userId: input.user_id,
       callbackUrl: input.callback_url,
       expiresAt,
-      result: { auto_publish: input.auto_publish },
       items: manifests,
     });
     addAuditFields({

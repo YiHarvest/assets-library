@@ -4,9 +4,11 @@ import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/server/db";
 import {
-  assets,
+  assetEntries,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   taskItemSegments,
   taskItems,
   tasks,
@@ -31,7 +33,10 @@ import {
   failJob,
   type ClaimedJob,
 } from "@/server/repositories/assets";
-import { persistSceneBatch } from "@/server/services/scene-persistence";
+import {
+  persistSceneBatch,
+  type PersistedSceneBatch,
+} from "@/server/services/scene-persistence";
 import {
   failTaskItem,
   markTaskItemPersisted,
@@ -44,7 +49,6 @@ import { loadConfig, type AppConfig } from "@/server/config";
 interface UploadContext {
   task: typeof tasks.$inferSelect;
   item: typeof taskItems.$inferSelect;
-  autoPublish: boolean;
 }
 
 export interface UploadPipelineDependencies {
@@ -135,11 +139,7 @@ async function uploadContext(job: ClaimedJob): Promise<UploadContext> {
   if (!row || row.task.type !== "upload") {
     throw new AppError("invalid_request", "上传任务或文件不存在。", 404);
   }
-  const result = row.task.result as { auto_publish?: unknown } | null;
-  return {
-    ...row,
-    autoPublish: result?.auto_publish === true,
-  };
+  return row;
 }
 
 function datePrefix(now: Date) {
@@ -191,9 +191,9 @@ function mediaObjectValues(
 
 async function alreadyPersisted(itemId: string) {
   const [row] = await db
-    .select({ id: assets.id })
-    .from(assets)
-    .where(eq(assets.taskItemId, itemId))
+    .select({ id: assetEntries.id })
+    .from(assetEntries)
+    .where(eq(assetEntries.taskItemId, itemId))
     .limit(1);
   return Boolean(row);
 }
@@ -205,49 +205,89 @@ async function processImage(
   dependencies: UploadPipelineDependencies,
 ) {
   const now = dependencies.now();
-  const assetId = crypto.randomUUID();
-  const mediaObjectId = crypto.randomUUID();
-  const key = `assets/images/${datePrefix(now)}/${context.task.id}/${context.item.id}${validated.extension}`;
-  const stored = await dependencies.storage.storeFile({
-    key,
-    filePath: stagingPath(context, dependencies),
-    contentType: validated.mimeType,
-  });
+  const publicAssetId = crypto.randomUUID();
+  const privateAssetId = context.task.userId ? crypto.randomUUID() : null;
+  const publicMediaObjectId = crypto.randomUUID();
+  const privateMediaObjectId = privateAssetId ? crypto.randomUUID() : null;
+  const prefix = `assets/images/${datePrefix(now)}/${context.task.id}/${context.item.id}`;
+  const stored: StoredObject[] = [];
   try {
+    stored.push(
+      await dependencies.storage.storeFile({
+        key: `${prefix}/public${validated.extension}`,
+        filePath: stagingPath(context, dependencies),
+        contentType: validated.mimeType,
+      }),
+    );
+    if (privateAssetId) {
+      stored.push(
+        await dependencies.storage.storeFile({
+          key: `${prefix}/private${validated.extension}`,
+          filePath: stagingPath(context, dependencies),
+          contentType: validated.mimeType,
+        }),
+      );
+    }
     // ZOS 与 MySQL 无法共享事务：对象先写入，建档失败时立即补偿删除。
     await db.transaction(async (tx) => {
-      await tx.insert(mediaObjects).values(
+      await tx.insert(mediaObjects).values([
         mediaObjectValues(
-          mediaObjectId,
-          stored,
+          publicMediaObjectId,
+          stored[0]!,
           validated.mimeType,
           dependencies.config.ZOS_BUCKET,
           now,
         ),
-      );
-      await tx.insert(assets).values({
-        id: assetId,
-        userId: context.task.userId,
+        ...(privateMediaObjectId
+          ? [
+              mediaObjectValues(
+                privateMediaObjectId,
+                stored[1]!,
+                validated.mimeType,
+                dependencies.config.ZOS_BUCKET,
+                now,
+              ),
+            ]
+          : []),
+      ]);
+      const common = {
         taskId: context.task.id,
         taskItemId: context.item.id,
-        mediaObjectId,
         name: baseName(context.item.filename),
         description: "",
         mediaType: "image",
         originalFilename: context.item.filename,
-        originalPath: stored.key,
         mimeType: validated.mimeType,
-        sizeBytes: stored.sizeBytes,
-        directPublish: context.autoPublish,
         processingStatus: "analyzing",
-        reviewStatus: "pending_review",
         createdAt: now,
         updatedAt: now,
+      } as const;
+      await tx.insert(publicAssets).values({
+        ...common,
+        id: publicAssetId,
+        uploaderUserId: context.task.userId,
+        mediaObjectId: publicMediaObjectId,
+        originalPath: stored[0]!.key,
+        sizeBytes: stored[0]!.sizeBytes,
+        reviewStatus: "pending_review",
       });
+      if (privateAssetId && privateMediaObjectId && context.task.userId) {
+        await tx.insert(privateAssets).values({
+          ...common,
+          id: privateAssetId,
+          publicAssetId,
+          userId: context.task.userId,
+          mediaObjectId: privateMediaObjectId,
+          originalPath: stored[1]!.key,
+          sizeBytes: stored[1]!.sizeBytes,
+        });
+      }
       await tx.insert(jobs).values({
         id: crypto.randomUUID(),
         taskId: context.task.id,
-        assetId,
+        ...(privateAssetId
+          ? { privateAssetId, payload: { pairedPublicAssetId: publicAssetId } }
+          : { publicAssetId }),
         type: "analyze",
         phase: "analyzing",
         availableAt: now,
@@ -275,7 +315,9 @@ async function processImage(
         .where(eq(taskItems.id, context.item.id));
     });
   } catch (error) {
-    await dependencies.storage.deleteObject(stored.key).catch(() => undefined);
+    await Promise.allSettled(
+      stored.map((object) => dependencies.storage.deleteObject(object.key)),
+    );
     throw error;
   }
 }
@@ -307,79 +349,111 @@ async function processVideo(
           prepared.index,
           {
             prepared,
-            mediaId: crypto.randomUUID(),
-            thumbnailMediaId: crypto.randomUUID(),
             segmentId: crypto.randomUUID(),
-            assetId: crypto.randomUUID(),
+            publicMediaId: crypto.randomUUID(),
+            publicThumbnailMediaId: crypto.randomUUID(),
+            publicAssetId: crypto.randomUUID(),
+            privateMediaId: context.task.userId ? crypto.randomUUID() : null,
+            privateThumbnailMediaId: context.task.userId
+              ? crypto.randomUUID()
+              : null,
+            privateAssetId: context.task.userId ? crypto.randomUUID() : null,
             analysisJobId: crypto.randomUUID(),
           },
         ] as const,
     ),
   );
-  try {
-    await markTaskItemRunning(context.task.id, context.item.id, "persisting");
-    await persistSceneBatch({
-      batch,
-      storage: dependencies.storage,
-      concurrency: dependencies.config.SCENE_PERSIST_CONCURRENCY,
-      now: dependencies.now(),
-      commitDatabase: async (persisted) => {
-        const now = dependencies.now();
-        const sourceId = crypto.randomUUID();
-        const parentMediaId = crypto.randomUUID();
-        const segmentRows = persisted.segments.map((segment) => {
-          const plan = segmentPlans.get(segment.index);
-          if (!plan) {
-            throw new ScenePipelineError(
-              "scene_persistence_failed",
-              `分镜 ${segment.index} 缺少分析作业规划。`,
-            );
-          }
-          return { segment, ...plan };
-        });
-        // analyze 作业一旦提交即可被其他 worker 领取，所以必须先原子准备好帧种子。
-        await withSeededAnalysisWorkspaces(
-          segmentRows,
-          dependencies.config.mediaRoot,
-          async () => {
-            // 整批父视频、切片对象、素材和分析作业在单个事务中同时可见。
-          await db.transaction(async (tx) => {
+  let persistedPublic: PersistedSceneBatch | undefined;
+
+  const commitDatabase = async (
+    publicBatch: PersistedSceneBatch,
+    privateBatch?: PersistedSceneBatch,
+  ) => {
+    const now = dependencies.now();
+    const sourceId = crypto.randomUUID();
+    const publicParentMediaId = crypto.randomUUID();
+    const privateParentMediaId = privateBatch ? crypto.randomUUID() : null;
+    const segmentRows = publicBatch.segments.map((publicSegment) => {
+      const plan = segmentPlans.get(publicSegment.index);
+      const privateSegment = privateBatch?.segments.find(
+        (candidate) => candidate.index === publicSegment.index,
+      );
+      if (!plan || (privateBatch && !privateSegment)) {
+        throw new ScenePipelineError(
+          "scene_persistence_failed",
+          `分镜 ${publicSegment.index} 缺少公私副本规划。`,
+        );
+      }
+      return { publicSegment, privateSegment, ...plan };
+    });
+
+    await withSeededAnalysisWorkspaces(
+      segmentRows,
+      dependencies.config.mediaRoot,
+      async () => {
+        await db.transaction(async (tx) => {
           await tx.insert(mediaObjects).values([
             mediaObjectValues(
-              parentMediaId,
-              persisted.parentObject,
+              publicParentMediaId,
+              publicBatch.parentObject,
               "video/mp4",
               dependencies.config.ZOS_BUCKET,
               now,
             ),
-            ...segmentRows.map(({ segment, mediaId }) =>
+            ...segmentRows.flatMap((row) => [
               mediaObjectValues(
-                mediaId,
-                segment.object,
+                row.publicMediaId,
+                row.publicSegment.object,
                 "video/mp4",
                 dependencies.config.ZOS_BUCKET,
                 now,
               ),
-            ),
-            ...segmentRows.map(({ segment, thumbnailMediaId }) =>
               mediaObjectValues(
-                thumbnailMediaId,
-                segment.thumbnailObject,
+                row.publicThumbnailMediaId,
+                row.publicSegment.thumbnailObject,
                 "image/jpeg",
                 dependencies.config.ZOS_BUCKET,
                 now,
               ),
-            ),
+            ]),
+            ...(privateParentMediaId && privateBatch
+              ? [
+                  mediaObjectValues(
+                    privateParentMediaId,
+                    privateBatch.parentObject,
+                    "video/mp4",
+                    dependencies.config.ZOS_BUCKET,
+                    now,
+                  ),
+                  ...segmentRows.flatMap((row) => [
+                    mediaObjectValues(
+                      row.privateMediaId!,
+                      row.privateSegment!.object,
+                      "video/mp4",
+                      dependencies.config.ZOS_BUCKET,
+                      now,
+                    ),
+                    mediaObjectValues(
+                      row.privateThumbnailMediaId!,
+                      row.privateSegment!.thumbnailObject,
+                      "image/jpeg",
+                      dependencies.config.ZOS_BUCKET,
+                      now,
+                    ),
+                  ]),
+                ]
+              : []),
           ]);
           await tx.insert(videoSources).values({
             id: sourceId,
             taskId: context.task.id,
             taskItemId: context.item.id,
             userId: context.task.userId,
-            mediaObjectId: parentMediaId,
+            publicMediaObjectId: publicParentMediaId,
+            privateMediaObjectId: privateParentMediaId,
             originalFilename: context.item.filename,
             mimeType: "video/mp4",
-            sizeBytes: persisted.parentObject.sizeBytes,
+            sizeBytes: publicBatch.parentObject.sizeBytes,
             durationMs: Math.round(batch.durationSeconds * 1_000),
             generatedSegmentCount: segmentRows.length,
             status: "done",
@@ -387,55 +461,85 @@ async function processVideo(
             updatedAt: now,
           });
           await tx.insert(taskItemSegments).values(
-            segmentRows.map(({ segment, segmentId }) => ({
+            segmentRows.map(({ publicSegment, segmentId }) => ({
               id: segmentId,
               taskItemId: context.item.id,
               videoSourceId: sourceId,
-              segmentIndex: segment.index,
-              startMs: Math.round(segment.startSeconds * 1_000),
-              endMs: Math.round(segment.endSeconds * 1_000),
-              stagingPath: segment.object.key,
+              segmentIndex: publicSegment.index,
+              startMs: Math.round(publicSegment.startSeconds * 1_000),
+              endMs: Math.round(publicSegment.endSeconds * 1_000),
+              stagingPath: publicSegment.object.key,
               mimeType: "video/mp4",
-              sizeBytes: segment.object.sizeBytes,
+              sizeBytes: publicSegment.object.sizeBytes,
               status: "done" as const,
               createdAt: now,
               updatedAt: now,
             })),
           );
-          await tx.insert(assets).values(
-            segmentRows.map(
-              ({ segment, mediaId, thumbnailMediaId, segmentId, assetId }) => ({
-                id: assetId,
-                userId: context.task.userId,
+          await tx.insert(publicAssets).values(
+            segmentRows.map(({ publicSegment, segmentId, publicMediaId, publicThumbnailMediaId, publicAssetId }) => ({
+              id: publicAssetId,
+              uploaderUserId: context.task.userId,
+              taskId: context.task.id,
+              taskItemId: context.item.id,
+              taskItemSegmentId: segmentId,
+              videoSourceId: sourceId,
+              mediaObjectId: publicMediaId,
+              thumbnailMediaObjectId: publicThumbnailMediaId,
+              segmentIndex: publicSegment.index,
+              segmentStartMs: Math.round(publicSegment.startSeconds * 1_000),
+              segmentEndMs: Math.round(publicSegment.endSeconds * 1_000),
+              name: `${baseName(context.item.filename)} - 分镜 ${publicSegment.index}`,
+              description: "",
+              mediaType: "video" as const,
+              originalFilename: `segment-${String(publicSegment.index).padStart(3, "0")}.mp4`,
+              originalPath: publicSegment.object.key,
+              mimeType: "video/mp4",
+              sizeBytes: publicSegment.object.sizeBytes,
+              processingStatus: "analyzing" as const,
+              reviewStatus: "pending_review" as const,
+              createdAt: now,
+              updatedAt: now,
+            })),
+          );
+          if (privateBatch && context.task.userId) {
+            await tx.insert(privateAssets).values(
+              segmentRows.map((row) => ({
+                id: row.privateAssetId!,
+                publicAssetId: row.publicAssetId,
+                userId: context.task.userId!,
                 taskId: context.task.id,
                 taskItemId: context.item.id,
-                taskItemSegmentId: segmentId,
+                taskItemSegmentId: row.segmentId,
                 videoSourceId: sourceId,
-                mediaObjectId: mediaId,
-                thumbnailMediaObjectId: thumbnailMediaId,
-                segmentIndex: segment.index,
-                segmentStartMs: Math.round(segment.startSeconds * 1_000),
-                segmentEndMs: Math.round(segment.endSeconds * 1_000),
-                name: `${baseName(context.item.filename)} - 分镜 ${segment.index}`,
+                mediaObjectId: row.privateMediaId!,
+                thumbnailMediaObjectId: row.privateThumbnailMediaId!,
+                segmentIndex: row.privateSegment!.index,
+                segmentStartMs: Math.round(row.privateSegment!.startSeconds * 1_000),
+                segmentEndMs: Math.round(row.privateSegment!.endSeconds * 1_000),
+                name: `${baseName(context.item.filename)} - 分镜 ${row.privateSegment!.index}`,
                 description: "",
                 mediaType: "video" as const,
-                originalFilename: `segment-${String(segment.index).padStart(3, "0")}.mp4`,
-                originalPath: segment.object.key,
+                originalFilename: `segment-${String(row.privateSegment!.index).padStart(3, "0")}.mp4`,
+                originalPath: row.privateSegment!.object.key,
                 mimeType: "video/mp4",
-                sizeBytes: segment.object.sizeBytes,
-                directPublish: context.autoPublish,
+                sizeBytes: row.privateSegment!.object.sizeBytes,
                 processingStatus: "analyzing" as const,
-                reviewStatus: "pending_review" as const,
                 createdAt: now,
                 updatedAt: now,
-              }),
-            ),
-          );
+              })),
+            );
+          }
           await tx.insert(jobs).values(
-            segmentRows.map(({ assetId, analysisJobId }) => ({
-              id: analysisJobId,
+            segmentRows.map((row) => ({
+              id: row.analysisJobId,
               taskId: context.task.id,
-              assetId,
+              ...(row.privateAssetId
+                ? {
+                    privateAssetId: row.privateAssetId,
+                    payload: { pairedPublicAssetId: row.publicAssetId },
+                  }
+                : { publicAssetId: row.publicAssetId }),
               type: "analyze" as const,
               phase: "analyzing",
               availableAt: now,
@@ -462,11 +566,45 @@ async function processVideo(
               updatedAt: now,
             })
             .where(eq(taskItems.id, context.item.id));
-          });
-          },
-        );
+        });
       },
+    );
+  };
+
+  try {
+    await markTaskItemRunning(context.task.id, context.item.id, "persisting");
+    persistedPublic = await persistSceneBatch({
+      batch,
+      storage: dependencies.storage,
+      concurrency: dependencies.config.SCENE_PERSIST_CONCURRENCY,
+      now: dependencies.now(),
+      variant: "public",
+      commitDatabase: context.task.userId
+        ? async () => undefined
+        : (persisted) => commitDatabase(persisted),
     });
+    if (context.task.userId) {
+      await persistSceneBatch({
+        batch,
+        storage: dependencies.storage,
+        concurrency: dependencies.config.SCENE_PERSIST_CONCURRENCY,
+        now: dependencies.now(),
+        variant: "private",
+        commitDatabase: (persistedPrivate) =>
+          commitDatabase(persistedPublic!, persistedPrivate),
+      });
+    }
+  } catch (error) {
+    if (persistedPublic && context.task.userId) {
+      await Promise.allSettled([
+        dependencies.storage.deleteObject(persistedPublic.parentObject.key),
+        ...persistedPublic.segments.flatMap((segment) => [
+          dependencies.storage.deleteObject(segment.object.key),
+          dependencies.storage.deleteObject(segment.thumbnailObject.key),
+        ]),
+      ]);
+    }
+    throw error;
   } finally {
     await cleanupPreparedSceneBatch(batch, dependencies.sceneClient).catch(
       (error) => {

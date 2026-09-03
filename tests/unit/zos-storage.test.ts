@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -22,6 +23,7 @@ function streamFor(bytes: Uint8Array) {
 
 type FakeS3Command =
   | PutObjectCommand
+  | CopyObjectCommand
   | HeadObjectCommand
   | GetObjectCommand
   | DeleteObjectCommand;
@@ -43,6 +45,16 @@ function fakeS3() {
         etag: '"put-etag"',
       });
       return { ETag: '"put-etag"' };
+    }
+    if (command instanceof CopyObjectCommand) {
+      const sourceKey = decodeURIComponent(command.input.CopySource!).replace(
+        /^archives\//,
+        "",
+      );
+      const object = objects.get(sourceKey);
+      if (!object) throw new Error("not found");
+      objects.set(command.input.Key!, { ...object, bytes: object.bytes.slice() });
+      return { CopyObjectResult: { ETag: object.etag } };
     }
     if (command instanceof HeadObjectCommand) {
       const object = objects.get(command.input.Key!);
@@ -152,6 +164,38 @@ describe("ZOS object storage adapter", () => {
     });
     expect([...await fs.readFile(destination)]).toEqual([1, 2, 3, 4]);
     await expect(fs.stat(`${destination}.download`)).rejects.toThrow();
+  });
+
+  it("copies an object inside ZOS and verifies the target size", async () => {
+    const fake = fakeS3();
+    fake.objects.set("assets/private/image.png", {
+      bytes: new Uint8Array([1, 2, 3]),
+      contentType: "image/png",
+      etag: '"copy-etag"',
+    });
+    const storage = new ZosObjectStorage({
+      endpoint: "https://zos.example.test",
+      bucket: "archives",
+      accessKeyId: "test-access-key",
+      secretAccessKey: "test-secret-key",
+      client: fake.client,
+      publicBaseUrl: "https://cdn.example.test",
+    });
+
+    await expect(
+      storage.copyObject({
+        sourceKey: "assets/private/image.png",
+        destinationKey: "assets/public/image.png",
+      }),
+    ).resolves.toEqual({
+      key: "assets/public/image.png",
+      sizeBytes: 3,
+      etag: "copy-etag",
+      url: "https://cdn.example.test/assets/public/image.png",
+    });
+    expect(fake.objects.get("assets/public/image.png")?.bytes).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
   });
 
   it("deletes a possibly-created object when post-upload verification fails", async () => {

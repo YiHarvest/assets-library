@@ -81,7 +81,6 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
   const mountedRef = useRef(false);
   const [items, setItems] = useState<UploadItem[]>([]);
   const [userId, setUserId] = useState(initialUserId);
-  const [autoPublish, setAutoPublish] = useState(false);
   const [task, setTask] = useState<TaskStatusResponse | null>(null);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -127,7 +126,9 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
           ...item,
           phase,
           progress: remote.progress_percent,
-          assetIds: remote.asset_ids,
+          assetIds: userId.trim()
+            ? remote.private_asset_ids
+            : remote.public_asset_ids,
           error: remote.status === "failed" ? taskItemError(remote) : "",
         };
       }),
@@ -236,7 +237,6 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
         method: "POST",
         body: JSON.stringify({
           user_id: userId,
-          auto_publish: autoPublish,
           items: items.map((item) => ({
             filename: item.file.name,
             size_bytes: item.file.size,
@@ -463,7 +463,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <WebUiLink
-                          href={appUrl(`/assets/${item.assetIds[0]}?user_id=${encodeURIComponent(userId)}`)}
+                          href={appUrl(`/assets/${item.assetIds[0]}?scope=${userId.trim() ? "private" : "public"}&user_id=${encodeURIComponent(userId)}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
@@ -481,7 +481,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
       </CardHeader>
       <CardContent className="space-y-5">
         <label className="block space-y-2">
-          <span className="text-sm font-medium">用户 ID（留空上传到公共素材库）</span>
+          <span className="text-sm font-medium">用户 ID</span>
           <Input
             value={userId}
             maxLength={191}
@@ -489,20 +489,8 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
             onChange={(event) => setUserId(event.target.value)}
             placeholder="例如 user-123"
           />
-        </label>
-        <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-4">
-          <input
-            type="checkbox"
-            checked={autoPublish}
-            disabled={submitting || Boolean(task)}
-            onChange={(event) => setAutoPublish(event.target.checked)}
-            className="mt-0.5 size-4 accent-cyan-600"
-          />
-          <span>
-            <span className="block text-sm font-medium">分析完成后直接入库</span>
-            <span className="mt-1 block text-xs text-slate-500">
-              视频完成分镜和持久化后，各子视频会独立分析并入库。
-            </span>
+          <span className="block text-xs text-slate-500">
+            填写后会创建互相独立的私人素材和待审核公共副本；留空则只创建公共素材。
           </span>
         </label>
 

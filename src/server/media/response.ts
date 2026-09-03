@@ -33,7 +33,9 @@ function zosStorage() {
   return sharedZosStorage;
 }
 
-function mediaIsReady(asset: AssetRecord) {
+function mediaIsReady(
+  asset: Pick<AssetRecord, "processingStatus" | "failureCode">,
+) {
   if (
     asset.processingStatus === "analyzing" ||
     asset.processingStatus === "completed"
@@ -221,7 +223,7 @@ export async function mediaObjectResponse(
 /** 按 media_objects 的实际 provider 返回媒体，持久化到 ZOS 后不再依赖本地 staging。 */
 export async function mediaResponse(assetId: string, request: Request) {
   const asset = await getAssetRecord(assetId);
-  if (!asset || asset.reviewStatus === "deleted") {
+  if (!asset || asset.deletedAt || asset.reviewStatus === "deleted") {
     throw new AppError("invalid_request", "素材不存在。", 404);
   }
   if (!mediaIsReady(asset)) {
@@ -256,7 +258,7 @@ export async function thumbnailResponse(
   storage?: ObjectStorage,
 ) {
   const row = await getAssetThumbnailObject(assetId);
-  if (!row || row.asset.reviewStatus === "deleted") {
+  if (!row || row.asset.deletedAt || row.asset.reviewStatus === "deleted") {
     throw new AppError("invalid_request", "缩略图不存在。", 404);
   }
   if (!mediaIsReady(row.asset)) {

@@ -33,10 +33,9 @@ const statusLabel = {
 };
 
 function detailPath(asset: ApiV1AssetDetail) {
-  const query = asset.user_id
-    ? `?user_id=${encodeURIComponent(asset.user_id)}`
-    : "";
-  return `/assets/${asset.asset_id}${query}`;
+  const query = new URLSearchParams({ scope: asset.user_id ? "private" : "public" });
+  if (asset.user_id) query.set("user_id", asset.user_id);
+  return `/assets/${asset.asset_id}?${query.toString()}`;
 }
 
 export function AssetEditor({
@@ -171,7 +170,7 @@ export function AssetEditor({
   const remove = () =>
     run(async () => {
       const action = asset.user_id
-        ? "移出个人素材库并转为公共素材"
+        ? "永久删除私人素材及其文件"
         : "永久删除公共素材及其文件";
       if (!window.confirm(`确认${action}？`)) return;
       const task = await apiV1<TaskAccepted>(`/assets/${asset.asset_id}`, {

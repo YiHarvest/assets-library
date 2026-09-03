@@ -107,7 +107,8 @@ pnpm run metabase:sync-reporting-metadata
 - `media_objects`
 - `video_sources`
 - `task_item_segments`
-- `assets`
+- `public_assets`
+- `private_assets`
 - `analysis_results`
 - `tags`
 - `asset_tags`
@@ -120,7 +121,7 @@ pnpm run metabase:sync-reporting-metadata
 报表视图：
 
 - `reporting_database_tables`：所有基础表的用途和实时精确行数。
-- `reporting_user_assets`：以 `user_id` 为入口的用户汇总、素材明细和父视频切片统计。
+- `reporting_user_assets`：以 `user_id` 为入口，仅汇总私人素材、素材明细和父视频切片统计。
 
 ## 6. 数据模型关系
 
@@ -128,11 +129,11 @@ pnpm run metabase:sync-reporting-metadata
 
 - `tasks.id` → `task_items.task_id`
 - `tasks.id` → `jobs.task_id`
-- `assets.id` → `analysis_results.asset_id`
-- `assets.id` → `asset_tags.asset_id`
+- `public_assets.id` / `private_assets.id` → `analysis_results.public_asset_id` / `private_asset_id`
+- `public_assets.id` / `private_assets.id` → `asset_tags.public_asset_id` / `private_asset_id`
 - `asset_tags.tag_id` → `tags.id`
-- `assets.id` → `jobs.asset_id`
-- `assets.id` → `search_index_state.asset_id`
+- `public_assets.id` / `private_assets.id` → `jobs.public_asset_id` / `private_asset_id`
+- `public_assets.id` / `private_assets.id` → `search_index_state.public_asset_id` / `private_asset_id`
 
 数据库存储 UTC。Metabase/JVM 默认使用 `Asia/Shanghai`；上线前用一条已知记录核对时间显示。如果 MySQL `DATETIME` 被错误转换，先将 Metabase报告时区设为 UTC，再在正式问题中显式转换。
 

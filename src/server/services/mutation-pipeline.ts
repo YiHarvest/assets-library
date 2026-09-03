@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db } from "@/server/db";
 import { withDeadlockRetry } from "@/server/db/retry";
 import {
-  assets,
+  assetEntries,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   tasks,
   videoSources,
 } from "@/server/db/schema";
@@ -13,9 +15,10 @@ import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import {
   completeJob,
+  jobTarget,
   publishAsset,
-  releaseAssetToPublic,
   updateAssetMetadata,
+  type AssetRef,
   type AssetScope,
   type ClaimedJob,
 } from "@/server/repositories/assets";
@@ -44,11 +47,26 @@ async function resolveScopeForJob(job: ClaimedJob): Promise<AssetScope> {
   const assetId = job.assetId ?? stringPayload(job, "assetId");
   if (!assetId) return { userId: null };
   const [row] = await db
-    .select({ userId: assets.userId })
-    .from(assets)
-    .where(eq(assets.id, assetId))
+    .select({ userId: assetEntries.userId })
+    .from(assetEntries)
+    .where(eq(assetEntries.id, assetId))
     .limit(1);
   return row ? { userId: row.userId } : { userId: null };
+}
+
+async function resolveJobRef(job: ClaimedJob): Promise<AssetRef> {
+  const assetId = job.assetId ?? stringPayload(job, "assetId");
+  if (!assetId) throw new AppError("invalid_request", "作业缺少素材标识。", 500);
+  if (job.assetKind === "public" || job.assetKind === "private") {
+    return { kind: job.assetKind, id: assetId };
+  }
+  const [row] = await db
+    .select({ kind: assetEntries.kind })
+    .from(assetEntries)
+    .where(eq(assetEntries.id, assetId))
+    .limit(1);
+  if (row) return { kind: row.kind, id: assetId };
+  return { kind: stringPayload(job, "userId")?.trim() ? "private" : "public", id: assetId };
 }
 
 async function markMutationRunning(job: ClaimedJob) {
@@ -95,39 +113,59 @@ async function queueRetryAnalysis(job: ClaimedJob) {
   }
   const assetId = job.assetId;
   const taskId = job.taskId;
+  const ref = await resolveJobRef(job);
   const now = new Date();
   await db.transaction(async (tx) => {
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const [asset] = ref.kind === "private"
+      ? await tx
+          .select({
+            processingStatus: privateAssets.processingStatus,
+            deletedAt: privateAssets.deletedAt,
+            userId: privateAssets.userId,
+            reviewStatus: sql<"published">`'published'`,
+          })
+          .from(privateAssets)
+          .where(eq(privateAssets.id, assetId))
+          .for("update")
+          .limit(1)
+      : await tx
+          .select({
+            processingStatus: publicAssets.processingStatus,
+            deletedAt: publicAssets.deletedAt,
+            userId: sql<string | null>`null`,
+            reviewStatus: publicAssets.reviewStatus,
+          })
+          .from(publicAssets)
+          .where(eq(publicAssets.id, assetId))
+          .for("update")
+          .limit(1);
     const payloadUserId = stringPayload(job, "userId")?.trim() || null;
-    const expectedUserId = payloadUserId ?? asset?.userId ?? null;
     if (
       !asset ||
+      asset.deletedAt ||
       asset.reviewStatus === "deleted" ||
-      asset.userId !== expectedUserId
+      (payloadUserId && asset.userId !== payloadUserId)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
     if (asset.processingStatus !== "failed") {
       throw new AppError("invalid_request", "只有失败的素材可以重试。", 409);
     }
-    await tx
-      .update(assets)
-      .set({
+    const values = {
         processingStatus: "queued",
         failureCode: null,
         failureMessage: null,
         updatedAt: now,
-      })
-      .where(eq(assets.id, assetId));
+      } as const;
+    if (ref.kind === "private") {
+      await tx.update(privateAssets).set(values).where(eq(privateAssets.id, assetId));
+    } else {
+      await tx.update(publicAssets).set(values).where(eq(publicAssets.id, assetId));
+    }
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,
-      assetId,
+      ...jobTarget(ref),
       type: "analyze",
       phase: "analyzing",
       availableAt: now,
@@ -150,7 +188,7 @@ interface DeletingObject {
   objectKey: string;
 }
 
-interface PublicDeletionReservation {
+interface DeletionReservation {
   alreadyGone: boolean;
   object?: DeletingObject;
   thumbnailObject?: DeletingObject;
@@ -163,14 +201,18 @@ interface PublicDeletionReservation {
  * 视频切片先锁 video_sources，再锁目标 asset；同一父视频的并发删除因此会按
  * 父行串行，最后一个切片一定能观察到其他切片均已进入 deleted。
  */
-async function reservePublicAssetDeletion(
-  assetId: string,
-): Promise<PublicDeletionReservation> {
-  const [preflight] = await db
-    .select({ videoSourceId: assets.videoSourceId })
-    .from(assets)
-    .where(eq(assets.id, assetId))
-    .limit(1);
+async function reserveAssetDeletion(ref: AssetRef): Promise<DeletionReservation> {
+  const [preflight] = ref.kind === "private"
+    ? await db
+        .select({ videoSourceId: privateAssets.videoSourceId })
+        .from(privateAssets)
+        .where(eq(privateAssets.id, ref.id))
+        .limit(1)
+    : await db
+        .select({ videoSourceId: publicAssets.videoSourceId })
+        .from(publicAssets)
+        .where(eq(publicAssets.id, ref.id))
+        .limit(1);
   if (!preflight) return { alreadyGone: true };
 
   return db.transaction(async (tx) => {
@@ -184,16 +226,32 @@ async function reservePublicAssetDeletion(
         .limit(1);
     }
 
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const [asset] = ref.kind === "private"
+      ? await tx
+          .select({
+            id: privateAssets.id,
+            videoSourceId: privateAssets.videoSourceId,
+            mediaObjectId: privateAssets.mediaObjectId,
+            thumbnailMediaObjectId: privateAssets.thumbnailMediaObjectId,
+            deletedAt: privateAssets.deletedAt,
+          })
+          .from(privateAssets)
+          .where(eq(privateAssets.id, ref.id))
+          .for("update")
+          .limit(1)
+      : await tx
+          .select({
+            id: publicAssets.id,
+            videoSourceId: publicAssets.videoSourceId,
+            mediaObjectId: publicAssets.mediaObjectId,
+            thumbnailMediaObjectId: publicAssets.thumbnailMediaObjectId,
+            deletedAt: publicAssets.deletedAt,
+          })
+          .from(publicAssets)
+          .where(eq(publicAssets.id, ref.id))
+          .for("update")
+          .limit(1);
     if (!asset) return { alreadyGone: true };
-    if (asset.userId !== null) {
-      throw new AppError("invalid_request", "公共素材不存在。", 404);
-    }
     if (
       asset.videoSourceId &&
       asset.videoSourceId !== preflight.videoSourceId
@@ -202,11 +260,23 @@ async function reservePublicAssetDeletion(
     }
 
     const now = new Date();
-    if (asset.reviewStatus !== "deleted") {
+    if (!asset.deletedAt) {
+      if (ref.kind === "private") {
+        await tx
+          .update(privateAssets)
+          .set({ deletedAt: now, updatedAt: now })
+          .where(eq(privateAssets.id, ref.id));
+      } else {
+        await tx
+          .update(publicAssets)
+          .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
+          .where(eq(publicAssets.id, ref.id));
+      }
+    } else if (ref.kind === "public") {
       await tx
-        .update(assets)
+        .update(publicAssets)
         .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
-        .where(eq(assets.id, assetId));
+        .where(eq(publicAssets.id, ref.id));
     }
 
     let object: DeletingObject | undefined;
@@ -241,27 +311,43 @@ async function reservePublicAssetDeletion(
       }
     }
 
-    let parent: PublicDeletionReservation["parent"];
+    let parent: DeletionReservation["parent"];
     if (asset.videoSourceId && lockedSource) {
       // 父行锁已阻止其他兄弟切片越过；锁定读取确保使用最新提交状态。
-      const remaining = await tx
-        .select({ id: assets.id })
-        .from(assets)
-        .where(
-          and(
-            eq(assets.videoSourceId, asset.videoSourceId),
-            ne(assets.id, assetId),
-            ne(assets.reviewStatus, "deleted"),
-          ),
-        )
-        .for("update");
+      const remaining = ref.kind === "private"
+        ? await tx
+            .select({ id: privateAssets.id })
+            .from(privateAssets)
+            .where(
+              and(
+                eq(privateAssets.videoSourceId, asset.videoSourceId),
+                ne(privateAssets.id, ref.id),
+                isNull(privateAssets.deletedAt),
+              ),
+            )
+            .for("update")
+        : await tx
+            .select({ id: publicAssets.id })
+            .from(publicAssets)
+            .where(
+              and(
+                eq(publicAssets.videoSourceId, asset.videoSourceId),
+                ne(publicAssets.id, ref.id),
+                isNull(publicAssets.deletedAt),
+                ne(publicAssets.reviewStatus, "deleted"),
+              ),
+            )
+            .for("update");
       if (remaining.length === 0) {
         parent = { sourceId: lockedSource.id };
-        if (lockedSource.mediaObjectId) {
+        const parentMediaObjectId = ref.kind === "private"
+          ? lockedSource.privateMediaObjectId
+          : lockedSource.publicMediaObjectId;
+        if (parentMediaObjectId) {
           const [parentObject] = await tx
             .select({ id: mediaObjects.id, objectKey: mediaObjects.objectKey })
             .from(mediaObjects)
-            .where(eq(mediaObjects.id, lockedSource.mediaObjectId))
+            .where(eq(mediaObjects.id, parentMediaObjectId))
             .limit(1);
           if (parentObject) {
             parent.object = parentObject;
@@ -277,34 +363,74 @@ async function reservePublicAssetDeletion(
   });
 }
 
-async function finalizePublicAssetDeletion(
-  assetId: string,
-  record: PublicDeletionReservation,
+async function finalizeAssetDeletion(
+  ref: AssetRef,
+  record: DeletionReservation,
 ) {
   await db.transaction(async (tx) => {
+    if (ref.kind === "private") {
+      const sharedAnalysisJobs = await tx
+        .select({ id: jobs.id, payload: jobs.payload })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.privateAssetId, ref.id),
+            eq(jobs.type, "analyze"),
+            inArray(jobs.status, ["queued", "running"]),
+          ),
+        )
+        .for("update");
+      for (const analysisJob of sharedAnalysisJobs) {
+        const pairedPublicAssetId = analysisJob.payload?.pairedPublicAssetId;
+        if (typeof pairedPublicAssetId !== "string") continue;
+        const [publicPair] = await tx
+          .select({ id: publicAssets.id })
+          .from(publicAssets)
+          .where(eq(publicAssets.id, pairedPublicAssetId))
+          .limit(1);
+        if (!publicPair) continue;
+        const payload = { ...(analysisJob.payload ?? {}) };
+        delete payload.pairedPublicAssetId;
+        await tx
+          .update(jobs)
+          .set({
+            privateAssetId: null,
+            publicAssetId: publicPair.id,
+            payload,
+            updatedAt: new Date(),
+          })
+          .where(eq(jobs.id, analysisJob.id));
+      }
+    }
     // 保留所有修改类 durable job。删除完成前已排队的 update/publish/retry
     // 后续会读取 payload.assetId 并明确失败，不会因 FK 级联而永久卡在 queued。
     const linkedMutationJobs = await tx
       .select({ id: jobs.id, payload: jobs.payload })
       .from(jobs)
-      .where(
-        and(
-          eq(jobs.assetId, assetId),
-          inArray(jobs.type, ["delete", "update", "publish", "retry"]),
-        ),
-      )
+      .where(and(
+        ref.kind === "private"
+          ? eq(jobs.privateAssetId, ref.id)
+          : eq(jobs.publicAssetId, ref.id),
+        inArray(jobs.type, ["delete", "update", "publish", "retry"]),
+      ))
       .for("update");
     for (const linkedJob of linkedMutationJobs) {
       await tx
         .update(jobs)
         .set({
-          assetId: null,
-          payload: { ...(linkedJob.payload ?? {}), assetId },
+          ...(ref.kind === "private"
+            ? { privateAssetId: null }
+            : { publicAssetId: null }),
+          payload: { ...(linkedJob.payload ?? {}), assetId: ref.id },
           updatedAt: new Date(),
         })
         .where(eq(jobs.id, linkedJob.id));
     }
-    await tx.delete(assets).where(eq(assets.id, assetId));
+    if (ref.kind === "private") {
+      await tx.delete(privateAssets).where(eq(privateAssets.id, ref.id));
+    } else {
+      await tx.delete(publicAssets).where(eq(publicAssets.id, ref.id));
+    }
     if (record.object) {
       await tx.delete(mediaObjects).where(eq(mediaObjects.id, record.object.id));
     }
@@ -316,13 +442,29 @@ async function finalizePublicAssetDeletion(
     if (record.parent) {
       // 再次锁父行，使数据库收尾与潜在重试保持同一顺序。
       const [source] = await tx
-        .select({ id: videoSources.id })
+        .select()
         .from(videoSources)
         .where(eq(videoSources.id, record.parent.sourceId))
         .for("update")
         .limit(1);
       if (source) {
-        await tx.delete(videoSources).where(eq(videoSources.id, source.id));
+        const remainingParentIds = [
+          ref.kind === "public" ? null : source.publicMediaObjectId,
+          ref.kind === "private" ? null : source.privateMediaObjectId,
+        ];
+        if (remainingParentIds.every((id) => id === null)) {
+          await tx.delete(videoSources).where(eq(videoSources.id, source.id));
+        } else {
+          await tx
+            .update(videoSources)
+            .set({
+              ...(ref.kind === "private"
+                ? { privateMediaObjectId: null }
+                : { publicMediaObjectId: null }),
+              updatedAt: new Date(),
+            })
+            .where(eq(videoSources.id, source.id));
+        }
       }
       if (record.parent.object) {
         await tx
@@ -354,18 +496,18 @@ async function deleteObjectBestEffort(
   }
 }
 
-async function hardDeletePublicAsset(
-  assetId: string,
+async function hardDeleteAsset(
+  ref: AssetRef,
   storage: ObjectStorage,
 ) {
-  const record = await reservePublicAssetDeletion(assetId);
+  const record = await reserveAssetDeletion(ref);
   if (record.alreadyGone) {
-    return { released_to_public: false, parent_video_reclaimed: false };
+    return { parent_video_reclaimed: false };
   }
   const bestEffort = loadConfig().ZOS_DELETE_BEST_EFFORT === "true";
 
   // 外部对象先幂等删除；若进程中断，隐藏的 deleted 行可由同一任务重试收尾。
-  await deleteAnalysis(assetId);
+  await deleteAnalysis(ref.id);
   await deleteObjectBestEffort(storage, record.object?.objectKey, bestEffort);
   await deleteObjectBestEffort(
     storage,
@@ -378,28 +520,12 @@ async function hardDeletePublicAsset(
     bestEffort,
   );
 
-  await finalizePublicAssetDeletion(assetId, record);
-  return { released_to_public: false, parent_video_reclaimed: Boolean(record.parent) };
+  await finalizeAssetDeletion(ref, record);
+  return { parent_video_reclaimed: Boolean(record.parent) };
 }
 
 async function deleteAsset(job: ClaimedJob, storage: ObjectStorage) {
-  const assetId = job.assetId ?? stringPayload(job, "assetId");
-  if (!assetId) throw new AppError("invalid_request", "删除作业缺少素材标识。", 500);
-  const payloadUserId = stringPayload(job, "userId")?.trim() ?? null;
-  let userId: string | null = payloadUserId;
-  if (!userId) {
-    const [row] = await db
-      .select({ userId: assets.userId })
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .limit(1);
-    userId = row?.userId ?? null;
-  }
-  if (userId) {
-    await releaseAssetToPublic(assetId, userId);
-    return { released_to_public: true, parent_video_reclaimed: false };
-  }
-  return hardDeletePublicAsset(assetId, storage);
+  return hardDeleteAsset(await resolveJobRef(job), storage);
 }
 
 /** 执行 update/publish/retry/delete 变更作业。 */

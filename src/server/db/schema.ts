@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  check,
   datetime,
   decimal,
   double,
@@ -9,11 +10,12 @@ import {
   json,
   mysqlEnum,
   mysqlTable,
-  primaryKey,
+  mysqlView,
   text,
   uniqueIndex,
   varchar,
 } from "drizzle-orm/mysql-core";
+import { sql } from "drizzle-orm";
 
 const uuid = (name: string) => varchar(name, { length: 36 });
 const utcDateTime = (name: string) => datetime(name, { mode: "date", fsp: 3 });
@@ -196,9 +198,14 @@ export const videoSources = mysqlTable(
       onDelete: "set null",
     }),
     userId: varchar("user_id", { length: 191 }),
-    mediaObjectId: uuid("media_object_id").references(() => mediaObjects.id, {
-      onDelete: "set null",
-    }),
+    publicMediaObjectId: uuid("public_media_object_id").references(
+      () => mediaObjects.id,
+      { onDelete: "set null" },
+    ),
+    privateMediaObjectId: uuid("private_media_object_id").references(
+      () => mediaObjects.id,
+      { onDelete: "set null" },
+    ),
     originalFilename: varchar("original_filename", { length: 255 }).notNull(),
     mimeType: varchar("mime_type", { length: 255 }).notNull(),
     sizeBytes: byteCount("size_bytes").notNull(),
@@ -225,7 +232,7 @@ export const videoSources = mysqlTable(
   ],
 );
 
-/** 分镜服务返回的切片清单；整批校验通过后才会创建 assets 行。 */
+/** 分镜服务返回的逻辑切片；整批校验通过后公私素材可共享这些行。 */
 export const taskItemSegments = mysqlTable(
   "task_item_segments",
   {
@@ -260,10 +267,8 @@ export const taskItemSegments = mysqlTable(
   ],
 );
 
-/**
- * 素材库可检索实体。user_id 为 NULL 表示公共素材；视频仅保存分镜后的子视频。
- */
-export const assets = mysqlTable(
+/** 待迁移的历史素材数据；不参与当前模型和运行路径。 */
+export const legacyAssets = mysqlTable(
   "assets",
   {
     id: uuid("id").primaryKey(),
@@ -335,16 +340,138 @@ export const assets = mysqlTable(
   ],
 );
 
-export const analysisResults = mysqlTable("analysis_results", {
-  assetId: uuid("asset_id")
-    .primaryKey()
-    .references(() => assets.id, { onDelete: "cascade" }),
-  schemaVersion: int("schema_version", { unsigned: true }).notNull().default(1),
-  resultJson: json("result_json").$type<Record<string, unknown>>().notNull(),
-  modelProtocol: varchar("model_protocol", { length: 64 }).notNull(),
-  modelName: varchar("model_name", { length: 255 }).notNull(),
-  completedAt: utcDateTime("completed_at").notNull(),
-});
+function assetContentColumns() {
+  return {
+    taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    taskItemId: uuid("task_item_id").references(() => taskItems.id, {
+      onDelete: "set null",
+    }),
+    taskItemSegmentId: uuid("task_item_segment_id").references(
+      () => taskItemSegments.id,
+      { onDelete: "set null" },
+    ),
+    videoSourceId: uuid("video_source_id").references(() => videoSources.id, {
+      onDelete: "set null",
+    }),
+    mediaObjectId: uuid("media_object_id").references(() => mediaObjects.id, {
+      onDelete: "restrict",
+    }),
+    thumbnailMediaObjectId: uuid("thumbnail_media_object_id").references(
+      () => mediaObjects.id,
+      { onDelete: "restrict" },
+    ),
+    segmentIndex: int("segment_index", { unsigned: true }),
+    segmentStartMs: bigint("segment_start_ms", { mode: "number", unsigned: true }),
+    segmentEndMs: bigint("segment_end_ms", { mode: "number", unsigned: true }),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description").notNull(),
+    mediaType: mysqlEnum("media_type", ["image", "video"]).notNull(),
+    originalFilename: varchar("original_filename", { length: 255 }).notNull(),
+    originalPath: varchar("original_path", { length: 1024 }).notNull(),
+    mimeType: varchar("mime_type", { length: 255 }).notNull(),
+    sizeBytes: byteCount("size_bytes").notNull(),
+    processingStatus: mysqlEnum("processing_status", [
+      "queued",
+      "validating",
+      "analyzing",
+      "completed",
+      "failed",
+    ])
+      .notNull()
+      .default("queued"),
+    failureCode: varchar("failure_code", { length: 64 }),
+    failureMessage: text("failure_message"),
+    createdAt: utcDateTime("created_at").notNull(),
+    updatedAt: utcDateTime("updated_at").notNull(),
+    deletedAt: utcDateTime("deleted_at"),
+  };
+}
+
+/** 公共素材记录；uploader_user_id 仅用于列表/搜索排除上传者。 */
+export const publicAssets = mysqlTable(
+  "public_assets",
+  {
+    id: uuid("id").primaryKey(),
+    uploaderUserId: varchar("uploader_user_id", { length: 191 }),
+    ...assetContentColumns(),
+    reviewStatus: mysqlEnum("review_status", [
+      "pending_review",
+      "published",
+      "deleted",
+    ])
+      .notNull()
+      .default("pending_review"),
+  },
+  (table) => [
+    index("public_assets_uploader_review_created_idx").on(
+      table.uploaderUserId,
+      table.reviewStatus,
+      table.createdAt,
+    ),
+    index("public_assets_review_created_idx").on(
+      table.reviewStatus,
+      table.createdAt,
+    ),
+    uniqueIndex("public_assets_task_segment_unique").on(table.taskItemSegmentId),
+    uniqueIndex("public_assets_source_segment_unique").on(
+      table.videoSourceId,
+      table.segmentIndex,
+    ),
+  ],
+);
+
+/** 用户个人素材；创建即入库，不保存审核状态。 */
+export const privateAssets = mysqlTable(
+  "private_assets",
+  {
+    id: uuid("id").primaryKey(),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "set null",
+    }),
+    userId: varchar("user_id", { length: 191 }).notNull(),
+    ...assetContentColumns(),
+  },
+  (table) => [
+    uniqueIndex("private_assets_public_asset_unique").on(table.publicAssetId),
+    index("private_assets_user_created_idx").on(table.userId, table.createdAt),
+    index("private_assets_user_processing_created_idx").on(
+      table.userId,
+      table.processingStatus,
+      table.createdAt,
+    ),
+    uniqueIndex("private_assets_task_segment_unique").on(table.taskItemSegmentId),
+    uniqueIndex("private_assets_source_segment_unique").on(
+      table.videoSourceId,
+      table.segmentIndex,
+    ),
+  ],
+);
+
+export const analysisResults = mysqlTable(
+  "analysis_results",
+  {
+    id: uuid("id").primaryKey(),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "cascade",
+    }),
+    privateAssetId: uuid("private_asset_id").references(() => privateAssets.id, {
+      onDelete: "cascade",
+    }),
+    schemaVersion: int("schema_version", { unsigned: true }).notNull().default(1),
+    resultJson: json("result_json").$type<Record<string, unknown>>().notNull(),
+    modelProtocol: varchar("model_protocol", { length: 64 }).notNull(),
+    modelName: varchar("model_name", { length: 255 }).notNull(),
+    completedAt: utcDateTime("completed_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("analysis_results_public_asset_unique").on(table.publicAssetId),
+    uniqueIndex("analysis_results_private_asset_unique").on(table.privateAssetId),
+    check(
+      "analysis_results_target_check",
+      sql`((${table.publicAssetId} is not null) + (${table.privateAssetId} is not null)) = 1`,
+    ),
+  ],
+);
 
 export const tags = mysqlTable(
   "tags",
@@ -366,31 +493,57 @@ export const tags = mysqlTable(
 export const assetTags = mysqlTable(
   "asset_tags",
   {
-    assetId: uuid("asset_id")
-      .notNull()
-      .references(() => assets.id, { onDelete: "cascade" }),
+    id: uuid("id").primaryKey(),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "cascade",
+    }),
+    privateAssetId: uuid("private_asset_id").references(() => privateAssets.id, {
+      onDelete: "cascade",
+    }),
     tagId: uuid("tag_id")
       .notNull()
       .references(() => tags.id, { onDelete: "cascade" }),
     source: mysqlEnum("source", ["model", "human"]).notNull(),
     confidence: double("confidence"),
   },
-  (table) => [primaryKey({ columns: [table.assetId, table.tagId] })],
+  (table) => [
+    uniqueIndex("asset_tags_public_unique").on(table.publicAssetId, table.tagId),
+    uniqueIndex("asset_tags_private_unique").on(table.privateAssetId, table.tagId),
+    check(
+      "asset_tags_target_check",
+      sql`((${table.publicAssetId} is not null) + (${table.privateAssetId} is not null)) = 1`,
+    ),
+  ],
 );
 
 export const assetTagRejections = mysqlTable(
   "asset_tag_rejections",
   {
-    assetId: uuid("asset_id")
-      .notNull()
-      .references(() => assets.id, { onDelete: "cascade" }),
+    id: uuid("id").primaryKey(),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "cascade",
+    }),
+    privateAssetId: uuid("private_asset_id").references(() => privateAssets.id, {
+      onDelete: "cascade",
+    }),
     category: varchar("category", { length: 64 }).notNull(),
     normalizedValue: varchar("normalized_value", { length: 128 }).notNull(),
   },
   (table) => [
-    primaryKey({
-      columns: [table.assetId, table.category, table.normalizedValue],
-    }),
+    uniqueIndex("asset_tag_rejections_public_unique").on(
+      table.publicAssetId,
+      table.category,
+      table.normalizedValue,
+    ),
+    uniqueIndex("asset_tag_rejections_private_unique").on(
+      table.privateAssetId,
+      table.category,
+      table.normalizedValue,
+    ),
+    check(
+      "asset_tag_rejections_target_check",
+      sql`((${table.publicAssetId} is not null) + (${table.privateAssetId} is not null)) = 1`,
+    ),
   ],
 );
 
@@ -400,7 +553,12 @@ export const jobs = mysqlTable(
   {
     id: uuid("id").primaryKey(),
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "cascade" }),
-    assetId: uuid("asset_id").references(() => assets.id, { onDelete: "cascade" }),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "cascade",
+    }),
+    privateAssetId: uuid("private_asset_id").references(() => privateAssets.id, {
+      onDelete: "cascade",
+    }),
     type: mysqlEnum("type", [
       "validate",
       "scene_detect",
@@ -433,7 +591,12 @@ export const jobs = mysqlTable(
   (table) => [
     index("jobs_queue_idx").on(table.status, table.availableAt, table.createdAt),
     index("jobs_task_idx").on(table.taskId, table.status),
-    index("jobs_asset_idx").on(table.assetId, table.status),
+    index("jobs_public_asset_idx").on(table.publicAssetId, table.status),
+    index("jobs_private_asset_idx").on(table.privateAssetId, table.status),
+    check(
+      "jobs_asset_target_check",
+      sql`((${table.publicAssetId} is not null) + (${table.privateAssetId} is not null)) <= 1`,
+    ),
   ],
 );
 
@@ -484,9 +647,13 @@ export const callbackDeliveries = mysqlTable(
 export const searchIndexState = mysqlTable(
   "search_index_state",
   {
-    assetId: uuid("asset_id")
-      .primaryKey()
-      .references(() => assets.id, { onDelete: "cascade" }),
+    id: uuid("id").primaryKey(),
+    publicAssetId: uuid("public_asset_id").references(() => publicAssets.id, {
+      onDelete: "cascade",
+    }),
+    privateAssetId: uuid("private_asset_id").references(() => privateAssets.id, {
+      onDelete: "cascade",
+    }),
     status: mysqlEnum("status", ["queued", "running", "done", "failed", "deleted"])
       .notNull()
       .default("queued"),
@@ -495,5 +662,140 @@ export const searchIndexState = mysqlTable(
     errorMessage: text("error_message"),
     updatedAt: utcDateTime("updated_at").notNull(),
   },
-  (table) => [index("search_index_status_idx").on(table.status, table.updatedAt)],
+  (table) => [
+    uniqueIndex("search_index_public_asset_unique").on(table.publicAssetId),
+    uniqueIndex("search_index_private_asset_unique").on(table.privateAssetId),
+    index("search_index_status_idx").on(table.status, table.updatedAt),
+    check(
+      "search_index_target_check",
+      sql`((${table.publicAssetId} is not null) + (${table.privateAssetId} is not null)) = 1`,
+    ),
+  ],
 );
+
+/** 新运行时的只读统一视图；不包含待迁移的 legacy assets。 */
+export const assetEntries = mysqlView("asset_entries", {
+  kind: mysqlEnum("kind", ["public", "private"]).notNull(),
+  id: uuid("id").notNull(),
+  userId: varchar("user_id", { length: 191 }),
+  uploaderUserId: varchar("uploader_user_id", { length: 191 }),
+  publicAssetId: uuid("public_asset_id"),
+  taskId: uuid("task_id"),
+  taskItemId: uuid("task_item_id"),
+  taskItemSegmentId: uuid("task_item_segment_id"),
+  videoSourceId: uuid("video_source_id"),
+  mediaObjectId: uuid("media_object_id"),
+  thumbnailMediaObjectId: uuid("thumbnail_media_object_id"),
+  segmentIndex: int("segment_index", { unsigned: true }),
+  segmentStartMs: bigint("segment_start_ms", { mode: "number", unsigned: true }),
+  segmentEndMs: bigint("segment_end_ms", { mode: "number", unsigned: true }),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description").notNull(),
+  mediaType: mysqlEnum("media_type", ["image", "video"]).notNull(),
+  originalFilename: varchar("original_filename", { length: 255 }).notNull(),
+  originalPath: varchar("original_path", { length: 1024 }).notNull(),
+  mimeType: varchar("mime_type", { length: 255 }).notNull(),
+  sizeBytes: byteCount("size_bytes").notNull(),
+  processingStatus: mysqlEnum("processing_status", [
+    "queued",
+    "validating",
+    "analyzing",
+    "completed",
+    "failed",
+  ]).notNull(),
+  reviewStatus: mysqlEnum("review_status", [
+    "pending_review",
+    "published",
+    "deleted",
+  ]).notNull(),
+  failureCode: varchar("failure_code", { length: 64 }),
+  failureMessage: text("failure_message"),
+  createdAt: utcDateTime("created_at").notNull(),
+  updatedAt: utcDateTime("updated_at").notNull(),
+  deletedAt: utcDateTime("deleted_at"),
+}).as(sql`
+  select 'public' as kind, id, null as user_id, uploader_user_id,
+    null as public_asset_id, task_id, task_item_id, task_item_segment_id,
+    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,
+    segment_start_ms, segment_end_ms, name, description, media_type,
+    original_filename, original_path, mime_type, size_bytes, processing_status,
+    review_status, failure_code, failure_message, created_at, updated_at, deleted_at
+  from public_assets
+  union all
+  select 'private' as kind, id, user_id, null as uploader_user_id,
+    public_asset_id, task_id, task_item_id, task_item_segment_id,
+    video_source_id, media_object_id, thumbnail_media_object_id, segment_index,
+    segment_start_ms, segment_end_ms, name, description, media_type,
+    original_filename, original_path, mime_type, size_bytes, processing_status,
+    'published' as review_status, failure_code, failure_message,
+    created_at, updated_at, deleted_at
+  from private_assets
+`);
+
+export const assetTagEntries = mysqlView("asset_tag_entries", {
+  id: uuid("id").notNull(),
+  kind: mysqlEnum("kind", ["public", "private"]).notNull(),
+  assetId: uuid("asset_id").notNull(),
+  tagId: uuid("tag_id").notNull(),
+  source: mysqlEnum("source", ["model", "human"]).notNull(),
+  confidence: double("confidence"),
+}).as(sql`
+  select id, 'public' as kind, public_asset_id as asset_id, tag_id, source, confidence
+  from asset_tags where public_asset_id is not null
+  union all
+  select id, 'private' as kind, private_asset_id as asset_id, tag_id, source, confidence
+  from asset_tags where private_asset_id is not null
+`);
+
+export const analysisResultEntries = mysqlView("analysis_result_entries", {
+  id: uuid("id").notNull(),
+  kind: mysqlEnum("kind", ["public", "private"]).notNull(),
+  assetId: uuid("asset_id").notNull(),
+  schemaVersion: int("schema_version", { unsigned: true }).notNull(),
+  resultJson: json("result_json").$type<Record<string, unknown>>().notNull(),
+  modelProtocol: varchar("model_protocol", { length: 64 }).notNull(),
+  modelName: varchar("model_name", { length: 255 }).notNull(),
+  completedAt: utcDateTime("completed_at").notNull(),
+}).as(sql`
+  select id, 'public' as kind, public_asset_id as asset_id, schema_version,
+    result_json, model_protocol, model_name, completed_at
+  from analysis_results where public_asset_id is not null
+  union all
+  select id, 'private' as kind, private_asset_id as asset_id, schema_version,
+    result_json, model_protocol, model_name, completed_at
+  from analysis_results where private_asset_id is not null
+`);
+
+export const assetTagRejectionEntries = mysqlView("asset_tag_rejection_entries", {
+  id: uuid("id").notNull(),
+  kind: mysqlEnum("kind", ["public", "private"]).notNull(),
+  assetId: uuid("asset_id").notNull(),
+  category: varchar("category", { length: 64 }).notNull(),
+  normalizedValue: varchar("normalized_value", { length: 128 }).notNull(),
+}).as(sql`
+  select id, 'public' as kind, public_asset_id as asset_id, category, normalized_value
+  from asset_tag_rejections where public_asset_id is not null
+  union all
+  select id, 'private' as kind, private_asset_id as asset_id, category, normalized_value
+  from asset_tag_rejections where private_asset_id is not null
+`);
+
+export const searchIndexEntries = mysqlView("search_index_entries", {
+  id: uuid("id").notNull(),
+  kind: mysqlEnum("kind", ["public", "private"]).notNull(),
+  assetId: uuid("asset_id").notNull(),
+  status: mysqlEnum("status", ["queued", "running", "done", "failed", "deleted"])
+    .notNull(),
+  contentHash: varchar("content_hash", { length: 64 }),
+  indexedAt: utcDateTime("indexed_at"),
+  errorMessage: text("error_message"),
+  updatedAt: utcDateTime("updated_at").notNull(),
+}).as(sql`
+  select id, 'public' as kind, public_asset_id as asset_id, status,
+    content_hash, indexed_at, error_message, updated_at
+  from search_index_state where public_asset_id is not null
+  union all
+  select id, 'private' as kind, private_asset_id as asset_id, status,
+    content_hash, indexed_at, error_message, updated_at
+  from search_index_state where private_asset_id is not null
+`);

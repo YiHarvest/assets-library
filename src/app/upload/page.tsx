@@ -19,7 +19,7 @@ export default async function UploadPage({
         <p className="mt-3 text-slate-600">
           支持一次选择多个本地素材并逐个上传（采用流式传输）。系统会按文件扩展名转换图片；
           视频正规化后先自动分镜，每个子视频再提取 1–5 张关键帧独立分析。
-          任一切片损坏或超过大小限制时，整段父视频不会入库。
+          私人上传会同时生成一份待审核的公共副本，首次分析只执行一次。
         </p>
       </div>
       <UploadForm initialUserId={rawUserId?.trim().slice(0, 191) ?? ""} />

@@ -42,7 +42,7 @@ paths:
       tags: [Uploads]
       operationId: createUploadTask
       summary: 创建上传任务和文件清单
-      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB。
+      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建独立的私人素材和待审核公共副本。
       requestBody:
         required: true
         content:
@@ -53,7 +53,6 @@ paths:
                 value:
                   user_id: user_123
                   callback_url: null
-                  auto_publish: false
                   items:
                     - filename: product.png
                       size_bytes: 182304
@@ -202,8 +201,8 @@ paths:
       operationId: queryAssets
       summary: 浏览或语义搜索素材
       description: >-
-        统一游标分页、语义搜索、受控 filter 和标签统计。public 范围单独搜索
-        AI/AIGC/人工智能宽泛别名时会扩展到公共及全部个人素材；显式用户范围不变。
+        统一游标分页、语义搜索、受控 filter 和标签统计。public 与 exclude_user
+        始终只查询公共表，不会把私人素材扩展进公共结果。
       requestBody:
         required: true
         content:
@@ -269,11 +268,11 @@ paths:
     delete:
       tags: [Assets]
       operationId: deleteAsset
-      summary: 异步删除或转公共素材
+      summary: 异步删除指定作用域的素材
       description: >-
-        非空 user_id 表示个人删除：只清空归属，使素材成为公共素材。
-        user_id 为空表示公共硬删除：清理 MySQL、ZOS 和 Chroma；删除最后一个
-        视频切片时同时回收父视频。
+        非空 user_id 只删除该用户的私人记录、分析、索引和 ZOS 对象；为空则
+        删除公共素材。公私删除互不影响，删除某一侧最后一个视频切片时只回收
+        该侧父视频对象。
       requestBody:
         required: false
         content:
@@ -336,7 +335,8 @@ paths:
     post:
       tags: [Assets]
       operationId: publishAsset
-      summary: 异步发布已完成分析的素材
+      summary: 异步发布已完成分析的公共素材
+      description: 私人素材无需审核；传入私人 ID 时返回 409。
       parameters:
         - $ref: "#/components/parameters/AssetId"
       requestBody:
@@ -878,15 +878,11 @@ components:
     CreateUploadTask:
       type: object
       additionalProperties: false
-      description: 三步上传的第一步请求；默认创建公共、待人工发布的素材。
+      description: 三步上传的第一步请求；user_id 为空只创建公共素材，非空同时创建公私两份。
       required: [items]
       properties:
         user_id: { $ref: "#/components/schemas/NullableUserId" }
         callback_url: { $ref: "#/components/schemas/CallbackUrl" }
-        auto_publish:
-          type: boolean
-          default: false
-          description: true 时各素材分析成功后自动发布；不改变视频整批校验边界。
         items:
           type: array
           minItems: 1
@@ -897,7 +893,7 @@ components:
     TaskItem:
       type: object
       additionalProperties: false
-      description: 任务中一个上传文件的进度；视频文件的 asset_ids 可包含多个切片素材。
+      description: 任务中一个上传文件的进度；视频 ID 数组按 segment_index 排序。
       required:
         - item_id
         - filename
@@ -907,7 +903,8 @@ components:
         - received_bytes
         - total_bytes
         - progress_percent
-        - asset_ids
+        - private_asset_ids
+        - public_asset_ids
         - error
       properties:
         item_id:
@@ -924,9 +921,13 @@ components:
         received_bytes: { type: integer, minimum: 0 }
         total_bytes: { type: integer, minimum: 0 }
         progress_percent: { type: number, minimum: 0, maximum: 100 }
-        asset_ids:
+        private_asset_ids:
           type: array
-          description: 已成功建档的素材 ID；视频父源本身不会出现在此数组。
+          description: 已成功建档的私人素材 ID。
+          items: { type: string, format: uuid }
+        public_asset_ids:
+          type: array
+          description: 已成功建档的公共素材 ID。
           items: { type: string, format: uuid }
         error:
           oneOf:
@@ -1008,7 +1009,8 @@ components:
             received_bytes: 182304
             total_bytes: 182304
             progress_percent: 100
-            asset_ids: [96102b40-3f0a-46ac-9d64-15e75d1981d5]
+            private_asset_ids: [96102b40-3f0a-46ac-9d64-15e75d1981d5]
+            public_asset_ids: [a8561ef7-ed4d-4a66-84ce-5285d321e13e]
             error: null
         error: null
         created_at: "2026-08-12T10:17:00.000+08:00"
@@ -1092,7 +1094,7 @@ components:
         created_at: { type: string, format: date-time }
 
     UserScope:
-      description: 素材查询的显式归属范围；默认使用 public。
+      description: 素材查询的显式归属范围；public 仅公共，user 仅指定用户私人素材，exclude_user 仅公共并排除指定上传者，all 合并两表。
       discriminator: { propertyName: mode }
       oneOf:
         - type: object
@@ -1484,7 +1486,6 @@ components:
             - original_filename
             - mime_type
             - size_bytes
-            - auto_publish
             - segment_start_seconds
             - segment_end_seconds
             - failure
@@ -1493,7 +1494,6 @@ components:
             original_filename: { type: string }
             mime_type: { type: string }
             size_bytes: { type: integer, minimum: 0 }
-            auto_publish: { type: boolean }
             segment_start_seconds:
               description: 视频分镜在父视频中的绝对起始秒；图片为 null。
               oneOf: [{ type: number, minimum: 0 }, { type: "null" }]

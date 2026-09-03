@@ -89,7 +89,7 @@ const fieldDescriptions = {
     generated_segment_count:
       "父视频首次成功持久化时生成的历史切片总数，不随删除下降。",
     current_asset_segment_count:
-      "该父视频目前仍保留在 assets 表中的切片记录数，包含逻辑删除记录。",
+      "该父视频目前仍保留在 private_assets 表中的切片记录数，包含逻辑删除记录。",
     active_asset_segment_count: "该父视频当前未删除的切片素材数。",
   },
 };

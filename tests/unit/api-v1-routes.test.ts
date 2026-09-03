@@ -48,11 +48,10 @@ const asset: ApiV1AssetDetail = {
   media_url: `/api/v1/media/${assetId}`,
   original_filename: "demo.png",
   mime_type: "image/png",
-    size_bytes: 3,
-    auto_publish: false,
-    segment_start_seconds: null,
-    segment_end_seconds: null,
-    failure: null,
+  size_bytes: 3,
+  segment_start_seconds: null,
+  segment_end_seconds: null,
+  failure: null,
   analysis: null,
   created_at: now,
   updated_at: now,
@@ -84,7 +83,8 @@ function task(
         received_bytes: 0,
         total_bytes: 3,
         progress_percent: 0,
-        asset_ids: [],
+        private_asset_ids: [],
+        public_asset_ids: [],
         error: null,
       },
     ],
@@ -237,7 +237,6 @@ describe("API v1 contracts and routes", () => {
     ).toEqual({
       user_id: null,
       callback_url: null,
-      auto_publish: false,
       items: [
         {
           filename: "demo.png",
@@ -246,6 +245,15 @@ describe("API v1 contracts and routes", () => {
         },
       ],
     });
+  });
+
+  it("rejects the removed auto_publish upload field", () => {
+    expect(() =>
+      createUploadTaskSchema.parse({
+        auto_publish: false,
+        items: [{ filename: "demo.png", size_bytes: 3 }],
+      }),
+    ).toThrow();
   });
 
   it("enforces the per-task item and byte limits", () => {
@@ -278,7 +286,6 @@ describe("API v1 contracts and routes", () => {
         service.createUploadTask({
           user_id: null,
           callback_url: null,
-          auto_publish: false,
           items: [
             { filename: "first.png", size_bytes: 1, content_type: null },
             { filename: "second.png", size_bytes: 1, content_type: null },
@@ -296,7 +303,6 @@ describe("API v1 contracts and routes", () => {
         service.createUploadTask({
           user_id: null,
           callback_url: null,
-          auto_publish: false,
           items: [
             { filename: "three.png", size_bytes: 3, content_type: null },
           ],
@@ -337,7 +343,7 @@ describe("API v1 contracts and routes", () => {
     expect(body).not.toHaveProperty("taskId");
     expect(body).not.toHaveProperty("receivedBytes");
     expect(service.createUploadTask).toHaveBeenCalledWith(
-      expect.objectContaining({ user_id: "user-7", auto_publish: false }),
+      expect.objectContaining({ user_id: "user-7" }),
     );
   });
 
@@ -559,15 +565,12 @@ describe("API v1 contracts and routes", () => {
       jsonRequest("http://localhost/api/v1/assets/query", {}),
     );
     expect(response.status).toBe(200);
-    expect(service.queryAssets).toHaveBeenCalledWith(
-      {
-        cursor: null,
-        filter: { user_scope: { mode: "public" } },
-        include_tag_statistics: true,
-        limit: 20,
-      },
-      { expandPublicBroadAi: true },
-    );
+    expect(service.queryAssets).toHaveBeenCalledWith({
+      cursor: null,
+      filter: { user_scope: { mode: "public" } },
+      include_tag_statistics: true,
+      limit: 20,
+    });
   });
 
   it("gets an asset in the requested user scope using snake_case fields", async () => {

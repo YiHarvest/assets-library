@@ -73,7 +73,7 @@ MySQL 事务；任一上传、校验或数据库操作失败，会等待在途�
 
 ## 快速开始
 
-要求：Linux、Node.js 22+、pnpm 11.3+、FFmpeg/ffprobe、`uv`/`uvx`，以及可访问的
+要求：Linux 或 macOS、Node.js 22+、pnpm 11.3+、FFmpeg/ffprobe、`uv`/`uvx`，以及可访问的
 MySQL 8.4、ZOS 和 OpenAI-compatible 模型服务。
 
 ```bash

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -15,6 +16,7 @@ import {
   normalizeObjectKey,
   publicObjectUrl,
   writeAll,
+  type CopyObjectInput,
   type ObjectByteRange,
   type ObjectMetadata,
   type ObjectReadResult,
@@ -98,6 +100,37 @@ export class ZosObjectStorage implements ObjectStorage {
       sizeBytes: stat.size,
       etag: response.ETag?.replaceAll('"', ""),
       url: publicObjectUrl(this.publicBaseUrl, key),
+    };
+  }
+
+  async copyObject(input: CopyObjectInput): Promise<StoredObject> {
+    const sourceKey = normalizeObjectKey(input.sourceKey);
+    const destinationKey = normalizeObjectKey(input.destinationKey);
+    if (sourceKey === destinationKey) {
+      throw new Error("ZOS 复制的源对象和目标对象不能相同。");
+    }
+    const source = await this.headObject(sourceKey);
+    const encodedSource = [this.bucket, ...sourceKey.split("/")]
+      .map(encodeURIComponent)
+      .join("/");
+    const response = await this.client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: destinationKey,
+        CopySource: encodedSource,
+      }),
+    );
+    const copied = await this.headObject(destinationKey);
+    if (copied.sizeBytes !== source.sizeBytes) {
+      throw new Error(
+        `ZOS 复制后大小不一致：源对象 ${source.sizeBytes} 字节，目标对象 ${copied.sizeBytes} 字节。`,
+      );
+    }
+    return {
+      key: destinationKey,
+      sizeBytes: copied.sizeBytes,
+      etag: response.CopyObjectResult?.ETag?.replaceAll('"', "") ?? copied.etag,
+      url: publicObjectUrl(this.publicBaseUrl, destinationKey),
     };
   }
 

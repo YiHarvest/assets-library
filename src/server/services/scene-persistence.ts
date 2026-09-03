@@ -23,6 +23,7 @@ export interface PersistSceneBatchInput {
   storage: ObjectStorage;
   /** ZOS 上传并发上限（默认 8）。 */
   concurrency?: number;
+  variant?: "public" | "private";
   /**
    * 必须在一个 MySQL 事务内建立父视频与全部子素材，并只在事务提交后返回。
    * 回调抛错时，本函数会补偿删除本批已经上传的所有 ZOS 对象。
@@ -91,6 +92,7 @@ export async function persistSceneBatch(
   input: PersistSceneBatchInput,
 ): Promise<PersistedSceneBatch> {
   const prefix = objectPrefix(input.now ?? new Date(), input.batch.batchId);
+  const scopedPrefix = input.variant ? `${prefix}/${input.variant}` : prefix;
   const uploaded: StoredObject[] = [];
   try {
     const semaphore = new Semaphore(input.concurrency ?? 8);
@@ -104,18 +106,18 @@ export async function persistSceneBatch(
       });
 
     const parentPromise = storeTracked({
-      key: `${prefix}/parent.mp4`,
+      key: `${scopedPrefix}/parent.mp4`,
       filePath: input.batch.parentPath,
       contentType: "video/mp4",
     });
     const segmentPromises = input.batch.segments.map(async (segment) => {
       const object = await storeTracked({
-        key: `${prefix}/segments/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.mp4`,
+        key: `${scopedPrefix}/segments/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.mp4`,
         filePath: segment.absolutePath,
         contentType: "video/mp4",
       });
       const thumbnailObject = await storeTracked({
-        key: `${prefix}/thumbnails/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.jpg`,
+        key: `${scopedPrefix}/thumbnails/${String(segment.index).padStart(3, "0")}-${crypto.randomUUID()}.jpg`,
         filePath: segment.thumbnailAbsolutePath,
         contentType: "image/jpeg",
       });

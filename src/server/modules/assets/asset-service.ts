@@ -3,7 +3,6 @@ import type { AppConfig } from "@/server/config";
 import type { TaskService } from "@/server/modules/tasks/task-service";
 import type * as AssetRepository from "@/server/repositories/assets";
 import type { AssetScope } from "@/server/repositories/assets";
-import { isBroadAiQuery } from "@/server/search/relevance";
 import type {
   ApiTaskStatus,
   ApiV1AssetDetail,
@@ -32,10 +31,6 @@ export interface AssetServiceDependencies {
   tasks: Pick<TaskService, "getAcceptedTask">;
 }
 
-export interface AssetQueryExecutionOptions {
-  expandPublicBroadAi?: boolean;
-}
-
 export function scopeForRepository(scope: UserScope): AssetScope {
   switch (scope.mode) {
     case "user":
@@ -49,21 +44,9 @@ export function scopeForRepository(scope: UserScope): AssetScope {
   }
 }
 
-/**
- * 公共素材页搜索单独的 AI 宽泛词时，需要同时召回所有用户的 AI 相关素材。
- * 显式选择用户、排除用户或主动请求 all 时仍严格遵循调用方传入的作用域。
- */
 export function scopeForAssetQuery(
   input: Pick<AssetQuery, "filter" | "keywords">,
-  options: AssetQueryExecutionOptions = {},
 ): AssetScope {
-  if (
-    options.expandPublicBroadAi &&
-    input.filter.user_scope.mode === "public" &&
-    isBroadAiQuery(input.keywords ?? [])
-  ) {
-    return { includeAllUsers: true };
-  }
   return scopeForRepository(input.filter.user_scope);
 }
 
@@ -198,7 +181,6 @@ export class AssetService {
 
   async queryAssets(
     input: AssetQuery,
-    options: AssetQueryExecutionOptions = {},
   ): Promise<AssetQueryResponse> {
     if (input.query && input.cursor) {
       throw new ApiV1Error(
@@ -208,7 +190,7 @@ export class AssetService {
       );
     }
     const pageNumber = input.query ? 1 : decodeCursor(input.cursor);
-    const scope = scopeForAssetQuery(input, options);
+    const scope = scopeForAssetQuery(input);
     const result = await this.dependencies.repository.queryAssetsPage({
       ...scope,
       page: pageNumber,
@@ -247,7 +229,6 @@ export class AssetService {
       original_filename: detail.originalFilename,
       mime_type: detail.mimeType,
       size_bytes: detail.sizeBytes,
-      auto_publish: detail.directPublish,
       segment_start_seconds:
         detail.segmentStartMs === null ? null : detail.segmentStartMs / 1_000,
       segment_end_seconds:

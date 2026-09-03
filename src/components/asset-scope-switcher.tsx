@@ -18,23 +18,25 @@ function userOptionLabel(user: UserOption) {
 
 export function AssetScopeSwitcher({
   currentUserId,
+  currentScope,
   publicHref,
   users,
 }: {
   currentUserId: string;
+  currentScope: "public" | "private";
   publicHref: string;
   users: UserOption[];
 }) {
-  const [pickerOpen, setPickerOpen] = useState(Boolean(currentUserId));
+  const [pickerOpen, setPickerOpen] = useState(currentScope === "private");
   const [isNavigating, setIsNavigating] = useState(false);
-  const isPersonal = Boolean(currentUserId);
+  const isPersonal = currentScope === "private";
   const currentUserIsRegistered = users.some(
     (user) => user.user_id === currentUserId,
   );
 
   useEffect(() => {
-    setPickerOpen(Boolean(currentUserId));
-  }, [currentUserId]);
+    setPickerOpen(currentScope === "private");
+  }, [currentScope]);
 
   const selectUser = (userId: string) => {
     const user = users.find((candidate) => candidate.user_id === userId);

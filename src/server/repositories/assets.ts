@@ -18,12 +18,15 @@ import type { MySqlRawQueryResult } from "drizzle-orm/mysql2";
 import { alias } from "drizzle-orm/mysql-core";
 import { db } from "@/server/db";
 import {
-  analysisResults,
-  assets,
-  assetTagRejections,
-  assetTags,
+  analysisResultEntries as analysisResults,
+  assetEntries as assets,
+  assetTagEntries as assetTags,
+  assetTagRejections as assetTagRejectionRecords,
+  assetTags as assetTagRecords,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   tags,
   taskItems,
   tasks,
@@ -70,6 +73,28 @@ function affectedRows(result: MySqlRawQueryResult) {
   return result[0].affectedRows;
 }
 
+export type AssetKind = "public" | "private";
+export interface AssetRef {
+  kind: AssetKind;
+  id: string;
+}
+
+export function assetRef(assetId: string, userId?: string | null): AssetRef {
+  return { kind: userId?.trim() ? "private" : "public", id: assetId };
+}
+
+export function jobTarget(ref: AssetRef) {
+  return ref.kind === "private"
+    ? { privateAssetId: ref.id }
+    : { publicAssetId: ref.id };
+}
+
+export function associationTarget(ref: AssetRef) {
+  return ref.kind === "private"
+    ? { privateAssetId: ref.id, publicAssetId: null }
+    : { publicAssetId: ref.id, privateAssetId: null };
+}
+
 export interface TaskItemManifest {
   id: string;
   ordinal: number;
@@ -104,6 +129,10 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
   const taskId = input.id ?? crypto.randomUUID();
   const now = new Date();
   const userId = input.userId?.trim() || null;
+  const target: AssetRef =
+    input.type === "publish"
+      ? { kind: "public", id: input.assetId }
+      : assetRef(input.assetId, userId);
   const phase =
     input.type === "delete"
       ? "deleting"
@@ -113,6 +142,24 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           ? "updating"
           : "retrying";
   await db.transaction(async (tx) => {
+    if (input.type === "publish") {
+      const [privateAsset] = await tx
+        .select({ id: privateAssets.id })
+        .from(privateAssets)
+        .where(eq(privateAssets.id, input.assetId))
+        .limit(1);
+      if (privateAsset) {
+        throw new AppError("invalid_request", "私人素材无需审核。", 409);
+      }
+      const [publicAsset] = await tx
+        .select({ id: publicAssets.id })
+        .from(publicAssets)
+        .where(eq(publicAssets.id, input.assetId))
+        .limit(1);
+      if (!publicAsset) {
+        throw new AppError("invalid_request", "素材不存在。", 404);
+      }
+    }
     if (userId) {
       await tx
         .insert(users)
@@ -142,7 +189,7 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,
-      assetId: input.assetId,
+      ...jobTarget(target),
       type: input.type,
       phase,
       payload: input.payload ?? null,
@@ -222,9 +269,15 @@ export async function getTaskWithItems(taskId: string) {
 /** 查询任务逐文件对应的素材 ID，供 API 展示层组装任务快照。 */
 export async function listTaskItemAssetIds(taskId: string) {
   return db
-    .select({ id: assets.id, taskItemId: assets.taskItemId })
+    .select({
+      id: assets.id,
+      taskItemId: assets.taskItemId,
+      kind: assets.kind,
+      segmentIndex: assets.segmentIndex,
+    })
     .from(assets)
-    .where(eq(assets.taskId, taskId));
+    .where(eq(assets.taskId, taskId))
+    .orderBy(asc(assets.segmentIndex), asc(assets.id));
 }
 
 export interface ListUserTaskIdsOptions {
@@ -582,41 +635,47 @@ export interface CreateAssetInput {
   mimeType: string;
   mediaType: "image" | "video";
   sizeBytes: number;
-  directPublish: boolean;
   enqueueAnalysis?: boolean;
 }
 
 /** 创建素材及分析作业。父视频不得调用此函数，只为图片或已校验的视频切片建档。 */
 export async function createAsset(input: CreateAssetInput) {
   const now = new Date();
+  const ref = assetRef(input.assetId, input.userId);
+  const values = {
+    id: input.assetId,
+    taskId: input.taskId ?? null,
+    taskItemId: input.taskItemId ?? null,
+    taskItemSegmentId: input.taskItemSegmentId ?? null,
+    videoSourceId: input.videoSourceId ?? null,
+    mediaObjectId: input.mediaObjectId ?? null,
+    segmentIndex: input.segmentIndex ?? null,
+    segmentStartMs: input.segmentStartMs ?? null,
+    segmentEndMs: input.segmentEndMs ?? null,
+    name: input.name,
+    description: "",
+    mediaType: input.mediaType,
+    originalFilename: input.originalFilename,
+    originalPath: input.originalPath,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+    createdAt: now,
+    updatedAt: now,
+  };
   await db.transaction(async (tx) => {
-    await tx.insert(assets).values({
-      id: input.assetId,
-      taskId: input.taskId ?? null,
-      taskItemId: input.taskItemId ?? null,
-      taskItemSegmentId: input.taskItemSegmentId ?? null,
-      videoSourceId: input.videoSourceId ?? null,
-      mediaObjectId: input.mediaObjectId ?? null,
-      segmentIndex: input.segmentIndex ?? null,
-      segmentStartMs: input.segmentStartMs ?? null,
-      segmentEndMs: input.segmentEndMs ?? null,
-      userId: input.userId?.trim() || null,
-      name: input.name,
-      description: "",
-      mediaType: input.mediaType,
-      originalFilename: input.originalFilename,
-      originalPath: input.originalPath,
-      mimeType: input.mimeType,
-      sizeBytes: input.sizeBytes,
-      directPublish: input.directPublish,
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (ref.kind === "private") {
+      await tx.insert(privateAssets).values({
+        ...values,
+        userId: input.userId!.trim(),
+      });
+    } else {
+      await tx.insert(publicAssets).values(values);
+    }
     if (input.enqueueAnalysis !== false) {
       await tx.insert(jobs).values({
         id: crypto.randomUUID(),
         taskId: input.taskId ?? null,
-        assetId: input.assetId,
+        ...jobTarget(ref),
         type: "analyze",
         availableAt: now,
         createdAt: now,
@@ -760,18 +819,32 @@ const thumbnailMediaObjects = alias(
 function scopeCondition(scope: AssetScope): SQL | undefined {
   if (scope.includeAllUsers) return undefined;
   if (scope.excludeUserId) {
-    return or(isNull(assets.userId), ne(assets.userId, scope.excludeUserId));
+    return and(
+      eq(assets.kind, "public"),
+      or(
+        isNull(assets.uploaderUserId),
+        ne(assets.uploaderUserId, scope.excludeUserId),
+      ),
+    );
   }
   const userId = scope.userId?.trim();
-  return userId ? eq(assets.userId, userId) : isNull(assets.userId);
+  return userId
+    ? and(eq(assets.kind, "private"), eq(assets.userId, userId))
+    : eq(assets.kind, "public");
 }
 
-function rowMatchesScope(userId: string | null, scope: AssetScope) {
+function rowMatchesScope(
+  row: Pick<typeof assets.$inferSelect, "kind" | "userId" | "uploaderUserId">,
+  scope: AssetScope,
+) {
   if (scope.includeAllUsers) return true;
   if (scope.excludeUserId) {
-    return userId === null || userId !== scope.excludeUserId;
+    return row.kind === "public" && row.uploaderUserId !== scope.excludeUserId;
   }
-  return userId === (scope.userId?.trim() || null);
+  const userId = scope.userId?.trim();
+  return userId
+    ? row.kind === "private" && row.userId === userId
+    : row.kind === "public";
 }
 
 function normalizedUsageUserId(userId: string) {
@@ -784,9 +857,10 @@ function normalizedUsageUserId(userId: string) {
 
 function userStorageConditions(userId: string) {
   return and(
+    eq(assets.kind, "private"),
     // MySQL 默认排序规则可能不区分大小写；BINARY 保证 user_id 真正精确匹配。
     sql<boolean>`BINARY ${assets.userId} = BINARY ${userId}`,
-    ne(assets.reviewStatus, "deleted"),
+    isNull(assets.deletedAt),
   );
 }
 
@@ -816,7 +890,7 @@ function userStorageItemSelection() {
 /**
  * 汇总单个用户当前持有的素材空间用量。
  *
- * 计费边界严格落在非 deleted 的 assets 行：图片计入主媒体对象，视频计入分镜
+ * 计费边界严格落在未删除的私有素材行：图片计入主媒体对象，视频计入分镜
  * 素材自身的媒体对象及其持久化首帧。完整父视频属于 video_sources，不在本查询
  * 的连接边界内，因此不会重复计费。
  */
@@ -978,8 +1052,9 @@ export async function listRegisteredUsers(): Promise<RegisteredUserUsage[]> {
     .leftJoin(
       assets,
       and(
+        eq(assets.kind, "private"),
         eq(assets.userId, users.userId),
-        ne(assets.reviewStatus, "deleted"),
+        isNull(assets.deletedAt),
       ),
     )
     .groupBy(
@@ -1314,7 +1389,7 @@ export async function queryAssetsPage({
 }: QueryAssetsOptions = {}): Promise<AssetQueryPage> {
   const safeLimit = Math.min(Math.max(limit, 1), 100);
   const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = [isNull(assets.deletedAt)];
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
   if (mediaTypes.length) conditions.push(inArray(assets.mediaType, mediaTypes));
@@ -1323,7 +1398,7 @@ export async function queryAssetsPage({
   if (reviewStatuses.length) {
     conditions.push(inArray(assets.reviewStatus, reviewStatuses));
   }
-
+  // 关键词精确匹配和标签
   const [exactTagIds, initialKeywordMatches] = await Promise.all([
     assetIdsMatchingExactTags(exactTags),
     assetIdsMatchingKeywords(keywords, conditions),
@@ -1763,7 +1838,10 @@ async function publishedAssetIdsMatchingKeywords(
 ) {
   const ownership = scopeCondition(scope);
   if (!keywords.length) {
-    const conditions: SQL[] = [eq(assets.reviewStatus, "published")];
+    const conditions: SQL[] = [
+      eq(assets.reviewStatus, "published"),
+      isNull(assets.deletedAt),
+    ];
     if (ownership) conditions.push(ownership);
     return (
       await db
@@ -1777,6 +1855,7 @@ async function publishedAssetIdsMatchingKeywords(
   if (!matchedAssetIds.length) return [];
   const conditions: SQL[] = [
     eq(assets.reviewStatus, "published"),
+    isNull(assets.deletedAt),
     inArray(assets.id, matchedAssetIds),
   ];
   if (ownership) conditions.push(ownership);
@@ -1860,6 +1939,7 @@ export async function searchAssetsByDescriptionDetailed(
     .where(
       and(
         eq(assets.reviewStatus, "published"),
+        isNull(assets.deletedAt),
         inArray(assets.id, rankedIds),
       ),
     );
@@ -1898,6 +1978,7 @@ export async function getAssetDetail(
   const conditions: SQL[] = [
     eq(assets.id, assetId),
     ne(assets.reviewStatus, "deleted"),
+    isNull(assets.deletedAt),
   ];
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
@@ -1917,7 +1998,6 @@ export async function getAssetDetail(
     originalFilename: row.originalFilename,
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
-    directPublish: row.directPublish,
     failureCode: row.failureCode as FailureCode | null,
     failureMessage: row.failureMessage,
     analysis: analysis ? analysisResultSchema.parse(analysis.resultJson) : null,
@@ -1933,6 +2013,71 @@ export async function getAssetRecord(assetId: string) {
   return row;
 }
 
+type AssetTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function resolveAssetRef(assetId: string, scope: AssetScope): Promise<AssetRef> {
+  if (scope.userId?.trim()) return { kind: "private", id: assetId };
+  if (!scope.includeAllUsers) return { kind: "public", id: assetId };
+  const [row] = await db
+    .select({ kind: assets.kind })
+    .from(assets)
+    .where(eq(assets.id, assetId))
+    .limit(1);
+  return { kind: row?.kind ?? "public", id: assetId };
+}
+
+async function lockedAsset(tx: AssetTransaction, ref: AssetRef) {
+  if (ref.kind === "private") {
+    const [row] = await tx
+      .select()
+      .from(privateAssets)
+      .where(eq(privateAssets.id, ref.id))
+      .for("update")
+      .limit(1);
+    return row
+      ? { ...row, kind: "private" as const, uploaderUserId: null, reviewStatus: "published" as const }
+      : undefined;
+  }
+  const [row] = await tx
+    .select()
+    .from(publicAssets)
+    .where(eq(publicAssets.id, ref.id))
+    .for("update")
+    .limit(1);
+  return row
+    ? { ...row, kind: "public" as const, userId: null, publicAssetId: null }
+    : undefined;
+}
+
+function updateAssetRow(
+  tx: AssetTransaction,
+  ref: AssetRef,
+  values: Partial<{
+    name: string;
+    description: string;
+    processingStatus: ProcessingStatus;
+    reviewStatus: ReviewStatus;
+    failureCode: string | null;
+    failureMessage: string | null;
+    deletedAt: Date | null;
+    updatedAt: Date;
+  }>,
+) {
+  if (ref.kind === "private") {
+    const privateValues = {
+      name: values.name,
+      description: values.description,
+      processingStatus: values.processingStatus,
+      failureCode: values.failureCode,
+      failureMessage: values.failureMessage,
+      deletedAt: values.deletedAt,
+      updatedAt: values.updatedAt,
+    };
+    return tx.update(privateAssets).set(privateValues).where(eq(privateAssets.id, ref.id));
+  }
+  return tx.update(publicAssets).set(values).where(eq(publicAssets.id, ref.id));
+}
+
 function normalizeTag(value: string) {
   return value.trim().toLocaleLowerCase();
 }
@@ -1943,18 +2088,15 @@ export async function updateAssetMetadata(
   scope: AssetScope = {},
 ) {
   const now = new Date();
+  const ref = await resolveAssetRef(assetId, scope);
   await db.transaction(async (tx) => {
     // 所有权与 deleted 状态必须在行锁内判断，避免检查后被删除/转公共。
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
+      asset.deletedAt !== null ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
@@ -1975,21 +2117,29 @@ export async function updateAssetMetadata(
         tag.source === "model" &&
         !requested.has(`${tag.category}:${normalizeTag(tag.value)}`),
     );
-    await tx
-      .update(assets)
-      .set({ name: edit.name, description: edit.description, updatedAt: now })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      name: edit.name,
+      description: edit.description,
+      updatedAt: now,
+    });
     for (const tag of removedModelTags) {
       await tx
-        .insert(assetTagRejections)
+        .insert(assetTagRejectionRecords)
         .ignore()
         .values({
-          assetId,
+          id: crypto.randomUUID(),
+          ...associationTarget(ref),
           category: tag.category,
           normalizedValue: normalizeTag(tag.value),
         });
     }
-    await tx.delete(assetTags).where(eq(assetTags.assetId, assetId));
+    await tx
+      .delete(assetTagRecords)
+      .where(
+        ref.kind === "private"
+          ? eq(assetTagRecords.privateAssetId, assetId)
+          : eq(assetTagRecords.publicAssetId, assetId),
+      );
     for (const tag of edit.tags) {
       const normalizedValue = normalizeTag(tag.value);
       await tx
@@ -2014,10 +2164,11 @@ export async function updateAssetMetadata(
         .limit(1);
       if (!storedTag) throw new Error("标签创建后无法读取。");
       await tx
-        .insert(assetTags)
+        .insert(assetTagRecords)
         .ignore()
         .values({
-          assetId,
+          id: crypto.randomUUID(),
+          ...associationTarget(ref),
           tagId: storedTag.id,
           source: "human",
           confidence: null,
@@ -2028,63 +2179,56 @@ export async function updateAssetMetadata(
 }
 
 export async function publishAsset(assetId: string, scope: AssetScope = {}) {
+  const ref = await resolveAssetRef(assetId, scope);
+  if (ref.kind === "private") {
+    throw new AppError("invalid_request", "私人素材无需审核。", 409);
+  }
   await db.transaction(async (tx) => {
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
     if (asset.processingStatus !== "completed") {
       throw new AppError("invalid_request", "素材分析完成后才能入库。", 409);
     }
-    await tx
-      .update(assets)
-      .set({ reviewStatus: "published", updatedAt: new Date() })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      reviewStatus: "published",
+      updatedAt: new Date(),
+    });
   });
   return getAssetDetail(assetId, { includeAllUsers: true });
 }
 
 export async function retryAsset(assetId: string, scope: AssetScope = {}) {
   const now = new Date();
+  const ref = await resolveAssetRef(assetId, scope);
   await db.transaction(async (tx) => {
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .for("update")
-      .limit(1);
+    const asset = await lockedAsset(tx, ref);
     if (
       !asset ||
+      asset.deletedAt !== null ||
       asset.reviewStatus === "deleted" ||
-      !rowMatchesScope(asset.userId, scope)
+      !rowMatchesScope(asset, scope)
     ) {
       throw new AppError("invalid_request", "素材不存在。", 404);
     }
     if (asset.processingStatus !== "failed") {
       throw new AppError("invalid_request", "只有失败的素材可以重试。", 409);
     }
-    await tx
-      .update(assets)
-      .set({
-        processingStatus: "queued",
-        failureCode: null,
-        failureMessage: null,
-        updatedAt: now,
-      })
-      .where(eq(assets.id, assetId));
+    await updateAssetRow(tx, ref, {
+      processingStatus: "queued",
+      failureCode: null,
+      failureMessage: null,
+      updatedAt: now,
+    });
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId: asset.taskId,
-      assetId,
+      ...jobTarget(ref),
       type: "analyze",
       availableAt: now,
       createdAt: now,
@@ -2094,42 +2238,17 @@ export async function retryAsset(assetId: string, scope: AssetScope = {}) {
   return getAssetDetail(assetId, { includeAllUsers: true });
 }
 
-/** 个人删除仅清空 user_id，使素材转为公共素材，不删除数据库或物理文件。 */
-export async function releaseAssetToPublic(assetId: string, userId: string) {
-  const result = await db
-    .update(assets)
-    .set({ userId: null, updatedAt: new Date() })
-    .where(
-      and(
-        eq(assets.id, assetId),
-        eq(assets.userId, userId),
-        ne(assets.reviewStatus, "deleted"),
-      ),
-    );
-  if (affectedRows(result) !== 1) {
-    const [current] = await db
-      .select({ userId: assets.userId, reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .limit(1);
-    // worker 在数据库提交后崩溃时可能重放同一作业；已转公共视为幂等成功。
-    if (current?.userId === null && current.reviewStatus !== "deleted") return;
-    throw new AppError("invalid_request", "素材不存在或不属于该用户。", 404);
-  }
-}
-
 /** 公共素材删除先进入异步 delete 作业，worker 完成外部清理后再回收记录。 */
 export async function queuePublicAssetDeletion(assetId: string, taskId: string) {
   const now = new Date();
   await db.transaction(async (tx) => {
     const result = await tx
-      .update(assets)
+      .update(publicAssets)
       .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
       .where(
         and(
-          eq(assets.id, assetId),
-          isNull(assets.userId),
-          ne(assets.reviewStatus, "deleted"),
+          eq(publicAssets.id, assetId),
+          ne(publicAssets.reviewStatus, "deleted"),
         ),
       );
     if (affectedRows(result) !== 1) {
@@ -2138,7 +2257,7 @@ export async function queuePublicAssetDeletion(assetId: string, taskId: string) 
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,
-      assetId,
+      publicAssetId: assetId,
       type: "delete",
       availableAt: now,
       createdAt: now,
@@ -2151,6 +2270,7 @@ export interface ClaimedJob {
   id: string;
   taskId: string | null;
   assetId: string | null;
+  assetKind?: AssetKind | null;
   type: typeof jobs.$inferSelect.type;
   attempt: number;
   payload: Record<string, unknown> | null;
@@ -2199,7 +2319,12 @@ async function claimQueuedJob(
   return {
     id: row.id,
     taskId: row.taskId,
-    assetId: row.assetId,
+    assetId: row.privateAssetId ?? row.publicAssetId,
+    assetKind: row.privateAssetId
+      ? "private"
+      : row.publicAssetId
+        ? "public"
+        : null,
     type: row.type,
     attempt,
     payload: row.payload,
@@ -2526,7 +2651,7 @@ export async function recoverStaleJobs(staleAfterMs = 2 * 60_000) {
 /**
  * 删除已到期且处于终态的任务明细。
  *
- * assets/video_sources 的追溯外键会自动置空；正在排队或运行的任务即使超过
+ * 公私素材/video_sources 的追溯外键会自动置空；正在排队或运行的任务即使超过
  * expires_at 也不会被清理，避免长视频处理过程中丢失状态。
  */
 export async function deleteExpiredTasks(now = new Date()) {

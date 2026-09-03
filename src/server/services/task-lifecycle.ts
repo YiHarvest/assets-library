@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/server/db";
-import { assets, jobs, taskItems, tasks } from "@/server/db/schema";
+import { assetEntries, jobs, taskItems, tasks } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import { ScenePipelineError } from "@/server/scene/types";
 import { auditLog } from "@/server/observability/audit-log";
@@ -249,20 +249,29 @@ export async function markTaskItemPersisted(taskId: string, itemId: string) {
 /** 在一个 item 的全部图片/切片分析终止后，向上聚合 item 和 task。 */
 export async function refreshTaskForAsset(assetId: string) {
   const [asset] = await db
-    .select({ taskId: assets.taskId, taskItemId: assets.taskItemId })
-    .from(assets)
-    .where(eq(assets.id, assetId))
+    .select({
+      kind: assetEntries.kind,
+      taskId: assetEntries.taskId,
+      taskItemId: assetEntries.taskItemId,
+    })
+    .from(assetEntries)
+    .where(eq(assetEntries.id, assetId))
     .limit(1);
   if (!asset?.taskId || !asset.taskItemId) return;
   const siblings = await db
     .select({
-      id: assets.id,
-      status: assets.processingStatus,
-      failureCode: assets.failureCode,
-      failureMessage: assets.failureMessage,
+      id: assetEntries.id,
+      status: assetEntries.processingStatus,
+      failureCode: assetEntries.failureCode,
+      failureMessage: assetEntries.failureMessage,
     })
-    .from(assets)
-    .where(eq(assets.taskItemId, asset.taskItemId));
+    .from(assetEntries)
+    .where(
+      and(
+        eq(assetEntries.taskItemId, asset.taskItemId),
+        eq(assetEntries.kind, asset.kind),
+      ),
+    );
   if (!siblings.length) return;
   const terminal = siblings.every(
     ({ status }) => status === "completed" || status === "failed",
@@ -342,14 +351,6 @@ export async function failMutationTask(taskId: string, error: unknown) {
   });
 }
 
-export async function markAssetsAnalyzing(assetIds: string[]) {
-  if (!assetIds.length) return;
-  await db
-    .update(assets)
-    .set({ processingStatus: "analyzing", updatedAt: new Date() })
-    .where(inArray(assets.id, assetIds));
-}
-
 /**
  * 修复 worker 在“业务事务已提交、任务聚合尚未提交”之间退出留下的状态窗口。
  *
@@ -358,7 +359,7 @@ export async function markAssetsAnalyzing(assetIds: string[]) {
  */
 export async function reconcileActiveTaskLifecycles() {
   const active = await db
-    .select({ id: tasks.id, type: tasks.type })
+    .select({ id: tasks.id, type: tasks.type, userId: tasks.userId })
     .from(tasks)
     .where(eq(tasks.status, "running"));
   let reconciled = 0;
@@ -366,9 +367,14 @@ export async function reconcileActiveTaskLifecycles() {
   for (const task of active) {
     if (task.type === "upload") {
       const rows = await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(eq(assets.taskId, task.id));
+        .select({ id: assetEntries.id })
+        .from(assetEntries)
+        .where(
+          and(
+            eq(assetEntries.taskId, task.id),
+            eq(assetEntries.kind, task.userId ? "private" : "public"),
+          ),
+        );
       for (const asset of rows) await refreshTaskForAsset(asset.id);
       // 没有 asset 的失败 item 也可在这里向任务主表重新聚合。
       await refreshUploadTask(task.id);
@@ -379,7 +385,7 @@ export async function reconcileActiveTaskLifecycles() {
     if (task.type !== "retry") continue;
     const [analysisJob] = await db
       .select({
-        assetId: jobs.assetId,
+        assetId: sql<string | null>`coalesce(${jobs.privateAssetId}, ${jobs.publicAssetId})`,
         status: jobs.status,
         errorCode: jobs.errorCode,
         errorMessage: jobs.errorMessage,

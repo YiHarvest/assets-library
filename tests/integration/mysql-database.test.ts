@@ -21,9 +21,11 @@ import {
 } from "@/server/db/connection";
 import { initializeDatabase } from "@/server/db/migrations";
 import {
-  assets,
+  analysisResults,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   taskItems,
   tasks,
   users,
@@ -83,6 +85,7 @@ mysqlTest("MySQL 数据层", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     // 即使用例断言失败也清理，避免最后一个 seedAsset 留在下次启动的 WebUI 中。
     if (migrationConnection) {
       await truncateIntegrationTables(migrationConnection.pool);
@@ -212,13 +215,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "failed", reviewStatus: "published" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
     const created = await repository.createMutationTask({
       type: "retry",
       assetId,
@@ -269,7 +271,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     const jobId = await insertSchedulingJob({
@@ -279,7 +280,7 @@ mysqlTest("MySQL 数据层", () => {
     });
     await migrationConnection.db
       .update(jobs)
-      .set({ assetId })
+      .set({ publicAssetId: assetId })
       .where(eq(jobs.id, jobId));
     const staleJob = await repository.claimNextJob("old-worker");
     if (!staleJob) throw new Error("旧 worker 未领取作业。");
@@ -336,7 +337,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     const mutationTaskIds: string[] = [];
@@ -388,10 +388,23 @@ mysqlTest("MySQL 数据层", () => {
          FROM information_schema.tables
         WHERE table_schema = DATABASE()
           AND table_type = 'BASE TABLE'
-          AND table_name <> '__drizzle_migrations'
+          AND table_name NOT IN ('__drizzle_migrations', 'assets')
         ORDER BY table_name`,
     );
     expect(tableRows.map((row) => row.tableName)).toEqual(applicationTables);
+
+    const [legacyColumnRows] = await migrationConnection.pool.query<
+      Array<RowDataPacket & { tableName: string; columnName: string }>
+    >(
+      `SELECT table_name AS tableName, column_name AS columnName
+         FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+          AND (
+            (table_name IN ('analysis_results', 'asset_tag_rejections', 'asset_tags', 'jobs', 'search_index_state') AND column_name = 'asset_id')
+            OR (table_name = 'video_sources' AND column_name = 'media_object_id')
+          )`,
+    );
+    expect(legacyColumnRows).toEqual([]);
 
     const [viewRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>
@@ -417,6 +430,64 @@ mysqlTest("MySQL 数据层", () => {
     expect(inspection.sslCipher).toBeTruthy();
   });
 
+  test("公私关联约束拒绝双目标，并在公共副本删除后解除配对", async () => {
+    const now = new Date();
+    const publicAssetId = crypto.randomUUID();
+    const privateAssetId = crypto.randomUUID();
+    await migrationConnection.db.insert(publicAssets).values({
+      id: publicAssetId,
+      name: "public",
+      description: "",
+      mediaType: "image",
+      originalFilename: "public.jpg",
+      originalPath: "/tmp/public.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await migrationConnection.db.insert(privateAssets).values({
+      id: privateAssetId,
+      publicAssetId,
+      userId: "owner",
+      name: "private",
+      description: "",
+      mediaType: "image",
+      originalFilename: "private.jpg",
+      originalPath: "/tmp/private.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(
+      migrationConnection.db.insert(analysisResults).values({
+        id: crypto.randomUUID(),
+        publicAssetId,
+        privateAssetId,
+        resultJson: {
+          kind: "image",
+          description: "约束测试",
+          tags: { scene: [], object: [], person: [], style: [], color_composition: [] },
+          ocr: { text: null, unavailableReason: "无文字" },
+        },
+        modelProtocol: "test",
+        modelName: "test",
+        completedAt: now,
+      }),
+    ).rejects.toThrow();
+
+    await migrationConnection.db
+      .delete(publicAssets)
+      .where(eq(publicAssets.id, publicAssetId));
+    const [privateAsset] = await migrationConnection.db
+      .select({ publicAssetId: privateAssets.publicAssetId })
+      .from(privateAssets)
+      .where(eq(privateAssets.id, privateAssetId));
+    expect(privateAsset?.publicAssetId).toBeNull();
+  });
+
   test("注册用户列表保留零素材用户并忽略已删除素材", async () => {
     const now = new Date("2026-08-20T01:02:03.000Z");
     await migrationConnection.db.insert(users).values([
@@ -438,7 +509,7 @@ mysqlTest("MySQL 数据层", () => {
         updatedAt: now,
       },
     ]);
-    await migrationConnection.db.insert(assets).values([
+    await migrationConnection.db.insert(privateAssets).values([
       {
         id: crypto.randomUUID(),
         userId: "user-a",
@@ -449,7 +520,6 @@ mysqlTest("MySQL 数据层", () => {
         originalPath: "/tmp/active.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 1,
-        reviewStatus: "published",
         createdAt: now,
         updatedAt: now,
       },
@@ -463,7 +533,6 @@ mysqlTest("MySQL 数据层", () => {
         originalPath: "/tmp/deleted.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 1,
-        reviewStatus: "deleted",
         deletedAt: now,
         createdAt: now,
         updatedAt: now,
@@ -504,7 +573,7 @@ mysqlTest("MySQL 数据层", () => {
       id: taskId,
       type: "upload",
       userId: "user-a",
-      result: { auto_publish: true },
+      result: {},
       items: [
         {
           id: firstItemId,
@@ -721,7 +790,6 @@ mysqlTest("MySQL 数据层", () => {
       const created = await service.createUploadTask({
         user_id: null,
         callback_url: null,
-        auto_publish: false,
         items: [
           {
             filename: "interrupted.jpg",
@@ -803,7 +871,6 @@ mysqlTest("MySQL 数据层", () => {
       const created = await service.createUploadTask({
         user_id: null,
         callback_url: null,
-        auto_publish: false,
         items: [
           {
             filename: "race.jpg",
@@ -865,7 +932,7 @@ mysqlTest("MySQL 数据层", () => {
     }
   });
 
-  test("user_id 为空表示公共素材，个人删除会将素材释放到公共库", async () => {
+  test("user_id 为空创建公共素材，非空创建独立私人素材", async () => {
     const publicId = crypto.randomUUID();
     const privateId = crypto.randomUUID();
     for (const [assetId, userId] of [
@@ -881,13 +948,19 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "image/jpeg",
         mediaType: "image",
         sizeBytes: 10,
-        directPublish: true,
         enqueueAnalysis: false,
       });
-      await migrationConnection.db
-        .update(assets)
-        .set({ processingStatus: "completed", reviewStatus: "published" })
-        .where(eq(assets.id, assetId));
+      if (userId) {
+        await migrationConnection.db
+          .update(privateAssets)
+          .set({ processingStatus: "completed" })
+          .where(eq(privateAssets.id, assetId));
+      } else {
+        await migrationConnection.db
+          .update(publicAssets)
+          .set({ processingStatus: "completed", reviewStatus: "published" })
+          .where(eq(publicAssets.id, assetId));
+      }
     }
 
     expect((await repository.listAssets()).items.map((item) => item.id)).toEqual([
@@ -899,9 +972,43 @@ mysqlTest("MySQL 数据层", () => {
       ),
     ).toEqual([privateId]);
 
-    await repository.releaseAssetToPublic(privateId, "user-b");
     const publicIds = (await repository.listAssets()).items.map((item) => item.id);
-    expect(new Set(publicIds)).toEqual(new Set([publicId, privateId]));
+    expect(publicIds).toEqual([publicId]);
+  });
+
+  test("公共列表排除上传者，但公共 ID 仍可直接读取详情", async () => {
+    const now = new Date();
+    const ownId = crypto.randomUUID();
+    const otherId = crypto.randomUUID();
+    await migrationConnection.db.insert(publicAssets).values(
+      [
+        [ownId, "user-a"],
+        [otherId, "user-b"],
+      ].map(([id, uploaderUserId]) => ({
+        id: id!,
+        uploaderUserId,
+        name: id!,
+        description: "",
+        mediaType: "image" as const,
+        originalFilename: `${id}.jpg`,
+        originalPath: `/tmp/${id}.jpg`,
+        mimeType: "image/jpeg",
+        sizeBytes: 1,
+        processingStatus: "completed" as const,
+        reviewStatus: "published" as const,
+        createdAt: now,
+        updatedAt: now,
+      })),
+    );
+
+    expect(
+      (await repository.listAssets({ excludeUserId: "user-a" })).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([otherId]);
+    await expect(repository.getAssetDetail(ownId)).resolves.toMatchObject({
+      id: ownId,
+    });
   });
 
   test("用户资源用量精确汇总素材对象，并排除公共素材和完整父视频", async () => {
@@ -997,7 +1104,7 @@ mysqlTest("MySQL 数据层", () => {
     await migrationConnection.db.insert(videoSources).values({
       id: parentSourceId,
       userId,
-      mediaObjectId: parentObjectId,
+      privateMediaObjectId: parentObjectId,
       originalFilename: "parent.mp4",
       mimeType: "video/mp4",
       sizeBytes: 1_000,
@@ -1044,14 +1151,13 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: item.mediaType === "video" ? "video/mp4" : "image/jpeg",
         mediaType: item.mediaType,
         sizeBytes: item.sizeBytes,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       if (item.thumbnailMediaObjectId) {
         await migrationConnection.db
-          .update(assets)
+          .update(privateAssets)
           .set({ thumbnailMediaObjectId: item.thumbnailMediaObjectId })
-          .where(eq(assets.id, item.id));
+          .where(eq(privateAssets.id, item.id));
       }
     }
     for (const [otherUserId, name, sizeBytes, mediaObjectId] of [
@@ -1069,7 +1175,6 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "image/jpeg",
         mediaType: "image",
         sizeBytes,
-        directPublish: true,
         enqueueAnalysis: false,
       });
     }
@@ -1085,13 +1190,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 20,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
-      .set({ reviewStatus: "deleted", deletedAt: now })
-      .where(eq(assets.id, deletedAssetId));
+      .update(privateAssets)
+      .set({ deletedAt: now })
+      .where(eq(privateAssets.id, deletedAssetId));
 
     const usage = await repository.summarizeUserStorage(`  ${userId}  `);
     expect(usage).toMatchObject({
@@ -1155,9 +1259,9 @@ mysqlTest("MySQL 数据层", () => {
 
     // 同毫秒创建的素材依靠 UUID 作为第二排序键；翻页期间插入更新素材也不漂移。
     await migrationConnection.db
-      .update(assets)
+      .update(privateAssets)
       .set({ createdAt: now })
-      .where(inArray(assets.id, expectedItems.map((item) => item.id)));
+      .where(inArray(privateAssets.id, expectedItems.map((item) => item.id)));
     const firstPage = await repository.listUserMediaPage(userId, null, 2);
     expect(firstPage).toMatchObject({ hasMore: true });
     expect(firstPage.nextCursor).toEqual({
@@ -1176,13 +1280,12 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 20,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(privateAssets)
       .set({ createdAt: new Date(now.getTime() + 1_000) })
-      .where(eq(assets.id, newerAssetId));
+      .where(eq(privateAssets.id, newerAssetId));
 
     const secondPage = await repository.listUserMediaPage(
       userId,
@@ -1205,7 +1308,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
 
@@ -1229,53 +1331,6 @@ mysqlTest("MySQL 数据层", () => {
     expect(count?.value).toBe(1);
   });
 
-  test("转公共提交后，排队中的旧用户更新不能越过所有权检查", async () => {
-    const assetId = crypto.randomUUID();
-    await repository.createAsset({
-      assetId,
-      userId: "owner-a",
-      name: "original",
-      originalFilename: "owned.jpg",
-      originalPath: "/tmp/owned.jpg",
-      mimeType: "image/jpeg",
-      mediaType: "image",
-      sizeBytes: 10,
-      directPublish: false,
-      enqueueAnalysis: false,
-    });
-
-    const blocker = await migrationConnection.pool.getConnection();
-    try {
-      await blocker.beginTransaction();
-      await blocker.query("UPDATE assets SET user_id = NULL WHERE id = ?", [assetId]);
-      const updateAttempt = repository
-        .updateAssetMetadata(
-          assetId,
-          { name: "stale update", description: "", tags: [] },
-          { userId: "owner-a" },
-        )
-        .then(
-          () => ({ ok: true as const }),
-          (error: unknown) => ({ ok: false as const, error }),
-        );
-      // 给另一个连接足够时间进入 SELECT ... FOR UPDATE 的等待队列。
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      await blocker.commit();
-
-      const outcome = await updateAttempt;
-      expect(outcome.ok).toBe(false);
-      if (!outcome.ok) expect(outcome.error).toMatchObject({ status: 404 });
-    } finally {
-      await blocker.rollback().catch(() => undefined);
-      blocker.release();
-    }
-    const [stored] = await migrationConnection.db
-      .select({ userId: assets.userId, name: assets.name })
-      .from(assets)
-      .where(eq(assets.id, assetId));
-    expect(stored).toEqual({ userId: null, name: "original" });
-  }, 30_000);
-
   test("删除提交后，排队中的 publish 不能把 deleted 素材复活", async () => {
     const assetId = crypto.randomUUID();
     await repository.createAsset({
@@ -1286,19 +1341,18 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: false,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "completed" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
 
     const blocker = await migrationConnection.pool.getConnection();
     try {
       await blocker.beginTransaction();
       await blocker.query(
-        "UPDATE assets SET review_status = 'deleted', deleted_at = UTC_TIMESTAMP(3) WHERE id = ?",
+        "UPDATE public_assets SET review_status = 'deleted', deleted_at = UTC_TIMESTAMP(3) WHERE id = ?",
         [assetId],
       );
       const publishAttempt = repository
@@ -1318,9 +1372,9 @@ mysqlTest("MySQL 数据层", () => {
       blocker.release();
     }
     const [stored] = await migrationConnection.db
-      .select({ reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId));
+      .select({ reviewStatus: publicAssets.reviewStatus })
+      .from(publicAssets)
+      .where(eq(publicAssets.id, assetId));
     expect(stored?.reviewStatus).toBe("deleted");
   }, 30_000);
 
@@ -1369,7 +1423,7 @@ mysqlTest("MySQL 数据层", () => {
     ]);
     await migrationConnection.db.insert(videoSources).values({
       id: sourceId,
-      mediaObjectId: parentObjectId,
+      publicMediaObjectId: parentObjectId,
       originalFilename: "parent.mp4",
       mimeType: "video/mp4",
       sizeBytes: 30,
@@ -1392,13 +1446,12 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: "video/mp4",
         mediaType: "video",
         sizeBytes: segmentIndex === 0 ? 10 : 20,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       await migrationConnection.db
-        .update(assets)
+        .update(publicAssets)
         .set({ processingStatus: "completed", reviewStatus: "published" })
-        .where(eq(assets.id, assetId));
+        .where(eq(publicAssets.id, assetId));
     }
 
     async function deletionJob(assetId: string) {
@@ -1419,7 +1472,8 @@ mysqlTest("MySQL 数据层", () => {
       return {
         id: storedJob.id,
         taskId: storedJob.taskId,
-        assetId: storedJob.assetId,
+        assetId: storedJob.publicAssetId,
+        assetKind: "public" as const,
         type: storedJob.type,
         attempt: 1,
         payload: storedJob.payload,
@@ -1446,8 +1500,8 @@ mysqlTest("MySQL 数据层", () => {
     expect(
       await migrationConnection.db
         .select()
-        .from(assets)
-        .where(inArray(assets.id, [firstAssetId, secondAssetId])),
+        .from(publicAssets)
+        .where(inArray(publicAssets.id, [firstAssetId, secondAssetId])),
     ).toHaveLength(0);
     expect(
       await migrationConnection.db
@@ -1486,7 +1540,7 @@ mysqlTest("MySQL 数据层", () => {
       ),
     ).toHaveLength(1);
     const durableJobs = await migrationConnection.db
-      .select({ status: jobs.status, assetId: jobs.assetId })
+      .select({ status: jobs.status, assetId: jobs.publicAssetId })
       .from(jobs)
       .where(inArray(jobs.id, [firstJob.id, secondJob.id]));
     expect(durableJobs).toEqual(
@@ -1498,6 +1552,7 @@ mysqlTest("MySQL 数据层", () => {
   }, 30_000);
 
   test("公共删除在外部存储短暂失败后可幂等重试并完成数据库收尾", async () => {
+    vi.stubEnv("ZOS_DELETE_BEST_EFFORT", "false");
     const now = new Date();
     const objectId = crypto.randomUUID();
     const assetId = crypto.randomUUID();
@@ -1522,17 +1577,28 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "image/jpeg",
       mediaType: "image",
       sizeBytes: 10,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await migrationConnection.db
-      .update(assets)
+      .update(publicAssets)
       .set({ processingStatus: "completed", reviewStatus: "published" })
-      .where(eq(assets.id, assetId));
+      .where(eq(publicAssets.id, assetId));
     const queuedPublish = await repository.createMutationTask({
       type: "publish",
       assetId,
-      payload: { userId: null },
+      userId: "publish-requester",
+      payload: { userId: "publish-requester" },
+    });
+    const [initialPublishJob] = await migrationConnection.db
+      .select({
+        publicAssetId: jobs.publicAssetId,
+        privateAssetId: jobs.privateAssetId,
+      })
+      .from(jobs)
+      .where(eq(jobs.taskId, queuedPublish.task.id));
+    expect(initialPublishJob).toEqual({
+      publicAssetId: assetId,
+      privateAssetId: null,
     });
     const created = await repository.createMutationTask({
       type: "delete",
@@ -1548,7 +1614,13 @@ mysqlTest("MySQL 数据层", () => {
       .update(jobs)
       .set({ status: "running", attempt: 1 })
       .where(eq(jobs.id, storedJob.id));
-    const job = { ...storedJob, status: "running" as const, attempt: 1 };
+    const job = {
+      ...storedJob,
+      assetId: storedJob.publicAssetId,
+      assetKind: "public" as const,
+      status: "running" as const,
+      attempt: 1,
+    };
     let storageAttempt = 0;
     const deleteObject = vi.fn(async () => {
       storageAttempt += 1;
@@ -1564,9 +1636,9 @@ mysqlTest("MySQL 数据层", () => {
       "temporary ZOS failure",
     );
     const [reserved] = await migrationConnection.db
-      .select({ reviewStatus: assets.reviewStatus })
-      .from(assets)
-      .where(eq(assets.id, assetId));
+      .select({ reviewStatus: publicAssets.reviewStatus })
+      .from(publicAssets)
+      .where(eq(publicAssets.id, assetId));
     expect(reserved?.reviewStatus).toBe("deleted");
 
     await processMutationJob(job, storage);
@@ -1575,15 +1647,19 @@ mysqlTest("MySQL 数据层", () => {
     expect(
       await migrationConnection.db
         .select()
-        .from(assets)
-        .where(eq(assets.id, assetId)),
+        .from(publicAssets)
+        .where(eq(publicAssets.id, assetId)),
     ).toHaveLength(0);
     const [finishedTask] = await migrationConnection.db
       .select({ status: tasks.status })
       .from(tasks)
       .where(eq(tasks.id, created.task.id));
     const [finishedJob] = await migrationConnection.db
-      .select({ status: jobs.status, assetId: jobs.assetId, payload: jobs.payload })
+      .select({
+        status: jobs.status,
+        assetId: jobs.publicAssetId,
+        payload: jobs.payload,
+      })
       .from(jobs)
       .where(eq(jobs.id, storedJob.id));
     expect(finishedTask?.status).toBe("done");
@@ -1599,7 +1675,7 @@ mysqlTest("MySQL 数据层", () => {
       .where(eq(jobs.taskId, queuedPublish.task.id));
     expect(publishJob).toMatchObject({
       status: "queued",
-      assetId: null,
+      publicAssetId: null,
       payload: { assetId },
     });
     await migrationConnection.db
@@ -1611,7 +1687,8 @@ mysqlTest("MySQL 数据层", () => {
         {
           id: publishJob!.id,
           taskId: publishJob!.taskId,
-          assetId: publishJob!.assetId,
+          assetId: publishJob!.publicAssetId,
+          assetKind: "public",
           type: publishJob!.type,
           attempt: 1,
           payload: publishJob!.payload,
@@ -1736,7 +1813,6 @@ mysqlTest("MySQL 数据层", () => {
         mimeType: input.mediaType === "video" ? "video/mp4" : "image/jpeg",
         mediaType: input.mediaType ?? "image",
         sizeBytes: 10,
-        directPublish: true,
         enqueueAnalysis: false,
       });
       await repository.updateAssetMetadata(
@@ -1744,13 +1820,20 @@ mysqlTest("MySQL 数据层", () => {
         { name: input.name, description: "", tags: input.tags },
         { includeAllUsers: true },
       );
-      await migrationConnection.db
-        .update(assets)
-        .set({
-          processingStatus: input.processingStatus ?? "completed",
-          reviewStatus: input.reviewStatus ?? "published",
-        })
-        .where(eq(assets.id, id));
+      if (input.userId) {
+        await migrationConnection.db
+          .update(privateAssets)
+          .set({ processingStatus: input.processingStatus ?? "completed" })
+          .where(eq(privateAssets.id, id));
+      } else {
+        await migrationConnection.db
+          .update(publicAssets)
+          .set({
+            processingStatus: input.processingStatus ?? "completed",
+            reviewStatus: input.reviewStatus ?? "published",
+          })
+          .where(eq(publicAssets.id, id));
+      }
       return id;
     }
 
@@ -2097,7 +2180,6 @@ mysqlTest("MySQL 数据层", () => {
       mimeType: "video/mp4",
       mediaType: "video",
       sizeBytes: 10,
-      directPublish: true,
       enqueueAnalysis: false,
     });
     await repository.updateAssetMetadata(
@@ -2110,9 +2192,9 @@ mysqlTest("MySQL 数据层", () => {
       { includeAllUsers: true },
     );
     await migrationConnection.db
-      .update(assets)
-      .set({ processingStatus: "completed", reviewStatus: "published" })
-      .where(eq(assets.id, assetId));
+      .update(privateAssets)
+      .set({ processingStatus: "completed" })
+      .where(eq(privateAssets.id, assetId));
     searchAnalysisMock.mockResolvedValue(new Map([[assetId, 0.91]]));
 
     const { compatibilityMatchRequestSchema } = await import("@/shared/contracts");
@@ -2315,7 +2397,7 @@ mysqlTest("MySQL 数据层", () => {
     expect(matchedUrl.searchParams.get("user_id")).toBe("759");
   }, 30_000);
 
-  test("将失败的素材错误码与 asset_ids 向上聚合到 item 和 task", async () => {
+  test("将失败的素材错误码与公私素材 ID 向上聚合到 item 和 task", async () => {
     const now = new Date();
     const taskId = crypto.randomUUID();
     const itemId = crypto.randomUUID();
@@ -2341,7 +2423,7 @@ mysqlTest("MySQL 数据层", () => {
       updatedAt: now,
     });
     const insertAsset = (id: string, status: "completed" | "failed") =>
-      migrationConnection.db.insert(assets).values({
+      migrationConnection.db.insert(privateAssets).values({
         id,
         userId: "user-a",
         taskId,
@@ -2353,7 +2435,6 @@ mysqlTest("MySQL 数据层", () => {
         originalPath: "/tmp/a.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 1,
-        reviewStatus: "published",
         processingStatus: status,
         failureCode: status === "failed" ? "model_response_invalid" : null,
         failureMessage: status === "failed" ? "模型返回内容无法验证。" : null,

@@ -84,7 +84,6 @@ API 网关增加访问控制。
 {
   "user_id": "user_123",
   "callback_url": "https://internal.example/callbacks/assets",
-  "auto_publish": false,
   "items": [
     {
       "filename": "product.png",
@@ -102,9 +101,8 @@ API 网关增加访问控制。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `user_id` | `string \| null` | 否 | 1–191 字符。空字符串会规范化为 `null`；`null` 表示公共素材。 |
+| `user_id` | `string \| null` | 否 | 1–191 字符。非空时创建互相独立的私人素材与待审核公共副本；空字符串或 `null` 只创建公共素材。 |
 | `callback_url` | `string(url) \| null` | 否 | 任务终态回调，只支持 HTTP/HTTPS，最长 2,048 字符。 |
-| `auto_publish` | `boolean` | 否 | 分析成功后是否直接发布，默认 `false`。 |
 | `items` | `array` | 是 | 1–100 项，总声明大小不超过 2 GiB。 |
 | `items[].filename` | `string` | 是 | 1–255 字符；扩展名决定目标媒体格式。 |
 | `items[].size_bytes` | `integer` | 是 | 正整数，文件的精确字节数。 |
@@ -147,9 +145,9 @@ curl -X PUT \
 
 ### 4.4 图片处理语义
 
-图片会完整解码并按文件扩展名正规化，然后先写入 ZOS、校验对象大小，再在
-MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对象。成功持久化后
-立即清理本地 staging 文件。
+图片会完整解码并按文件扩展名正规化。私人上传分别写入两份 ZOS 对象并建立
+公私两条记录，公共直传只写一份；任一步失败都会补偿删除本次全部 ZOS 对象。
+两份记录首次共享一次 VLM 调用，分析结果、标签和搜索索引分别落库。
 
 ### 4.5 视频父子模型与整批边界
 
@@ -159,7 +157,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 - 所有切片必须下载完整、可解码、符合标准格式，并且每个切片不超过
   10 MiB（10,485,760 bytes）。
 - 任一切片损坏、下载不完整或超限，父视频和全部切片都不进入 ZOS/MySQL，
-  即使 `auto_publish=true` 也一样；错误 `details` 会指出失败切片。
+  错误 `details` 会指出失败切片。
 - 父视频、全部切片的 ZOS 上传验证和 MySQL 建档属于“整批全有或全无”边界。
   MySQL 事务失败时会反向补偿删除已上传对象。
 - 整批持久化成功后，各子视频沿用原有 1–5 张关键帧 VLM 流程独立分析。
@@ -198,7 +196,8 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
       "received_bytes": 182304,
       "total_bytes": 182304,
       "progress_percent": 100,
-      "asset_ids": ["101ed605-3dc8-46b8-aebb-57fca02b75f7"],
+      "private_asset_ids": ["101ed605-3dc8-46b8-aebb-57fca02b75f7"],
+      "public_asset_ids": ["b1b29fcf-c3e4-4c7a-9ed7-23b9dccdbb51"],
       "error": null
     }
   ],
@@ -229,8 +228,8 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 | `started_at` / `finished_at` / `expires_at` | `string(date-time) \| null` | 开始、结束和任务记录过期时间。 |
 
 `TaskItem` 额外包含 `item_id`、`filename`、`media_type`、逐文件 `status` /
-`phase` / 字节进度、`asset_ids` 和 `error`。图片成功后通常产生一个
-`asset_id`；视频 item 可产生多个切片素材 ID，父视频 ID 不在此数组中。
+`phase` / 字节进度、`private_asset_ids`、`public_asset_ids` 和 `error`。视频数组按
+`segment_index` 排序，父视频 ID 不在数组中。
 
 稳定任务状态只有 `queued`、`running`、`done`、`failed`。更细的执行位置由
 `phase` 表示：`receiving`、`waiting_for_seal`、`validating`、`splitting`、
@@ -281,11 +280,10 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 
 `UserScope` 语义：
 
-- `{ "mode": "public" }`：通常仅查询 `user_id IS NULL` 的公共素材；单独搜索
-  `AI` 宽泛别名时会扩展到公共及全部个人素材。
+- `{ "mode": "public" }`：仅查询公共素材。
 - `{ "mode": "user", "user_id": "..." }`：仅该用户的个人素材。
 - `{ "mode": "all" }`：公共素材和所有用户素材。
-- `{ "mode": "exclude_user", "user_id": "..." }`：公共素材和除指定用户外的素材。
+- `{ "mode": "exclude_user", "user_id": "..." }`：仅查询公共素材，并排除该用户上传的公共副本。
 
 成功响应包含 `items`、`next_cursor`、`has_more`、可为 `null` 的
 `tag_statistics`，以及可为 `null` 的 `search`。素材摘要字段全部为
@@ -301,8 +299,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 所有检索分数统一在 `[0,1]` 范围内。系统先为候选计算最终分数，再过滤未超过
 阈值的素材，之后才统计、排序和分页。因此 `total`、标签统计和实际返回项均不
 包含低于阈值的候选。`AI`、`AIGC`、`人工智能` 等宽泛别名会优先用语义门槛
-去噪并融合排序。公共范围单独搜索这些宽泛词时，后端会扩展到公共及全部个人
-素材；显式选择某个用户时仍只查询该用户。语义不可用或全部低于门槛时，回退
+去噪并融合排序，但不会改变查询作用域。语义不可用或全部低于门槛时，回退
 全部强词法候选，避免精确标签被误过滤或被固定数量截断，结果仍按 `limit` 分页。
 
 当前默认展示阈值为：强关键词 `0.60`、仅在强匹配为空时启用的错别字兜底
@@ -390,7 +387,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 只读公共素材。不接受 `all` 作用域，避免单资源读取绕过归属边界。
 
 除摘要字段外，详情包含 `original_filename`、`mime_type`、`size_bytes`、
-`auto_publish`、`failure` 和 `analysis`。API 边界会把模型内部字段统一转换为
+`failure` 和 `analysis`。API 边界会把模型内部字段统一转换为
 `snake_case`：图片 OCR 使用 `unavailable_reason`；视频使用
 `visual_segments`、`key_moments`，时间段使用 `start_seconds` 和
 `end_seconds`。
@@ -491,7 +488,7 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 ### `POST /api/v1/assets/{asset_id}/publish`
 
 请求体可为空，也可传 `{"user_id":"user_123","callback_url":null}`。只有分析
-成功的素材可以发布。
+成功的公共素材可以发布；私人素材返回 `409`，因为私人库不需要审核。
 
 ### `POST /api/v1/assets/{asset_id}/retry`
 
@@ -502,13 +499,12 @@ MySQL 中建立素材与分析作业。建档失败会补偿删除本次 ZOS 对
 
 请求体是可选的 `MutationContext`：
 
-- 传入非空 `user_id`：只有归属于该用户的素材可操作。删除实际把
-  `user_id` 置为 `null`，素材随即成为公共素材；不删除 MySQL 素材记录、
-  ZOS 对象或 Chroma 向量。
+- 传入非空 `user_id`：只删除该用户的私人记录、分析数据、搜索索引和私人 ZOS
+  对象，不影响配对的公共副本。
 - 不传 `user_id`、传空字符串或 `null`：只允许删除公共素材。worker 会删除
   Chroma 向量、ZOS 对象和 MySQL 素材记录。
-- 视频切片独立删除；删除同一父视频的最后一个切片时，同时回收父视频对象和
-  父视频记录。
+- 视频切片独立删除；删除某一侧最后一个切片时只回收该侧父视频对象。公私两侧
+  都清空后才回收共享的逻辑父视频记录。
 
 ## 9. 用户资源占用与展示列表
 

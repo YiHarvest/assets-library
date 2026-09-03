@@ -132,7 +132,6 @@ export interface AssetDetail extends AssetSummary {
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
-  directPublish: boolean;
   failureCode: FailureCode | null;
   failureMessage: string | null;
   analysis: AnalysisResult | null;
@@ -383,7 +382,6 @@ export const createUploadTaskSchema = z
   .object({
     user_id: nullableUserIdSchema,
     callback_url: callbackUrlSchema,
-    auto_publish: z.boolean().default(false),
     items: z
       .array(uploadManifestItemSchema)
       .min(1)
@@ -416,7 +414,8 @@ export const uploadTaskItemSchema = z.object({
   received_bytes: z.number().int().nonnegative(),
   total_bytes: z.number().int().nonnegative(),
   progress_percent: z.number().min(0).max(100),
-  asset_ids: z.array(z.string().uuid()),
+  private_asset_ids: z.array(z.string().uuid()),
+  public_asset_ids: z.array(z.string().uuid()),
   error: taskErrorSchema,
 });
 export type UploadTaskItem = z.infer<typeof uploadTaskItemSchema>;
@@ -657,7 +656,6 @@ export const apiV1AssetDetailSchema = apiV1AssetSummarySchema.extend({
   original_filename: z.string(),
   mime_type: z.string(),
   size_bytes: z.number().int().nonnegative(),
-  auto_publish: z.boolean(),
   segment_start_seconds: z.number().nonnegative().nullable(),
   segment_end_seconds: z.number().nonnegative().nullable(),
   failure: taskErrorSchema,

@@ -46,7 +46,12 @@ export interface TaskRepository {
     }>;
   }>;
   listTaskItemAssetIds(taskId: string): Promise<
-    Array<{ id: string; taskItemId: string | null }>
+    Array<{
+      id: string;
+      taskItemId: string | null;
+      kind: "public" | "private";
+      segmentIndex: number | null;
+    }>
   >;
   listUserTaskIds(
     userId: string,
@@ -234,12 +239,15 @@ export class TaskService {
     const assetRows = items.length
       ? await this.repository.listTaskItemAssetIds(taskId)
       : [];
-    const assetsByItem = new Map<string, string[]>();
+    const privateAssetsByItem = new Map<string, string[]>();
+    const publicAssetsByItem = new Map<string, string[]>();
     for (const asset of assetRows) {
       if (!asset.taskItemId) continue;
-      const current = assetsByItem.get(asset.taskItemId) ?? [];
+      const target =
+        asset.kind === "private" ? privateAssetsByItem : publicAssetsByItem;
+      const current = target.get(asset.taskItemId) ?? [];
       current.push(asset.id);
-      assetsByItem.set(asset.taskItemId, current);
+      target.set(asset.taskItemId, current);
     }
     return {
       task_id: task.id,
@@ -266,7 +274,8 @@ export class TaskService {
           item.status === "done"
             ? 100
             : progress(item.receivedBytes, item.totalBytes),
-        asset_ids: assetsByItem.get(item.id) ?? [],
+        private_asset_ids: privateAssetsByItem.get(item.id) ?? [],
+        public_asset_ids: publicAssetsByItem.get(item.id) ?? [],
         error: apiTaskErrorPayload(item),
       })),
       error: apiTaskErrorPayload(task),

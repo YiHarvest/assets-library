@@ -9,13 +9,17 @@ export default async function AssetDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ user_id?: string | string[] }>;
+  searchParams: Promise<{
+    scope?: string | string[];
+    user_id?: string | string[];
+  }>;
 }) {
   const { id } = await params;
   const query = await searchParams;
   const rawUserId = Array.isArray(query.user_id) ? query.user_id[0] : query.user_id;
   const userId = rawUserId?.trim() || null;
-  const queryString = userId
+  const rawScope = Array.isArray(query.scope) ? query.scope[0] : query.scope;
+  const queryString = rawScope === "private" && userId
     ? `?user_id=${encodeURIComponent(userId)}`
     : "";
   const asset = await serverApiV1<ApiV1AssetDetail>(

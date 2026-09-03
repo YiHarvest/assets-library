@@ -72,6 +72,19 @@ class MemoryObjectStorage implements ObjectStorage {
     return { key: input.key, sizeBytes: bytes.byteLength, etag: "test-etag" };
   }
 
+  async copyObject(input: { sourceKey: string; destinationKey: string }) {
+    const source = this.required(input.sourceKey);
+    this.objects.set(input.destinationKey, {
+      bytes: Buffer.from(source.bytes),
+      contentType: source.contentType,
+    });
+    return {
+      key: input.destinationKey,
+      sizeBytes: source.bytes.byteLength,
+      etag: "test-etag",
+    };
+  }
+
   async headObject(key: string) {
     const object = this.required(key);
     return {
@@ -194,8 +207,7 @@ function fakeSceneClient(
   return { request };
 }
 
-const analyzer: MultimodalAnalyzer = {
-  async analyze(input) {
+const analyzeMock = vi.fn<MultimodalAnalyzer["analyze"]>(async (input) => {
     return input.mediaType === "image"
       ? {
           result: {
@@ -224,8 +236,8 @@ const analyzer: MultimodalAnalyzer = {
           },
           model: { protocol: "openai_chat_completions" as const, name: "fake-vlm" },
         };
-  },
-};
+  });
+const analyzer: MultimodalAnalyzer = { analyze: analyzeMock };
 
 mysqlPipeline("API v1 完整媒体管线", () => {
   let temporaryRoot: string;
@@ -273,6 +285,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       force: true,
     });
     vi.clearAllMocks();
+    analyzeMock.mockClear();
   });
 
   afterEach(async () => {
@@ -300,12 +313,15 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     }
   });
 
-  async function createAndSeal(filename: string, bytes: Buffer) {
+  async function createAndSeal(
+    filename: string,
+    bytes: Buffer,
+    userId: string | null = "user-pipeline",
+  ) {
     const service = new api.DefaultApiV1Service();
     const created = await service.createUploadTask({
-      user_id: "user-pipeline",
+      user_id: userId,
       callback_url: null,
-      auto_publish: true,
       items: [{ filename, size_bytes: bytes.byteLength, content_type: null }],
     });
     const itemId = created.items[0]!.item_id;
@@ -365,38 +381,82 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       status: "done",
       phase: "finished",
     });
-    expect(status.items[0]!.asset_ids).toHaveLength(1);
+    expect(status.items[0]!.private_asset_ids).toHaveLength(1);
+    expect(status.items[0]!.public_asset_ids).toHaveLength(1);
+    expect(status.items[0]!.private_asset_ids[0]).not.toBe(
+      status.items[0]!.public_asset_ids[0],
+    );
+    await expect(
+      service.publishAsset(status.items[0]!.private_asset_ids[0]!, {
+        user_id: null,
+        callback_url: null,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
 
-    const [assetRow] = await database.db
+    const [privateAsset] = await database.db
       .select()
-      .from(schema.assets)
-      .where(eq(schema.assets.id, status.items[0]!.asset_ids[0]!));
-    const [analysis] = await database.db
+      .from(schema.privateAssets)
+      .where(eq(schema.privateAssets.id, status.items[0]!.private_asset_ids[0]!));
+    const [publicAsset] = await database.db
       .select()
-      .from(schema.analysisResults)
-      .where(eq(schema.analysisResults.assetId, assetRow!.id));
-    const [object] = await database.db
+      .from(schema.publicAssets)
+      .where(eq(schema.publicAssets.id, status.items[0]!.public_asset_ids[0]!));
+    const analysisRows = await database.db.select().from(schema.analysisResults);
+    const objects = await database.db
       .select()
-      .from(schema.mediaObjects)
-      .where(eq(schema.mediaObjects.id, assetRow!.mediaObjectId!));
-    expect(assetRow).toMatchObject({
+      .from(schema.mediaObjects);
+    expect(privateAsset).toMatchObject({
       mediaType: "image",
       processingStatus: "completed",
-      reviewStatus: "published",
       userId: "user-pipeline",
+      publicAssetId: publicAsset!.id,
     });
-    expect(analysis?.resultJson).toMatchObject({
-      kind: "image",
-      description: "测试图片分析完成",
+    expect(publicAsset).toMatchObject({
+      mediaType: "image",
+      processingStatus: "completed",
+      reviewStatus: "pending_review",
+      uploaderUserId: "user-pipeline",
     });
-    expect(object).toMatchObject({ provider: "zos", status: "persisted" });
-    expect(storage.objects.get(object!.objectKey)?.bytes).toEqual(image);
+    expect(privateAsset!.mediaObjectId).not.toBe(publicAsset!.mediaObjectId);
+    expect(analysisRows).toHaveLength(2);
+    expect(analysisRows.every((row) => row.resultJson.kind === "image")).toBe(true);
+    expect(objects).toHaveLength(2);
+    expect(objects.every((object) => object.provider === "zos" && object.status === "persisted")).toBe(true);
+    expect([...storage.objects.values()].every((object) => object.bytes.equals(image))).toBe(true);
+    expect(analyzeMock).toHaveBeenCalledTimes(1);
     await expect(
       fs.stat(path.join(process.env.MEDIA_ROOT!, ".staging", taskId)),
     ).rejects.toThrow();
   }, 30_000);
 
-  test("父视频分镜为多个子素材，父视频不进 assets，每个切片独立关键帧分析", async () => {
+  test("公共直传只创建公共记录和一套对象，分析后仍待审核", async () => {
+    const image = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: "#335577" },
+    })
+      .png()
+      .toBuffer();
+    const { service, taskId } = await createAndSeal("public.png", image, null);
+
+    await processUntilIdle();
+    const status = await service.getTask(taskId);
+    expect(status.items[0]).toMatchObject({
+      private_asset_ids: [],
+      public_asset_ids: [expect.any(String)],
+    });
+    await expect(database.db.select().from(schema.privateAssets)).resolves.toHaveLength(0);
+    await expect(database.db.select().from(schema.publicAssets)).resolves.toEqual([
+      expect.objectContaining({
+        uploaderUserId: null,
+        processingStatus: "completed",
+        reviewStatus: "pending_review",
+      }),
+    ]);
+    await expect(database.db.select().from(schema.mediaObjects)).resolves.toHaveLength(1);
+    expect(storage.objects.size).toBe(1);
+    expect(analyzeMock).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  test("父视频分镜为多个子素材，父视频不进素材表，每个切片独立关键帧分析", async () => {
     const mediaDirectory = path.join(temporaryRoot, "fixtures");
     await fs.mkdir(mediaDirectory, { recursive: true });
     const paths = ["parent.mp4", "red.mp4", "green.mp4"].map((name) =>
@@ -442,12 +502,17 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       status: "done",
       phase: "finished",
     });
-    expect(status.items[0]!.asset_ids).toHaveLength(2);
+    expect(status.items[0]!.private_asset_ids).toHaveLength(2);
+    expect(status.items[0]!.public_asset_ids).toHaveLength(2);
 
-    const assetRows = await database.db
+    const privateAssetRows = await database.db
       .select()
-      .from(schema.assets)
-      .where(eq(schema.assets.taskId, taskId));
+      .from(schema.privateAssets)
+      .where(eq(schema.privateAssets.taskId, taskId));
+    const publicAssetRows = await database.db
+      .select()
+      .from(schema.publicAssets)
+      .where(eq(schema.publicAssets.taskId, taskId));
     const sourceRows = await database.db
       .select()
       .from(schema.videoSources)
@@ -455,19 +520,22 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const analysisRows = await database.db.select().from(schema.analysisResults);
     expect(sourceRows).toHaveLength(1);
     expect(sourceRows[0]?.generatedSegmentCount).toBe(2);
-    expect(assetRows).toHaveLength(2);
-    expect(assetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
-    expect(assetRows.every((row) => row.sizeBytes <= 10 * 1024 * 1024)).toBe(true);
-    expect(assetRows.every((row) => row.videoSourceId === sourceRows[0]!.id)).toBe(true);
-    expect(assetRows.every((row) => row.thumbnailMediaObjectId)).toBe(true);
-    expect(assetRows.some((row) => row.id === sourceRows[0]!.id)).toBe(false);
-    expect(assetRows.every((row) => row.processingStatus === "completed")).toBe(true);
-    expect(analysisRows).toHaveLength(2);
+    expect(sourceRows[0]!.publicMediaObjectId).not.toBe(sourceRows[0]!.privateMediaObjectId);
+    expect(privateAssetRows).toHaveLength(2);
+    expect(publicAssetRows).toHaveLength(2);
+    expect(privateAssetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
+    expect(publicAssetRows.map((row) => row.segmentIndex).sort()).toEqual([1, 2]);
+    expect(privateAssetRows.every((row) => row.videoSourceId === sourceRows[0]!.id)).toBe(true);
+    expect(publicAssetRows.every((row) => row.videoSourceId === sourceRows[0]!.id)).toBe(true);
+    expect(privateAssetRows.every((row) => row.processingStatus === "completed")).toBe(true);
+    expect(publicAssetRows.every((row) => row.reviewStatus === "pending_review")).toBe(true);
+    expect(analysisRows).toHaveLength(4);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);
+    expect(analyzeMock).toHaveBeenCalledTimes(2);
     expect(framePreparation).not.toHaveBeenCalled();
     expect(storage.downloads).toEqual([]);
-    expect(storage.objects.size).toBe(5); // 1 个父对象 + 2 个切片 + 2 张首帧
-    for (const asset of assetRows) {
+    expect(storage.objects.size).toBe(10); // 公私各 1 个父对象 + 2 个切片 + 2 张首帧
+    for (const asset of privateAssetRows) {
       const [thumbnail] = await database.db
         .select()
         .from(schema.mediaObjects)
@@ -478,8 +546,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     }
     const { thumbnailResponse } = await import("@/server/media/response");
     const thumbnailGet = await thumbnailResponse(
-      assetRows[0]!.id,
-      new Request(`http://localhost/api/v1/media/${assetRows[0]!.id}/thumbnail`),
+      privateAssetRows[0]!.id,
+      new Request(`http://localhost/api/v1/media/${privateAssetRows[0]!.id}/thumbnail`),
       storage,
     );
     expect(thumbnailGet.status).toBe(200);
@@ -487,8 +555,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const thumbnailBytes = new Uint8Array(await thumbnailGet.arrayBuffer());
     expect([...thumbnailBytes.subarray(0, 2)]).toEqual([0xff, 0xd8]);
     const thumbnailRange = await thumbnailResponse(
-      assetRows[0]!.id,
-      new Request(`http://localhost/api/v1/media/${assetRows[0]!.id}/thumbnail`, {
+      privateAssetRows[0]!.id,
+      new Request(`http://localhost/api/v1/media/${privateAssetRows[0]!.id}/thumbnail`, {
         headers: { range: "bytes=0-9" },
       }),
       storage,
@@ -505,8 +573,11 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
 
-    // 用户删除先转公共；公共硬删必须同步回收该切片视频与首帧，兄弟切片和父视频保留。
-    const deletedAsset = assetRows[0]!;
+    // 公私副本独立删除，各自只回收本侧切片视频与首帧。
+    const deletedAsset = privateAssetRows[0]!;
+    const pairedPublicAsset = publicAssetRows.find(
+      (asset) => asset.id === deletedAsset.publicAssetId,
+    )!;
     const deletedMainKey = (
       await database.db
         .select()
@@ -524,7 +595,13 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       callback_url: null,
     });
     await processUntilIdle(client, framePreparation);
-    await service.deleteAsset(deletedAsset.id, {
+    expect(
+      await database.db
+        .select()
+        .from(schema.publicAssets)
+        .where(eq(schema.publicAssets.id, pairedPublicAsset.id)),
+    ).toHaveLength(1);
+    await service.deleteAsset(pairedPublicAsset.id, {
       user_id: null,
       callback_url: null,
     });
@@ -534,8 +611,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(
       await database.db
         .select()
-        .from(schema.assets)
-        .where(eq(schema.assets.id, deletedAsset.id)),
+        .from(schema.privateAssets)
+        .where(eq(schema.privateAssets.id, deletedAsset.id)),
     ).toHaveLength(0);
     expect(
       await database.db
@@ -543,7 +620,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
         .from(schema.mediaObjects)
         .where(eq(schema.mediaObjects.id, deletedAsset.thumbnailMediaObjectId!)),
     ).toHaveLength(0);
-    expect(storage.objects.size).toBe(3);
+    expect(storage.objects.size).toBe(6);
   }, 45_000);
 
   test("任一切片超过 10 MiB 时本地二次切分后正常入库，不下载远端切片", async () => {
@@ -577,16 +654,20 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     });
     expect(status.items[0]).toMatchObject({
       status: "done",
-      asset_ids: [expect.any(String)],
+      private_asset_ids: [expect.any(String)],
+      public_asset_ids: [expect.any(String)],
     });
-    const assets = await database.db.select().from(schema.assets);
+    const privateAssets = await database.db.select().from(schema.privateAssets);
+    const publicAssets = await database.db.select().from(schema.publicAssets);
     const sources = await database.db.select().from(schema.videoSources);
     const objects = await database.db.select().from(schema.mediaObjects);
-    expect(assets).toHaveLength(1);
+    expect(privateAssets).toHaveLength(1);
+    expect(publicAssets).toHaveLength(1);
     expect(sources).toHaveLength(1);
-    expect(objects).toHaveLength(3); // 父视频 + 切分子视频 + 缩略图
-    expect(assets[0]!.sizeBytes).toBeLessThanOrEqual(limit);
-    expect(storage.objects.size).toBe(3);
+    expect(objects).toHaveLength(6); // 公私各自的父视频、切分子视频和缩略图
+    expect(privateAssets[0]!.sizeBytes).toBeLessThanOrEqual(limit);
+    expect(publicAssets[0]!.sizeBytes).toBeLessThanOrEqual(limit);
+    expect(storage.objects.size).toBe(6);
     // 二次切分不下载远端超限切片，只下载/校验本地子切片
     expect(
       fake.request.mock.calls.some(([input]) =>

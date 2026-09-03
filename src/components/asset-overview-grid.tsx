@@ -33,10 +33,9 @@ const statusLabel: Record<ApiTaskStatus, string> = {
 };
 
 function detailHref(asset: ApiV1AssetSummary) {
-  const query = asset.user_id
-    ? `?user_id=${encodeURIComponent(asset.user_id)}`
-    : "";
-  return appUrl(`/assets/${asset.asset_id}${query}`);
+  const query = new URLSearchParams({ scope: asset.user_id ? "private" : "public" });
+  if (asset.user_id) query.set("user_id", asset.user_id);
+  return appUrl(`/assets/${asset.asset_id}?${query.toString()}`);
 }
 
 export function AssetOverviewGrid({

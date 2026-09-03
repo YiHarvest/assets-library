@@ -27,6 +27,7 @@ export const dynamic = "force-dynamic";
 
 type AssetOverviewView = "pending" | "published";
 type OverviewLayout = "gallery" | "list";
+type LibraryScope = "public" | "private";
 
 function firstParameter(value?: string | string[]) {
   return Array.isArray(value) ? value[0] : value;
@@ -54,8 +55,9 @@ function overviewHref(input: {
   tag?: string;
   layout?: OverviewLayout;
   userId?: string;
+  scope: LibraryScope;
 }) {
-  const parameters = new URLSearchParams({ view: input.view });
+  const parameters = new URLSearchParams({ view: input.view, scope: input.scope });
   if (input.cursor) parameters.set("cursor", input.cursor);
   if (input.history?.length) {
     parameters.set(
@@ -81,6 +83,7 @@ export default async function OverviewPage({
     view?: string | string[];
     layout?: string | string[];
     user_id?: string | string[];
+    scope?: string | string[];
   }>;
 }) {
   const parameters = await searchParams;
@@ -94,11 +97,18 @@ export default async function OverviewPage({
       : "";
   const searchMode = tagQuery ? detectSearchInputMode(tagQuery) : null;
   const userId = firstParameter(parameters.user_id)?.trim().slice(0, 191) ?? "";
+  const scope: LibraryScope =
+    firstParameter(parameters.scope) === "private" && userId
+      ? "private"
+      : "public";
+  const effectiveView: AssetOverviewView = scope === "private" ? "published" : view;
   const cursor = firstParameter(parameters.cursor) ?? null;
   const history = decodeHistory(firstParameter(parameters.history));
-  const userScope: UserScope = userId
+  const userScope: UserScope = scope === "private"
     ? { mode: "user", user_id: userId }
-    : { mode: "public" };
+    : userId
+      ? { mode: "exclude_user", user_id: userId }
+      : { mode: "public" };
   const [page, userDirectory] = await Promise.all([
     serverApiV1<AssetQueryResponse>("/assets/query", {
       method: "POST",
@@ -111,8 +121,7 @@ export default async function OverviewPage({
         filter: {
           user_scope: userScope,
           review_statuses: [
-            view === "published" ? "published" : "pending_review",
-            ...(view === "published" && userId ? ["pending_review"] : []),
+            effectiveView === "published" ? "published" : "pending_review",
           ],
         },
         cursor,
@@ -122,7 +131,7 @@ export default async function OverviewPage({
     }),
     serverWebUiApi<UserDirectoryResponse>("/users"),
   ]);
-  const common = { view, tag: tagQuery, layout, userId };
+  const common = { view: effectiveView, tag: tagQuery, layout, userId, scope };
   const uploadHref = userId
     ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
     : appUrl("/upload");
@@ -130,23 +139,26 @@ export default async function OverviewPage({
   const currentUser = userDirectory.items.find(
     (user) => user.user_id === userId,
   );
-  const scopeDescription = userId
+  const scopeDescription = scope === "private"
     ? currentUser?.display_name
       ? `${currentUser.display_name} (${userId})`
       : `用户 ${userId} 的素材`
     : "公共素材库";
   const publicScopeHref = overviewHref({
-    view,
+    view: effectiveView,
     tag: tagQuery,
     layout,
+    userId,
+    scope: "public",
   });
   const userOptions = userDirectory.items.map((user) => ({
     ...user,
     href: overviewHref({
-      view,
+      view: "published",
       tag: tagQuery,
       layout,
       userId: user.user_id,
+      scope: "private",
     }),
   }));
 
@@ -170,18 +182,19 @@ export default async function OverviewPage({
 
       <AssetScopeSwitcher
         currentUserId={userId}
+        currentScope={scope}
         publicHref={publicScopeHref}
         users={userOptions}
       />
 
       <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
-        <nav
+        {scope === "public" && <nav
           className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1 dark:bg-white/[0.10]"
           aria-label="素材视图"
         >
           <Button
             asChild
-            variant={view === "published" ? "default" : "ghost"}
+            variant={effectiveView === "published" ? "default" : "ghost"}
             size="sm"
           >
             <WebUiLink href={overviewHref({ ...common, view: "published" })}>
@@ -190,7 +203,7 @@ export default async function OverviewPage({
           </Button>
           <Button
             asChild
-            variant={view === "pending" ? "default" : "ghost"}
+            variant={effectiveView === "pending" ? "default" : "ghost"}
             size="sm"
           >
             <WebUiLink
@@ -199,15 +212,16 @@ export default async function OverviewPage({
               待入库
             </WebUiLink>
           </Button>
-        </nav>
+        </nav>}
 
-        {view === "published" ? (
+        {effectiveView === "published" ? (
           <form
             action={appUrl("/")}
             method="get"
             className="flex flex-1 items-center gap-2"
           >
             <input type="hidden" name="view" value="published" />
+            <input type="hidden" name="scope" value={scope} />
             {layout === "list" && (
               <input type="hidden" name="layout" value="list" />
             )}
@@ -270,12 +284,12 @@ export default async function OverviewPage({
       <div className="mb-5 flex items-end justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">
-            {view === "pending" ? "待入库素材" : "已入库素材"}
+            {effectiveView === "pending" ? "待入库素材" : "已入库素材"}
           </h2>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             {tagQuery
               ? `匹配“${tagQuery}”的素材。`
-              : view === "pending"
+              : effectiveView === "pending"
                 ? "包含等待处理、处理中、失败及待确认素材。"
                 : "已经完成审核并正式入库的素材。"}
           </p>
@@ -300,7 +314,7 @@ export default async function OverviewPage({
             <h2 className="text-xl font-semibold">
               {tagQuery
                 ? "未找到匹配素材"
-                : view === "pending"
+                : effectiveView === "pending"
                   ? "暂无待入库素材"
                   : "暂无已入库素材"}
             </h2>

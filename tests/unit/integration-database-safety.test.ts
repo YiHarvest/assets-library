@@ -86,7 +86,9 @@ describe("integration database safety", () => {
   });
 
   it("keeps all application tables in the cleanup allowlist", () => {
-    expect(integrationApplicationTables).toContain("assets");
+    expect(integrationApplicationTables).not.toContain("assets");
+    expect(integrationApplicationTables).toContain("public_assets");
+    expect(integrationApplicationTables).toContain("private_assets");
     expect(integrationApplicationTables).toContain("media_objects");
     expect(integrationApplicationTables).toContain("tags");
     expect(integrationApplicationTables).not.toContain("__drizzle_migrations");
@@ -104,14 +106,16 @@ describe("integration database safety", () => {
     await truncateIntegrationTables(pool);
 
     expect(query.mock.calls[0]?.[0]).toBe("SET FOREIGN_KEY_CHECKS = 0");
-    expect(query).toHaveBeenCalledWith("TRUNCATE TABLE `assets`");
+    expect(query).toHaveBeenCalledWith("TRUNCATE TABLE `public_assets`");
     expect(query.mock.calls.at(-1)?.[0]).toBe("SET FOREIGN_KEY_CHECKS = 1");
     expect(release).toHaveBeenCalledOnce();
   });
 
   it("still restores the connection when truncation fails", async () => {
     const query = vi.fn(async (statement: string) => {
-      if (statement === "TRUNCATE TABLE `assets`") throw new Error("cleanup failed");
+      if (statement === "TRUNCATE TABLE `public_assets`") {
+        throw new Error("cleanup failed");
+      }
     });
     const release = vi.fn();
     const pool = {

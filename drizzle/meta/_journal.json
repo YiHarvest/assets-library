@@ -36,6 +36,27 @@
       "when": 1788338655923,
       "tag": "0004_polite_killer_shrike",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1788434190094,
+      "tag": "0005_grey_black_crow",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1788435315124,
+      "tag": "0006_refresh_reporting_views",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1788449905092,
+      "tag": "0007_remove_legacy_asset_links",
+      "breakpoints": true
     }
   ]
 }

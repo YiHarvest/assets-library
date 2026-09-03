@@ -3,7 +3,6 @@ import { getTableColumns, getTableName } from "drizzle-orm";
 import { migrate } from "drizzle-orm/mysql2/migrator";
 import {
   analysisResults,
-  assets,
   assetTagRejections,
   assetTags,
   callbackDeliveries,
@@ -11,6 +10,8 @@ import {
   jobs,
   mediaObjects,
   outboxEvents,
+  privateAssets,
+  publicAssets,
   searchIndexState,
   tags,
   taskItemSegments,
@@ -37,7 +38,8 @@ const applicationTables = [
   mediaObjects,
   videoSources,
   taskItemSegments,
-  assets,
+  publicAssets,
+  privateAssets,
   analysisResults,
   tags,
   assetTags,

@@ -61,14 +61,14 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
   - 任意用户模式（`MCP_ALLOW_ANY_USER_ID=true`）：`x-request-userid` 可传
     任意值，agent 可访问任意注册用户（等价于 token 持有者可代理任意用户，
     需谨慎开启）。
-- 公共素材通过 `scope: "public"` 显式访问；`query_assets` 支持
+- 公共素材通过 `scope: "public"` 显式访问；公共查询会自动排除当前
+  `x-request-userid` 上传的公共副本，但已知公共 ID 的详情和媒体链接仍可直接读取。`query_assets` 支持
   `own`（默认）/ `user` / `public` / `all` 四种范围，`get_asset` 与
   `get_media_links` 支持前三种范围。三个工具复用同一个权限解析函数；`scope=user` 的目标在
   白名单模式下必须位于白名单中；`scope=all` 仅在任意用户模式下开放。
 - `get_task_status` 只允许读取当前 `x-request-userid` 所属任务；其他用户的任务
   按不存在处理。
-- `delete_asset` 只做**软删除**（个人素材转为公共，保留文件与分析）。
-  公共素材硬删除不在 MCP 范围内。
+- `delete_asset` 永久删除当前用户的私人素材、分析和存储对象，不影响配对公共副本。
 
 ## 工具清单
 
@@ -83,9 +83,9 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
 | `query_assets` | 语义搜索 + 过滤 + 游标分页 + 标签统计；scope 支持 own/user/public/all | 同步 |
 | `get_asset` | 素材详情（含绝对分镜秒数及 VLM 描述、标签、OCR、视频时间线） | 同步 |
 | `update_asset` | 整体替换名称/描述/标签 | 异步 |
-| `publish_asset` | 发布分析成功的素材 | 异步 |
+| `publish_asset` | 发布分析成功的公共素材 | 异步 |
 | `retry_asset` | 重试分析失败的素材 | 异步 |
-| `delete_asset` | 软删除本人素材 | 异步 |
+| `delete_asset` | 永久删除本人私人素材 | 异步 |
 | `list_user_media` | 分页列出本人素材（含媒体直链） | 同步 |
 | `get_storage_usage` | 存储用量统计 | 同步 |
 | `get_media_links` | 媒体链接；视频同时返回缩略图链接（返回相对路径） | 同步 |
@@ -98,14 +98,12 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
 {
   "url": "https://storage.example.com/tmp/demo.mp4",
   "filename": "demo.mp4",
-  "publish": false,
   "idempotency_key": "upload-demo-20260821"
 }
 ```
 
 - `url`：必填。支持扩展名 `.jpg/.jpeg/.png/.webp/.mp4`；扩展名决定媒体类型。
 - `filename`：可选，覆盖 URL 推断的文件名（URL 无扩展名时必须提供）。
-- `publish`：可选，分析成功后是否直接发布，默认 `false`。
 - `idempotency_key`：可选；同一用户、同一工具、同一参数重试时返回原任务。
 
 批量上传使用独立工具，避免单文件参数变成 union：
@@ -116,22 +114,22 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
     { "url": "https://storage.example.com/tmp/a.jpg", "filename": "a.jpg" },
     { "url": "https://storage.example.com/tmp/b.mp4", "filename": "b.mp4" }
   ],
-  "auto_publish": false,
   "idempotency_key": "batch-20260821-001"
 }
 ```
 
-`items` 仅包含 `url` 和可选 `filename`；`auto_publish` 是任务级参数。工具先探测
-全部来源的格式与精确大小，再创建一个多 item 上传任务，最终只封存一次。文件数与
+`items` 仅包含 `url` 和可选 `filename`。工具先探测全部来源的格式与精确大小，
+再创建一个多 item 上传任务，最终只封存一次。MCP 上传始终携带当前用户 ID，因此
+每个素材会创建私人记录及一份独立的待审核公共副本。文件数与
 总大小沿用 REST API 的 `UPLOAD_MAX_ITEMS`（最多 100）和
 `UPLOAD_MAX_TOTAL_BYTES`（默认 2 GiB）限制。
 
 工具完成 URL 拉取和任务封存后立即返回 `task_id`，不会占用 MCP 连接等待最长约
 10 分钟的 VLM 分析。之后调用 `get_task_status`；终态为 `done` 时，从
-`items[].asset_ids` 取得素材 ID。
+`items[].private_asset_ids` 和 `items[].public_asset_ids` 取得两组素材 ID。
 
 如果 agent 丢失了 `task_id`，可调用 `list_tasks`，按状态/任务类型过滤并分页恢复
-最近任务。返回值是完整任务快照，包含逐 item 进度、错误和 `asset_ids`。
+最近任务。返回值是完整任务快照，包含逐 item 进度、错误和公私素材 ID。
 
 ## 幂等写操作
 

@@ -138,8 +138,11 @@ test("submits selected assets through one manifest task", async ({
       received_bytes: done ? png.length : 0,
       total_bytes: png.length,
       progress_percent: done ? 100 : 0,
-      asset_ids: done
+      private_asset_ids: done
         ? [`10000000-0000-4000-8000-00000000001${index}`]
+        : [],
+      public_asset_ids: done
+        ? [`20000000-0000-4000-8000-00000000001${index}`]
         : [],
       error: null,
     })),
@@ -242,7 +245,8 @@ test("shows an asynchronous media validation error without requiring hover", asy
         received_bytes: fileSize,
         total_bytes: fileSize,
         progress_percent: failed ? 100 : 0,
-        asset_ids: [],
+        private_asset_ids: [],
+        public_asset_ids: [],
         error: failed ? { code: "corrupt_file", message: failureMessage } : null,
       },
     ],

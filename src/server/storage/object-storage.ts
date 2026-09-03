@@ -7,6 +7,11 @@ export interface StoreFileInput {
   contentType: string;
 }
 
+export interface CopyObjectInput {
+  sourceKey: string;
+  destinationKey: string;
+}
+
 export interface StoredObject {
   key: string;
   sizeBytes: number;
@@ -37,6 +42,7 @@ export interface ObjectReadResult extends ObjectMetadata {
 /** 云端对象存储的最小能力，便于业务测试中使用内存或磁盘替身。 */
 export interface ObjectStorage {
   storeFile(input: StoreFileInput): Promise<StoredObject>;
+  copyObject(input: CopyObjectInput): Promise<StoredObject>;
   headObject(key: string): Promise<ObjectMetadata>;
   getObject(key: string, range?: ObjectByteRange): Promise<ObjectReadResult>;
   downloadToFile(key: string, destinationPath: string): Promise<ObjectMetadata>;

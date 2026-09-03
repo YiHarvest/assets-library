@@ -1,17 +1,19 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, ne } from "drizzle-orm";
 import type { MySqlRawQueryResult } from "drizzle-orm/mysql2";
 import { db } from "@/server/db";
 import { loadConfig } from "@/server/config";
 import {
+  analysisResultEntries,
   analysisResults,
-  assets,
-  assetTagRejections,
+  assetTagRejectionEntries,
   assetTags,
   jobs,
   mediaObjects,
+  privateAssets,
+  publicAssets,
   searchIndexState,
   tags,
   tasks,
@@ -33,10 +35,13 @@ import {
 } from "@/server/model/analyzer";
 import {
   completeJob,
+  associationTarget,
   failJob,
   getAssetRecord,
   heartbeatJob,
+  jobTarget,
   requeueJob,
+  type AssetRef,
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import { indexAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
@@ -136,12 +141,91 @@ function affectedRows(result: MySqlRawQueryResult) {
   return result[0].affectedRows;
 }
 
+type ProcessingTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function recordRef(asset: AssetRecord): AssetRef {
+  return { kind: asset.kind, id: asset.id };
+}
+
+function candidateAnalysisRefs(job: ClaimedJob, asset: AssetRecord) {
+  const refs = [recordRef(asset)];
+  const pairedPublicAssetId = job.payload?.pairedPublicAssetId;
+  if (
+    asset.kind === "private" &&
+    typeof pairedPublicAssetId === "string"
+  ) {
+    refs.push({ kind: "public", id: pairedPublicAssetId });
+  }
+  return refs;
+}
+
+async function activeAnalysisRefs(
+  tx: ProcessingTransaction,
+  job: ClaimedJob,
+  asset: AssetRecord,
+) {
+  const active: AssetRef[] = [];
+  for (const ref of candidateAnalysisRefs(job, asset)) {
+    const [row] = ref.kind === "private"
+      ? await tx
+          .select({ id: privateAssets.id })
+          .from(privateAssets)
+          .where(and(eq(privateAssets.id, ref.id), isNull(privateAssets.deletedAt)))
+          .for("update")
+          .limit(1)
+      : await tx
+          .select({ id: publicAssets.id })
+          .from(publicAssets)
+          .where(
+            and(
+              eq(publicAssets.id, ref.id),
+              isNull(publicAssets.deletedAt),
+              ne(publicAssets.reviewStatus, "deleted"),
+            ),
+          )
+          .for("update")
+          .limit(1);
+    if (row) active.push(ref);
+  }
+  return active;
+}
+
+async function analysisAsset(job: ClaimedJob) {
+  const leader = job.assetId ? await getAssetRecord(job.assetId) : undefined;
+  if (leader && !leader.deletedAt && leader.reviewStatus !== "deleted") {
+    return leader;
+  }
+  const pairedPublicAssetId = job.payload?.pairedPublicAssetId;
+  if (typeof pairedPublicAssetId === "string") {
+    return getAssetRecord(pairedPublicAssetId);
+  }
+  return leader;
+}
+
+function updateProcessingAsset(
+  tx: ProcessingTransaction,
+  ref: AssetRef,
+  values: {
+    processingStatus?: "queued" | "validating" | "analyzing" | "completed" | "failed";
+    mimeType?: string;
+    sizeBytes?: number;
+    description?: string;
+    failureCode?: string | null;
+    failureMessage?: string | null;
+    updatedAt: Date;
+  },
+) {
+  return ref.kind === "private"
+    ? tx.update(privateAssets).set(values).where(eq(privateAssets.id, ref.id))
+    : tx.update(publicAssets).set(values).where(eq(publicAssets.id, ref.id));
+}
+
 async function advanceJobAssetStatus(
   job: ClaimedJob,
+  asset: AssetRecord,
   processingStatus: "validating" | "analyzing",
 ) {
   if (!job.assetId) return "asset_unavailable" as const;
-  const assetId = job.assetId;
   const now = new Date();
   return db.transaction(async (tx) => {
     const renewed = await tx
@@ -155,16 +239,13 @@ async function advanceJobAssetStatus(
         ),
       );
     if (affectedRows(renewed) !== 1) return "lease_lost" as const;
-    const updated = await tx
-      .update(assets)
-      .set({ processingStatus, updatedAt: now })
-      .where(
-        and(
-          eq(assets.id, assetId),
-          eq(assets.reviewStatus, "pending_review"),
-        ),
-      );
-    return affectedRows(updated) === 1
+    const refs = await activeAnalysisRefs(tx, job, asset);
+    const results = await Promise.all(
+      refs.map((ref) =>
+        updateProcessingAsset(tx, ref, { processingStatus, updatedAt: now }),
+      ),
+    );
+    return results.length > 0 && affectedRows(results[0]!) === 1
       ? ("advanced" as const)
       : ("asset_unavailable" as const);
   });
@@ -188,7 +269,8 @@ async function persistAnalysis(
   modelName: string,
 ) {
   if (!job.assetId) return false;
-  const assetId = job.assetId;
+  const asset = await analysisAsset(job);
+  if (!asset || asset.deletedAt || asset.reviewStatus === "deleted") return true;
   const now = new Date();
   return db.transaction(async (tx) => {
     const completed = await tx
@@ -200,99 +282,100 @@ async function persistAnalysis(
           eq(jobs.status, "running"),
           eq(jobs.attempt, job.attempt),
         ),
-      );
-    if (affectedRows(completed) !== 1) return false;
-
-    const [asset] = await tx
-      .select()
-      .from(assets)
-      .where(eq(assets.id, assetId))
-      .limit(1);
-    if (!asset || asset.reviewStatus === "deleted") return true;
-
-    await tx
-      .insert(analysisResults)
-      .values({
-        assetId,
-        schemaVersion: 1,
-        resultJson: result,
-        modelProtocol: protocol,
-        modelName,
-        completedAt: now,
-      })
-      .onDuplicateKeyUpdate({
-        set: { resultJson: result, modelProtocol: protocol, modelName, completedAt: now },
-      });
-
-    const rejected = await tx
-      .select()
-      .from(assetTagRejections)
-      .where(eq(assetTagRejections.assetId, assetId));
-    const rejectedKeys = new Set(
-      rejected.map((item) => `${item.category}:${item.normalizedValue}`),
     );
-    for (const tag of tagsFromAnalysis(result)) {
-      const normalizedValue = normalize(tag.value);
-      if (rejectedKeys.has(`${tag.category}:${normalizedValue}`)) continue;
+    if (affectedRows(completed) !== 1) return false;
+    const refs = await activeAnalysisRefs(tx, job, asset);
+
+    for (const ref of refs) {
       await tx
-        .insert(tags)
-        .ignore()
+        .insert(analysisResults)
         .values({
           id: crypto.randomUUID(),
-          category: tag.category,
-          value: tag.value.trim(),
-          normalizedValue,
-          createdAt: now,
+          ...associationTarget(ref),
+          schemaVersion: 1,
+          resultJson: result,
+          modelProtocol: protocol,
+          modelName,
+          completedAt: now,
+        })
+        .onDuplicateKeyUpdate({
+          set: { resultJson: result, modelProtocol: protocol, modelName, completedAt: now },
         });
-      const [storedTag] = await tx
-        .select({ id: tags.id })
-        .from(tags)
-        .where(
-          and(
-            eq(tags.category, tag.category),
-            eq(tags.normalizedValue, normalizedValue),
-          ),
-        )
-        .limit(1);
-      if (!storedTag) throw new Error("标签创建后无法读取。");
-      await tx
-        .insert(assetTags)
-        .ignore()
-        .values({
-          assetId,
-          tagId: storedTag.id,
-          source: "model",
-          confidence: null,
-        });
-    }
-    await tx
-      .update(assets)
-      .set({
+
+      const rejected = await tx
+        .select()
+        .from(assetTagRejectionEntries)
+        .where(eq(assetTagRejectionEntries.assetId, ref.id));
+      const rejectedKeys = new Set(
+        rejected.map((item) => `${item.category}:${item.normalizedValue}`),
+      );
+      for (const tag of tagsFromAnalysis(result)) {
+        const normalizedValue = normalize(tag.value);
+        if (rejectedKeys.has(`${tag.category}:${normalizedValue}`)) continue;
+        await tx
+          .insert(tags)
+          .ignore()
+          .values({
+            id: crypto.randomUUID(),
+            category: tag.category,
+            value: tag.value.trim(),
+            normalizedValue,
+            createdAt: now,
+          });
+        const [storedTag] = await tx
+          .select({ id: tags.id })
+          .from(tags)
+          .where(
+            and(
+              eq(tags.category, tag.category),
+              eq(tags.normalizedValue, normalizedValue),
+            ),
+          )
+          .limit(1);
+        if (!storedTag) throw new Error("标签创建后无法读取。");
+        await tx
+          .insert(assetTags)
+          .ignore()
+          .values({
+            id: crypto.randomUUID(),
+            ...associationTarget(ref),
+            tagId: storedTag.id,
+            source: "model",
+            confidence: null,
+          });
+      }
+      await updateProcessingAsset(tx, ref, {
         description: asset.description || result.description,
         processingStatus: "completed",
-        reviewStatus: asset.directPublish ? "published" : "pending_review",
         failureCode: null,
         failureMessage: null,
         updatedAt: now,
-      })
-      .where(eq(assets.id, assetId));
-    if (semanticSearchEnabled()) {
-      await tx.insert(jobs).values({
-        id: crypto.randomUUID(),
-        taskId: job.taskId,
-        assetId,
-        type: "embed",
-        status: "queued",
-        phase: "analyzing",
-        attempt: 0,
-        availableAt: now,
-        createdAt: now,
-        updatedAt: now,
       });
-      await tx
-        .insert(searchIndexState)
-        .values({ assetId, status: "queued", updatedAt: now })
-        .onDuplicateKeyUpdate({ set: { status: "queued", errorMessage: null, updatedAt: now } });
+      if (semanticSearchEnabled()) {
+        await tx.insert(jobs).values({
+          id: crypto.randomUUID(),
+          taskId: job.taskId,
+          ...jobTarget(ref),
+          type: "embed",
+          status: "queued",
+          phase: "analyzing",
+          attempt: 0,
+          availableAt: now,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await tx
+          .insert(searchIndexState)
+          .values({
+            id: crypto.randomUUID(),
+            ...associationTarget(ref),
+            status: "queued",
+            updatedAt: now,
+          })
+          .onDuplicateKeyUpdate({
+            set: { status: "queued", errorMessage: null, updatedAt: now },
+          });
+      }
     }
     return true;
   });
@@ -301,6 +384,7 @@ async function persistAnalysis(
 async function failJobAndMarkAsset(job: ClaimedJob, error: unknown) {
   const appError = error instanceof AppError ? error : new AppError("internal_error");
   const now = new Date();
+  const asset = await analysisAsset(job);
   return db.transaction(async (tx) => {
     const failed = await tx
       .update(jobs)
@@ -319,16 +403,18 @@ async function failJobAndMarkAsset(job: ClaimedJob, error: unknown) {
         ),
       );
     if (affectedRows(failed) !== 1) return false;
-    if (!job.assetId) return true;
-    await tx
-      .update(assets)
-      .set({
-        processingStatus: "failed",
-        failureCode: appError.code satisfies FailureCode,
-        failureMessage: appError.message,
-        updatedAt: now,
-      })
-      .where(and(eq(assets.id, job.assetId), eq(assets.reviewStatus, "pending_review")));
+    if (!asset) return true;
+    const refs = await activeAnalysisRefs(tx, job, asset);
+    await Promise.all(
+      refs.map((ref) =>
+        updateProcessingAsset(tx, ref, {
+          processingStatus: "failed",
+          failureCode: appError.code satisfies FailureCode,
+          failureMessage: appError.message,
+          updatedAt: now,
+        }),
+      ),
+    );
     return true;
   });
 }
@@ -408,13 +494,18 @@ async function processEmbeddingJob(job: ClaimedJob) {
     await failJob(job);
     return;
   }
+  const asset = await getAssetRecord(job.assetId);
+  if (!asset || asset.deletedAt || asset.reviewStatus === "deleted") {
+    await completeJob(job);
+    return;
+  }
+  const ref = recordRef(asset);
   const [analysis] = await db
     .select()
-    .from(analysisResults)
-    .where(eq(analysisResults.assetId, job.assetId))
+    .from(analysisResultEntries)
+    .where(eq(analysisResultEntries.assetId, job.assetId))
     .limit(1);
-  const asset = await getAssetRecord(job.assetId);
-  if (!analysis || !asset || asset.reviewStatus === "deleted") {
+  if (!analysis) {
     await completeJob(job);
     return;
   }
@@ -423,7 +514,8 @@ async function processEmbeddingJob(job: ClaimedJob) {
     await db
       .insert(searchIndexState)
       .values({
-        assetId: job.assetId,
+        id: crypto.randomUUID(),
+        ...associationTarget(ref),
         status: "done",
         indexedAt: new Date(),
         updatedAt: new Date(),
@@ -439,7 +531,8 @@ async function processEmbeddingJob(job: ClaimedJob) {
       await db
         .insert(searchIndexState)
         .values({
-          assetId: job.assetId,
+          id: crypto.randomUUID(),
+          ...associationTarget(ref),
           status: "failed",
           errorMessage: error instanceof Error ? error.message : "向量索引失败。",
           updatedAt: new Date(),
@@ -468,13 +561,13 @@ async function processAnalysisJob(
     await failJob(job);
     return;
   }
-  const record = await getAssetRecord(job.assetId);
+  const record = await analysisAsset(job);
   if (!record) {
     await removeAnalysisWorkspace(job.id).catch(() => undefined);
     await failJob(job);
     return;
   }
-  if (record.reviewStatus === "deleted") {
+  if (record.deletedAt || record.reviewStatus === "deleted") {
     await removeAnalysisWorkspace(job.id).catch(() => undefined);
     await completeJob(job);
     return;
@@ -484,7 +577,7 @@ async function processAnalysisJob(
     const hydrated = await hydratedAsset(record, job, storage);
     const asset = hydrated.asset;
     workspace = hydrated.workspace;
-    const validationAdvance = await advanceJobAssetStatus(job, "validating");
+    const validationAdvance = await advanceJobAssetStatus(job, record, "validating");
     if (validationAdvance === "lease_lost") return;
     if (validationAdvance === "asset_unavailable") {
       await stopUnavailableAnalysis(job);
@@ -493,14 +586,21 @@ async function processAnalysisJob(
     const prepared = hydrated.precomputedFrames
       ? { mimeType: asset.mimeType, sizeBytes: asset.sizeBytes }
       : await mediaPreparer(asset);
-    await db
-      .update(assets)
-      .set({ mimeType: prepared.mimeType, sizeBytes: prepared.sizeBytes, updatedAt: new Date() })
-      .where(eq(assets.id, asset.id));
+    await db.transaction(async (tx) => {
+      await Promise.all(
+        (await activeAnalysisRefs(tx, job, record)).map((ref) =>
+          updateProcessingAsset(tx, ref, {
+            mimeType: prepared.mimeType,
+            sizeBytes: prepared.sizeBytes,
+            updatedAt: new Date(),
+          }),
+        ),
+      );
+    });
     if (asset.mediaType === "video" && !hydrated.precomputedFrames) {
       await videoFramePreparer(asset);
     }
-    const analysisAdvance = await advanceJobAssetStatus(job, "analyzing");
+    const analysisAdvance = await advanceJobAssetStatus(job, record, "analyzing");
     if (analysisAdvance === "lease_lost") return;
     if (analysisAdvance === "asset_unavailable") {
       await stopUnavailableAnalysis(job);

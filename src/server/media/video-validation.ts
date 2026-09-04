@@ -198,6 +198,8 @@ async function normalizeVideoFormat(
   const videoCodecArgs = canCopyVideo
     ? ["-c:v", "copy"]
     : [
+        "-vf",
+        "scale=in_range=auto:out_range=tv",
         "-c:v",
         "libx264",
         "-preset",

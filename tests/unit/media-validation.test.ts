@@ -138,6 +138,33 @@ describe("media validation", () => {
     expect((await fs.stat(filePath)).size).toBe(validated.sizeBytes);
   }, 15_000);
 
+  it("normalizes full-range video to browser-compatible limited range", async () => {
+    const filePath = path.join(directory, "full-range.mp4");
+    await execFileAsync("ffmpeg", [
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=blue:s=16x16:d=0.2",
+      "-vf",
+      "scale=in_range=tv:out_range=pc",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuvj420p",
+      "-color_range",
+      "pc",
+      "-y",
+      filePath,
+    ]);
+    expect((await probeVideo(filePath)).streams[0]?.pix_fmt).toBe("yuvj420p");
+
+    await validateMediaFile(filePath, "full-range.mp4");
+
+    expect((await probeVideo(filePath)).streams[0]?.pix_fmt).toBe("yuv420p");
+  }, 15_000);
+
   it("remuxes a 3GP container renamed to MP4 into an actual MP4 brand", async () => {
     const filePath = path.join(directory, "renamed-3gp.mp4");
     await execFileAsync("ffmpeg", [

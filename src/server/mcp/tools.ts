@@ -651,7 +651,7 @@ export function registerTools(
     "publish_asset",
     {
       title: "发布素材",
-      description: "提交异步任务，发布分析成功的公共素材；私人素材无需审核。",
+      description: "提交异步任务，发布分析成功的公共素材。",
       inputSchema: z.object({
         asset_id: z.string().uuid().describe("素材 ID"),
         idempotency_key: idempotencyKeySchema,

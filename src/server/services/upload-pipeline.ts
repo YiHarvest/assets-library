@@ -280,6 +280,7 @@ async function processImage(
           mediaObjectId: privateMediaObjectId,
           originalPath: stored[1]!.key,
           sizeBytes: stored[1]!.sizeBytes,
+          reviewStatus: "pending_review",
         });
       }
       await tx.insert(jobs).values({
@@ -525,6 +526,7 @@ async function processVideo(
                 mimeType: "video/mp4",
                 sizeBytes: row.privateSegment!.object.sizeBytes,
                 processingStatus: "analyzing" as const,
+                reviewStatus: "pending_review" as const,
                 createdAt: now,
                 updatedAt: now,
               })),

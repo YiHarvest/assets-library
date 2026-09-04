@@ -101,6 +101,7 @@ flowchart LR
 | `private_assets.id` | UUID PK | 私人素材 ID。 |
 | `private_assets.public_asset_id` | UNIQUE，FK → `public_assets.id`，删除公共副本时置空 | 初次上传时的配对公共副本；后续编辑、标签、重试和删除不联动。 |
 | `private_assets.user_id` | 非空 | 私人素材所有者。 |
+| `private_assets.review_status` | 默认 `pending_review` | 私人审核状态：`pending_review/published/deleted`。 |
 | `task_id/task_item_id/task_item_segment_id/video_source_id` | 可空 FK，删除来源时置空 | 创建任务与视频切片追溯；两个素材表分别保证切片唯一。 |
 | `media_object_id/thumbnail_media_object_id` | 可空 FK，删除受限 | 本侧独立的主体和缩略图对象。 |
 | `segment_index/segment_start_ms/segment_end_ms` | 可空 | 视频切片序号和时间范围。 |
@@ -109,7 +110,7 @@ flowchart LR
 | `failure_code/failure_message` | 可空 | 处理失败详情。 |
 | `created_at/updated_at/deleted_at` | UTC `datetime(3)` | 生命周期时间。 |
 
-`private_assets` 不保存审核字段，报表和统一视图将活跃私人素材映射为 `review_status='published'`。
+公私素材分别保存审核状态；发布任一副本不会联动另一侧。
 
 ## 2. `analysis_results` — 模型分析结果
 

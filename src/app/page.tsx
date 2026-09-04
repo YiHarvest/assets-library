@@ -101,7 +101,7 @@ export default async function OverviewPage({
     firstParameter(parameters.scope) === "private" && userId
       ? "private"
       : "public";
-  const effectiveView: AssetOverviewView = scope === "private" ? "published" : view;
+  const effectiveView = view;
   const cursor = firstParameter(parameters.cursor) ?? null;
   const history = decodeHistory(firstParameter(parameters.history));
   const userScope: UserScope = scope === "private"
@@ -188,7 +188,7 @@ export default async function OverviewPage({
       />
 
       <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
-        {scope === "public" && <nav
+        <nav
           className="flex w-fit shrink-0 rounded-full bg-black/[0.05] p-1 dark:bg-white/[0.10]"
           aria-label="素材视图"
         >
@@ -212,7 +212,7 @@ export default async function OverviewPage({
               待入库
             </WebUiLink>
           </Button>
-        </nav>}
+        </nav>
 
         {effectiveView === "published" ? (
           <form

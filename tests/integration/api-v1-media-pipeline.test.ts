@@ -386,13 +386,6 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(status.items[0]!.private_asset_ids[0]).not.toBe(
       status.items[0]!.public_asset_ids[0],
     );
-    await expect(
-      service.publishAsset(status.items[0]!.private_asset_ids[0]!, {
-        user_id: null,
-        callback_url: null,
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-
     const [privateAsset] = await database.db
       .select()
       .from(schema.privateAssets)
@@ -408,6 +401,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(privateAsset).toMatchObject({
       mediaType: "image",
       processingStatus: "completed",
+      reviewStatus: "pending_review",
       userId: "user-pipeline",
       publicAssetId: publicAsset!.id,
     });
@@ -424,6 +418,23 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(objects.every((object) => object.provider === "zos" && object.status === "persisted")).toBe(true);
     expect([...storage.objects.values()].every((object) => object.bytes.equals(image))).toBe(true);
     expect(analyzeMock).toHaveBeenCalledTimes(1);
+    await service.publishAsset(privateAsset!.id, {
+      user_id: "user-pipeline",
+      callback_url: null,
+    });
+    await processUntilIdle();
+    await expect(
+      database.db
+        .select({ reviewStatus: schema.privateAssets.reviewStatus })
+        .from(schema.privateAssets)
+        .where(eq(schema.privateAssets.id, privateAsset!.id)),
+    ).resolves.toEqual([{ reviewStatus: "published" }]);
+    await expect(
+      database.db
+        .select({ reviewStatus: schema.publicAssets.reviewStatus })
+        .from(schema.publicAssets)
+        .where(eq(schema.publicAssets.id, publicAsset!.id)),
+    ).resolves.toEqual([{ reviewStatus: "pending_review" }]);
     await expect(
       fs.stat(path.join(process.env.MEDIA_ROOT!, ".staging", taskId)),
     ).rejects.toThrow();
@@ -528,6 +539,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(privateAssetRows.every((row) => row.videoSourceId === sourceRows[0]!.id)).toBe(true);
     expect(publicAssetRows.every((row) => row.videoSourceId === sourceRows[0]!.id)).toBe(true);
     expect(privateAssetRows.every((row) => row.processingStatus === "completed")).toBe(true);
+    expect(privateAssetRows.every((row) => row.reviewStatus === "pending_review")).toBe(true);
     expect(publicAssetRows.every((row) => row.reviewStatus === "pending_review")).toBe(true);
     expect(analysisRows).toHaveLength(4);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);

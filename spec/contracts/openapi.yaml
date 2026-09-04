@@ -42,7 +42,7 @@ paths:
       tags: [Uploads]
       operationId: createUploadTask
       summary: 创建上传任务和文件清单
-      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建独立的私人素材和待审核公共副本。
+      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建互相独立、均待审核的私人素材和公共副本。
       requestBody:
         required: true
         content:
@@ -335,8 +335,8 @@ paths:
     post:
       tags: [Assets]
       operationId: publishAsset
-      summary: 异步发布已完成分析的公共素材
-      description: 私人素材无需审核；传入私人 ID 时返回 409。
+      summary: 异步发布已完成分析的公共或私人素材
+      description: 公共素材不传 user_id；私人素材必须传入所属 user_id。公私审核状态互不联动。
       parameters:
         - $ref: "#/components/parameters/AssetId"
       requestBody:

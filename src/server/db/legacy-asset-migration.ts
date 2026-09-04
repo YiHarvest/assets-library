@@ -304,6 +304,7 @@ async function ensureAssetRows(
       publicAssetId,
       userId: asset.userId!,
       ...values,
+      reviewStatus: asset.reviewStatus,
     });
   });
   return { publicAssetId, privateAssetId: asset.id };

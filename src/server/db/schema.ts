@@ -420,7 +420,7 @@ export const publicAssets = mysqlTable(
   ],
 );
 
-/** 用户个人素材；创建即入库，不保存审核状态。 */
+/** 用户个人素材；与公共素材一样需审核后入库。 */
 export const privateAssets = mysqlTable(
   "private_assets",
   {
@@ -430,6 +430,13 @@ export const privateAssets = mysqlTable(
     }),
     userId: varchar("user_id", { length: 191 }).notNull(),
     ...assetContentColumns(),
+    reviewStatus: mysqlEnum("review_status", [
+      "pending_review",
+      "published",
+      "deleted",
+    ])
+      .notNull()
+      .default("pending_review"),
   },
   (table) => [
     uniqueIndex("private_assets_public_asset_unique").on(table.publicAssetId),
@@ -437,6 +444,11 @@ export const privateAssets = mysqlTable(
     index("private_assets_user_processing_created_idx").on(
       table.userId,
       table.processingStatus,
+      table.createdAt,
+    ),
+    index("private_assets_user_review_created_idx").on(
+      table.userId,
+      table.reviewStatus,
       table.createdAt,
     ),
     uniqueIndex("private_assets_task_segment_unique").on(table.taskItemSegmentId),
@@ -727,7 +739,7 @@ export const assetEntries = mysqlView("asset_entries", {
     video_source_id, media_object_id, thumbnail_media_object_id, segment_index,
     segment_start_ms, segment_end_ms, name, description, media_type,
     original_filename, original_path, mime_type, size_bytes, processing_status,
-    'published' as review_status, failure_code, failure_message,
+    review_status, failure_code, failure_message,
     created_at, updated_at, deleted_at
   from private_assets
 `);

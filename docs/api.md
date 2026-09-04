@@ -101,7 +101,7 @@ API 网关增加访问控制。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `user_id` | `string \| null` | 否 | 1–191 字符。非空时创建互相独立的私人素材与待审核公共副本；空字符串或 `null` 只创建公共素材。 |
+| `user_id` | `string \| null` | 否 | 1–191 字符。非空时创建互相独立、均待审核的私人素材与公共副本；空字符串或 `null` 只创建公共素材。 |
 | `callback_url` | `string(url) \| null` | 否 | 任务终态回调，只支持 HTTP/HTTPS，最长 2,048 字符。 |
 | `items` | `array` | 是 | 1–100 项，总声明大小不超过 2 GiB。 |
 | `items[].filename` | `string` | 是 | 1–255 字符；扩展名决定目标媒体格式。 |
@@ -487,8 +487,8 @@ curl -X PUT \
 
 ### `POST /api/v1/assets/{asset_id}/publish`
 
-请求体可为空，也可传 `{"user_id":"user_123","callback_url":null}`。只有分析
-成功的公共素材可以发布；私人素材返回 `409`，因为私人库不需要审核。
+请求体可为空，也可传 `{"user_id":"user_123","callback_url":null}`。分析成功后，
+公共素材不传 `user_id` 发布；私人素材传入其所属 `user_id` 发布。公私审核状态互不联动。
 
 ### `POST /api/v1/assets/{asset_id}/retry`
 

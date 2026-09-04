@@ -122,7 +122,7 @@ async function queueRetryAnalysis(job: ClaimedJob) {
             processingStatus: privateAssets.processingStatus,
             deletedAt: privateAssets.deletedAt,
             userId: privateAssets.userId,
-            reviewStatus: sql<"published">`'published'`,
+            reviewStatus: privateAssets.reviewStatus,
           })
           .from(privateAssets)
           .where(eq(privateAssets.id, assetId))
@@ -260,22 +260,20 @@ async function reserveAssetDeletion(ref: AssetRef): Promise<DeletionReservation>
     }
 
     const now = new Date();
-    if (!asset.deletedAt) {
-      if (ref.kind === "private") {
-        await tx
-          .update(privateAssets)
-          .set({ deletedAt: now, updatedAt: now })
-          .where(eq(privateAssets.id, ref.id));
-      } else {
-        await tx
-          .update(publicAssets)
-          .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
-          .where(eq(publicAssets.id, ref.id));
-      }
-    } else if (ref.kind === "public") {
+    const deletion = {
+      reviewStatus: "deleted" as const,
+      deletedAt: asset.deletedAt ?? now,
+      updatedAt: now,
+    };
+    if (ref.kind === "private") {
+      await tx
+        .update(privateAssets)
+        .set(deletion)
+        .where(eq(privateAssets.id, ref.id));
+    } else {
       await tx
         .update(publicAssets)
-        .set({ reviewStatus: "deleted", deletedAt: now, updatedAt: now })
+        .set(deletion)
         .where(eq(publicAssets.id, ref.id));
     }
 

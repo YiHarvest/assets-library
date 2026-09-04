@@ -98,4 +98,25 @@ describe("overview search routing", () => {
     expect(text).toContain(message);
     expect(text.replace(/\s+/g, "")).toContain("最高相关度61%");
   });
+
+  it("shows the pending review view for a private library", async () => {
+    apiMocks.serverApiV1.mockResolvedValue(emptyPage());
+    apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
+
+    const view = await OverviewPage({
+      searchParams: Promise.resolve({
+        scope: "private",
+        user_id: "user-7",
+        view: "pending",
+      }),
+    });
+
+    expect(requestedBody()).toMatchObject({
+      filter: {
+        user_scope: { mode: "user", user_id: "user-7" },
+        review_statuses: ["pending_review"],
+      },
+    });
+    expect(renderedText(view)).toContain("待入库");
+  });
 });

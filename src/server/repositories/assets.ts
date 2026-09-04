@@ -129,10 +129,7 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
   const taskId = input.id ?? crypto.randomUUID();
   const now = new Date();
   const userId = input.userId?.trim() || null;
-  const target: AssetRef =
-    input.type === "publish"
-      ? { kind: "public", id: input.assetId }
-      : assetRef(input.assetId, userId);
+  const target = assetRef(input.assetId, userId);
   const phase =
     input.type === "delete"
       ? "deleting"
@@ -143,20 +140,23 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           : "retrying";
   await db.transaction(async (tx) => {
     if (input.type === "publish") {
-      const [privateAsset] = await tx
-        .select({ id: privateAssets.id })
-        .from(privateAssets)
-        .where(eq(privateAssets.id, input.assetId))
-        .limit(1);
-      if (privateAsset) {
-        throw new AppError("invalid_request", "私人素材无需审核。", 409);
-      }
-      const [publicAsset] = await tx
-        .select({ id: publicAssets.id })
-        .from(publicAssets)
-        .where(eq(publicAssets.id, input.assetId))
-        .limit(1);
-      if (!publicAsset) {
+      const [asset] = target.kind === "private"
+        ? await tx
+            .select({ id: privateAssets.id })
+            .from(privateAssets)
+            .where(
+              and(
+                eq(privateAssets.id, input.assetId),
+                eq(privateAssets.userId, userId!),
+              ),
+            )
+            .limit(1)
+        : await tx
+            .select({ id: publicAssets.id })
+            .from(publicAssets)
+            .where(eq(publicAssets.id, input.assetId))
+            .limit(1);
+      if (!asset) {
         throw new AppError("invalid_request", "素材不存在。", 404);
       }
     }
@@ -1407,7 +1407,9 @@ export async function queryAssetsPage({
   const candidateSets = [exactTagIds, keywordMatches.assetIds].filter(
     (value): value is Set<string> => value !== undefined,
   );
+  //  候选的素材 ID 集合
   let candidateIds = intersectAssetIdSets(candidateSets);
+
   if (candidateIds && candidateIds.size === 0) {
     const mode = semanticQuery?.trim() ? "semantic" : "keyword";
     const threshold = semanticQuery?.trim()
@@ -2035,7 +2037,7 @@ async function lockedAsset(tx: AssetTransaction, ref: AssetRef) {
       .for("update")
       .limit(1);
     return row
-      ? { ...row, kind: "private" as const, uploaderUserId: null, reviewStatus: "published" as const }
+      ? { ...row, kind: "private" as const, uploaderUserId: null }
       : undefined;
   }
   const [row] = await tx
@@ -2064,16 +2066,7 @@ function updateAssetRow(
   }>,
 ) {
   if (ref.kind === "private") {
-    const privateValues = {
-      name: values.name,
-      description: values.description,
-      processingStatus: values.processingStatus,
-      failureCode: values.failureCode,
-      failureMessage: values.failureMessage,
-      deletedAt: values.deletedAt,
-      updatedAt: values.updatedAt,
-    };
-    return tx.update(privateAssets).set(privateValues).where(eq(privateAssets.id, ref.id));
+    return tx.update(privateAssets).set(values).where(eq(privateAssets.id, ref.id));
   }
   return tx.update(publicAssets).set(values).where(eq(publicAssets.id, ref.id));
 }
@@ -2180,9 +2173,6 @@ export async function updateAssetMetadata(
 
 export async function publishAsset(assetId: string, scope: AssetScope = {}) {
   const ref = await resolveAssetRef(assetId, scope);
-  if (ref.kind === "private") {
-    throw new AppError("invalid_request", "私人素材无需审核。", 409);
-  }
   await db.transaction(async (tx) => {
     const asset = await lockedAsset(tx, ref);
     if (

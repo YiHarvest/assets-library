@@ -170,7 +170,13 @@ async function activeAnalysisRefs(
       ? await tx
           .select({ id: privateAssets.id })
           .from(privateAssets)
-          .where(and(eq(privateAssets.id, ref.id), isNull(privateAssets.deletedAt)))
+          .where(
+            and(
+              eq(privateAssets.id, ref.id),
+              isNull(privateAssets.deletedAt),
+              ne(privateAssets.reviewStatus, "deleted"),
+            ),
+          )
           .for("update")
           .limit(1)
       : await tx

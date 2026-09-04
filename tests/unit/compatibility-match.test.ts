@@ -201,6 +201,39 @@ describe("compatibility segment matching", () => {
     });
   });
 
+  it("returns each matched candidate URL only once", async () => {
+    const segments = alignCompatibilitySegments(request()).slice(0, 2);
+    const matched = await matchCompatibilitySegments(
+      segments,
+      "https://focus.example.test",
+      {
+        search: async () => ({
+          items: [candidate()],
+          threshold: 0.55,
+          maxScore: 0.91,
+          reason: "matched",
+          message: null,
+        }),
+        getAsset: async () => ({
+          userId: "759",
+          reviewStatus: "published",
+        }),
+      },
+    );
+
+    expect(matched.map((segment) => segment.matched_candidate_url)).toEqual([
+      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=1&user_id=759",
+      null,
+    ]);
+    expect(matched[1]).toMatchObject({
+      matched_candidate_type: null,
+      matched_candidate_desc: null,
+      matched_candidate_score: 0.91,
+      matched_candidate_reason: "no_candidates",
+      matched_candidate_message: "匹配素材已被前面的分段使用，已去重。",
+    });
+  });
+
   it("returns explicit null candidate fields and below-threshold diagnostics", async () => {
     const segment = alignCompatibilitySegments(request())[0]!;
     const [unmatched] = await matchCompatibilitySegments(

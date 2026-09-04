@@ -269,7 +269,7 @@ export async function matchCompatibilitySegments(
   publicOrigin: string,
   dependencies: CompatibilityMatchDependencies = compatibilityMatchDependencies,
 ) {
-  return mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
+  const matched = await mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
     const search = await dependencies.search(
       { description: segment.text, keywords: [], limit: 1 },
       { includeAllUsers: true },
@@ -299,6 +299,20 @@ export async function matchCompatibilitySegments(
       matched_candidate_reason: null,
       matched_candidate_message: null,
     } satisfies MatchedCompatibilitySegment;
+  });
+  // 对匹配到的相同的素材进行去重
+  const usedUrls = new Set<string>();
+  return matched.map((segment) => {
+    const url = segment.matched_candidate_url;
+    if (!url || !usedUrls.has(url)) {
+      if (url) usedUrls.add(url);
+      return segment;
+    }
+    return unmatchedSegment(segment, {
+      maxScore: segment.matched_candidate_score,
+      reason: "no_candidates",
+      message: "匹配素材已被前面的分段使用，已去重。",
+    });
   });
 }
 

@@ -24,6 +24,8 @@ import {
 const callbackPayloadKey = "compatibilityCallback";
 const maximumConcurrentMatches = 4;
 const maximumMatchAttempts = 3;
+const compatibilityMediaPathPattern =
+  /\/api\/v1\/media\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
 const knownRequestFields = new Set([
   "asr",
   "asset_url_list",
@@ -209,6 +211,16 @@ function withUserScope(mediaUrl: string, userId: string | null) {
   return `${mediaUrl}${separator}user_id=${encodeURIComponent(userId)}`;
 }
 
+function compatibilityCandidateAssetIds(
+  assetUrls: CompatibilityMatchRequest["asset_url_list"],
+) {
+  return [...new Set(assetUrls.flatMap((entry) => {
+    const rawUrl = typeof entry === "string" ? entry : entry.file_url;
+    const match = new URL(rawUrl).pathname.match(compatibilityMediaPathPattern);
+    return match?.[1] ? [match[1].toLowerCase()] : [];
+  }))];
+}
+
 async function mapConcurrent<T, R>(
   values: readonly T[],
   concurrency: number,
@@ -267,15 +279,41 @@ function unmatchedSegment(
 export async function matchCompatibilitySegments(
   segments: AlignedCompatibilitySegment[],
   publicOrigin: string,
+  assetUrls: CompatibilityMatchRequest["asset_url_list"] = [],
   dependencies: CompatibilityMatchDependencies = compatibilityMatchDependencies,
 ) {
+  const restrictCandidates = assetUrls.length > 0;
+  const candidateAssetIds = restrictCandidates
+    ? compatibilityCandidateAssetIds(assetUrls)
+    : undefined;
+  if (restrictCandidates && candidateAssetIds?.length === 0) {
+    return segments.map((segment) => unmatchedSegment(segment, {
+      maxScore: null,
+      reason: "no_candidates",
+      message: "asset_url_list 中没有可识别的素材库 URL。",
+    }));
+  }
+  const allowedAssetIds = candidateAssetIds
+    ? new Set(candidateAssetIds)
+    : undefined;
   const matched = await mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
-    const search = await dependencies.search(
-      { description: segment.text, keywords: [], limit: 1 },
-      { includeAllUsers: true },
-    );
+    const searchInput = { description: segment.text, keywords: [], limit: 1 };
+    const search = candidateAssetIds
+      ? await dependencies.search(
+          searchInput,
+          { includeAllUsers: true },
+          { candidateAssetIds },
+        )
+      : await dependencies.search(searchInput, { includeAllUsers: true });
     const [candidate] = search.items;
     if (!candidate) return unmatchedSegment(segment, search);
+    if (allowedAssetIds && !allowedAssetIds.has(candidate.id.toLowerCase())) {
+      return unmatchedSegment(segment, {
+        maxScore: search.maxScore,
+        reason: "no_candidates",
+        message: "匹配结果不在 asset_url_list 指定的素材范围内。",
+      });
+    }
     const record = await dependencies.getAsset(candidate.id);
     const rawCandidateScore =
       candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
@@ -480,9 +518,11 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
 
   try {
     const aligned = alignCompatibilitySegments(payload.request);
+    // 素材匹配
     const matched = await matchCompatibilitySegments(
       aligned,
       payload.publicOrigin,
+      payload.request.asset_url_list,
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);
     await completeJob(job);

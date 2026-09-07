@@ -424,7 +424,10 @@ curl -X PUT \
 `matched_candidate_*` 字段。命中时 URL、类型、描述和 `[0,1]` 分数有值，
 `reason` / `message` 为 `null`；未命中时前三项为 `null`，若存在低分候选则
 `score` 返回阈值过滤前最高分，并通过 `reason` / `message` 说明原因。个人素材 URL
-会自动附加 `user_id`。当前 `asset_url_list` 仅作为旧契约兼容字段接收，不限制候选范围。
+会自动附加 `user_id`。`asset_url_list` 为空时保持旧行为，从所有已发布的公共及
+个人素材中召回；非空时只从其中可解析为 `/api/v1/media/{asset_id}` 的素材库 URL
+对应素材中召回。非空列表不包含可识别的素材库 URL 时返回未匹配结果，不会回退
+到全库。
 
 成功后系统向 `callback_url` 发送：
 

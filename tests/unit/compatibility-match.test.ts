@@ -177,6 +177,7 @@ describe("compatibility segment matching", () => {
     const [matched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
+      [],
       {
         search,
         getAsset: async () => ({
@@ -206,6 +207,7 @@ describe("compatibility segment matching", () => {
     const matched = await matchCompatibilitySegments(
       segments,
       "https://focus.example.test",
+      [],
       {
         search: async () => ({
           items: [candidate()],
@@ -239,6 +241,7 @@ describe("compatibility segment matching", () => {
     const [unmatched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
+      [],
       {
         search: async () => ({
           items: [],
@@ -267,6 +270,7 @@ describe("compatibility segment matching", () => {
     const [unmatched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
+      [],
       {
         search: async () => ({
           items: [],
@@ -286,6 +290,68 @@ describe("compatibility segment matching", () => {
       matched_candidate_score: null,
       matched_candidate_reason: "semantic_unavailable",
       matched_candidate_message: "语义搜索暂不可用，请稍后重试。",
+    });
+  });
+
+  it("restricts semantic matching to asset_url_list when it is non-empty", async () => {
+    const segment = alignCompatibilitySegments(request())[0]!;
+    const search = vi.fn(async () => ({
+      items: [candidate()],
+      threshold: 0.55,
+      maxScore: 0.91,
+      reason: "matched" as const,
+      message: null,
+    }));
+    const selectedUrl =
+      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=2&user_id=759";
+
+    const [matched] = await matchCompatibilitySegments(
+      [segment],
+      "https://focus.example.test",
+      [
+        selectedUrl,
+        { file_url: selectedUrl, type: "video" },
+      ],
+      {
+        search,
+        getAsset: async () => ({
+          userId: "759",
+          reviewStatus: "published",
+        }),
+      },
+    );
+
+    expect(search).toHaveBeenCalledWith(
+      { description: segment.text, keywords: [], limit: 1 },
+      { includeAllUsers: true },
+      {
+        candidateAssetIds: ["00000000-0000-4000-8000-000000000001"],
+      },
+    );
+    expect(matched.matched_candidate_url).toContain(
+      "/api/v1/media/00000000-0000-4000-8000-000000000001",
+    );
+  });
+
+  it("does not fall back to the full library for non-library asset URLs", async () => {
+    const segment = alignCompatibilitySegments(request())[0]!;
+    const search = vi.fn();
+
+    const [unmatched] = await matchCompatibilitySegments(
+      [segment],
+      "https://focus.example.test",
+      ["https://media.example.test/source.mp4"],
+      {
+        search,
+        getAsset: async () => null,
+      },
+    );
+
+    expect(search).not.toHaveBeenCalled();
+    expect(unmatched).toMatchObject({
+      matched_candidate_url: null,
+      matched_candidate_reason: "no_candidates",
+      matched_candidate_message: "asset_url_list 中没有可识别的素材库 URL。",
     });
   });
 

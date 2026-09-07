@@ -124,9 +124,15 @@ export function clampRelevanceScore(value: number) {
 /** NFKC keeps full-width input and Latin aliases comparable without changing semantics. */
 export function normalizeSearchText(value: string) {
   return value
+// 统一 Unicode 兼容字符：
+// - ， 变成 ,
+// - ？ 变成 ?
+// - 全角英文和数字也会转成普通半角字符
     .normalize("NFKC")
     .toLowerCase()
+    // 移除首尾空格
     .trim()
+    // 替换多个空格为单个空格
     .replace(/\s+/g, " ");
 }
 
@@ -520,6 +526,14 @@ const semanticSentencePattern =
  * embeddings. Space-separated label lists deliberately remain keyword queries.
  */
 export function detectSearchInputMode(query: string): SearchInputMode {
+  /*
+  * 包含“帮我、我想、适合、一个人在……”等句式 → query
+  * 英文自然语句 → query
+  * 不含空格的中文达到约 12 个字符 → query
+  * 分词后达到 5 个以上词 → query
+  * 空格分隔的标签组合，例如 海边 小船 夕阳 → keywords
+  * 其他短文本，如 AI、城市夜景航拍 → keywords
+  */
   const normalized = normalizeSearchText(query);
   if (!normalized) return "keyword";
   if (semanticSentencePattern.test(normalized)) return "semantic";

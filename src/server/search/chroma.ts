@@ -58,9 +58,13 @@ async function embed(texts: string[]) {
       "content-type": "application/json",
       ...(config.embeddingApiKey ? { authorization: `Bearer ${config.embeddingApiKey}` } : {}),
     },
+    // texts: '天天听人说 天天 天听 听人 人说 ai 大模型 大模 模型 智能体 智能 能体 你是不是一个都没搞懂 你是 是不 不是 是一 一个 个都 都没 没搞 搞懂 又不好意思问 又不 不好 好意 意思 思问 今天十秒钟 今天 天十 十秒 秒钟 用大白话把 用大 大白 白话 话把 ai最常用的五个概念讲清楚 第一 ai 就是让计算机完成识别 就是 是让 让计 计算 算机 机完 完成 成识 识别 判断 生成这类原本需要人来做的事情 生成 成这 这类 类原 原本 本需 需要 要人 人来 来做 做的 的事 事情 第二 大模型 大模 模型 可以理解成经过大量资料训练的通用引擎 可以 以理 理解 解成 成经 经过 过大 大量 量资 资料 料训 训练 练的 的通 通用 用引 引擎 能根据你的 能根 根据 据你 你的'
     body: JSON.stringify({ model: config.EMBEDDING_MODEL, input: texts }),
   });
-  if (!response.ok) throw new Error(`Embedding 服务返回 HTTP ${response.status}。`);
+
+  if (!response.ok) {
+    throw new Error(`Embedding 服务返回 HTTP ${response.status}。`);
+  }
   const payload = (await response.json()) as { data?: Array<{ embedding?: number[] }> };
   const vectors = payload.data?.map((item) => item.embedding);
   if (!vectors || vectors.length !== texts.length || vectors.some((item) => !item?.length)) {
@@ -68,13 +72,50 @@ async function embed(texts: string[]) {
   }
   return vectors as number[][];
 }
-
+// 语义检索进行分词
 function tokenize(text: string) {
+  // 删除首尾空格，将中间连续的多个空格替换为单个空格
   const compact = text.trim().replace(/\s+/g, " ");
+  // 匹配连续两个的中文或者字母、Unicode字母、数字、下划线、短横线的连续序列
+  /*
+  天天听人说AI、大模型、智能体，你是不是一个都没搞懂，又不好意思问？
+今天十秒钟，用大白话把AI最常用的五个概念讲清楚？
+第一，AI，就是让计算机完成识别、判断、生成这类原本需要人来做的事情。
+第二，大模型，可以理解成经过大量资料训练的通用引擎，能根据你的问题组织答案。
+第三，提示词，就是你交给AI的任务说明，条件越清楚，结果通常越贴近需求。
+第四，智能体，不只会回答，还能围绕目标安排步骤，连续完成任务。
+第五，工作流，就是把多个环节按顺序连起来，让前一步的结果接着推动下一步。
+这五个概念分开看很抽象，放进流程里就清楚了。建议先收藏，之后遇到相关内容，回来对照着看。
+*/
+  /* [
+  "天天听人说",
+  "ai",
+  "大模型",
+  "智能体",
+  "你是不是一个都没搞懂",
+  "又不好意思问",
+  "今天十秒钟",
+  "用大白话把",
+  "ai最常用的五个概念讲清楚",
+  "第一",
+  "ai",
+  "就是让计算机完成识别",
+  "判断",
+  "生成这类原本需要人来做的事情",
+  "第二",
+  "大模型",
+  "可以理解成经过大量资料训练的通用引擎",
+  "能根据你的",
+]
+  */
   const terms = compact.match(/[\p{Script=Han}]{2,}|[\p{L}\p{N}_-]+/gu) ?? [];
+/*
+天天听人说 天天 天听 听人 人说 ai 大模型 大模 模型 智能体 智能 能体 你是不是一个都没搞懂 你是 是不 不是 是一 一个 个都 都没 没搞 搞懂 又不好意思问 又不 不好 好意 意思 思问 今天十秒钟 今天 天十 十秒 秒钟 用大白话把 用大 大白 白话 话把 ai最常用的五个概念讲清楚 第一 ai 就是让计算机完成识别 就是 是让 让计 计算 算机 机完 完成 成识 识别 判断 生成这类原本需要人来做的事情 生成 成这 这类 类原 原本 本需 需要 要人 人来 来做 做的 的事 事情 第二 大模型 大模 模型 可以理解成经过大量资料训练的通用引擎 可以 以理 理解 解成 成经 经过 过大 大量 量资 资料 料训 训练 练的 的通 通用 用引 引擎 能根据你的 能根 根据 据你 你的
+*/
   return terms.flatMap((term) => {
     const characters = Array.from(term);
     if (!/^[\p{Script=Han}]+$/u.test(term) || characters.length < 3) return [term];
+    // 对三个内容生成二元组
     return [term, ...characters.slice(0, -1).map((_, index) => characters.slice(index, index + 2).join(""))];
   }).join(" ");
 }
@@ -140,9 +181,11 @@ export async function searchAnalysis(
 ) {
   if (!semanticSearchEnabled()) return new Map<string, number>();
   if (assetIds && assetIds.length === 0) return new Map<string, number>();
+  // query 向量化,一个向量
   const vectors = await embed([tokenize(query)]);
   if (!vectors.length) return new Map<string, number>();
   const target = await collection();
+  // 语义搜索，分数最高的前 limit 个素材
   const result = await chromaRequest<{
     distances?: Array<Array<number | null>>;
     metadatas?: Array<Array<{ assetId?: string } | null>>;
@@ -161,13 +204,16 @@ export async function searchAnalysis(
       Math.max(0, options.minimumSimilarity ?? semanticSimilarityThreshold),
     );
   const allowedAssetIds = assetIds ? new Set(assetIds) : null;
+  // 素材id-> 相似度得分
   const scores = new Map<string, number>();
+
   for (const [index, metadata] of (result.metadatas?.[0] ?? []).entries()) {
     const assetId = metadata?.assetId;
     const distance = result.distances?.[0]?.[index];
     if (!assetId || distance === null || distance === undefined) continue;
     // 即使向量库错误地忽略了 where，也不能让范围外素材进入上层召回。
     if (allowedAssetIds && !allowedAssetIds.has(assetId)) continue;
+    // 1/(1 + distance) 作为相似度得分，越大越好
     const similarity = Math.max(0, Math.min(1, 1 / (1 + distance)));
     if (similarity <= minimumSimilarity) continue;
     scores.set(

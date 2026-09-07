@@ -1280,12 +1280,22 @@ async function assetIdsMatchingKeywords(
   keywords: string[],
   baseConditions: readonly SQL[] = [],
 ): Promise<KeywordMatches> {
+  /*
+  根据baseConditions 来初步筛选素材，
+  */
+  // 对关键字进行分词和去重
   const tokens = [
     ...new Set(keywords.flatMap((keyword) => tokenizeKeywordQuery(keyword))),
   ];
   if (!tokens.length) {
     return { assetIds: undefined, scores: undefined };
   }
+  // 从数据库读取候选的素材标签
+  /*
+  - assetId：标签所属的素材 ID；
+  - category：标签类别，如场景、风格、对象等；
+  - normalizedValue：标准化后的标签值，用于匹配。
+  */
   const tagRows = await db
     .select({
       assetId: assetTags.assetId,
@@ -1299,6 +1309,7 @@ async function assetIdsMatchingKeywords(
     // exact 命中不能阻止当前作用域中的错别字候选被召回。
     .where(and(...baseConditions));
 
+    // 素材id -> 标签列表,当前素材收集的标签
   const tagsByAsset = new Map<string, SearchableTag[]>();
   for (const row of tagRows) {
     const current = tagsByAsset.get(row.assetId) ?? [];
@@ -1308,9 +1319,19 @@ async function assetIdsMatchingKeywords(
 
   const scoringQuery = keywords.length === 1 ? keywords[0]! : tokens;
   const scoreAll = (allowTypo: boolean) => {
+    // 素材id -> 匹配分数
     const scores = new Map<string, RankedAssetMatch>();
     for (const [assetId, assetTagsForSearch] of tagsByAsset) {
+      // 计算当前素材与关键词的相关性。
+      /*
+      完全匹配 exact	1.00
+      业务别名 alias	0.95
+      前缀匹配 prefix	0.85
+      包含匹配 contains	0.72
+      错别字匹配 typo	0.55
+      */
       const relevance = scoreKeywordRelevance(scoringQuery, assetTagsForSearch, {
+        // 控制是否允许错别字匹配
         allowTypo,
       });
       if (relevance.score > 0) {
@@ -1321,12 +1342,14 @@ async function assetIdsMatchingKeywords(
   };
 
   const strongScores = scoreAll(false);
+  // 强关键词匹配
   const strongMatches = qualifiedMatches(
     strongScores,
     DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
   );
   const queryText = keywords.join(" ");
   const shared = {
+    // 是不是 ["ai", "aigc", "人工智能", "生成式人工智能", "智能科技"]中的一个
     broadQuery: isBroadAiQuery(tokens),
     semanticText: isBroadAiQuery(tokens)
       ? DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
@@ -1388,34 +1411,45 @@ export async function queryAssetsPage({
   ...scope
 }: QueryAssetsOptions = {}): Promise<AssetQueryPage> {
   const safeLimit = Math.min(Math.max(limit, 1), 100);
+  // 分页,第几页
   const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
+  // 是否删除
   const conditions: SQL[] = [isNull(assets.deletedAt)];
+  // 素材归属条件：公开素材/私有素材/排除某用户素材
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
+  // 检索的素材的媒体类型
   if (mediaTypes.length) conditions.push(inArray(assets.mediaType, mediaTypes));
   const processing = processingCondition(processingStatuses);
   if (processing) conditions.push(processing);
+  // 筛选指定状态的素材: published、deleted、pending_review
   if (reviewStatuses.length) {
     conditions.push(inArray(assets.reviewStatus, reviewStatuses));
   }
   // 关键词精确匹配和标签
+  // initialKeywordMatches 初始关键词匹配结果
+  // exactTagIds 选中的素材id
   const [exactTagIds, initialKeywordMatches] = await Promise.all([
+    // 筛选指定标签的素材
     assetIdsMatchingExactTags(exactTags),
+    //  关键字匹配
     assetIdsMatchingKeywords(keywords, conditions),
   ]);
   let keywordMatches = initialKeywordMatches;
   const candidateSets = [exactTagIds, keywordMatches.assetIds].filter(
     (value): value is Set<string> => value !== undefined,
   );
-  //  候选的素材 ID 集合
+  //  候选的素材集合
   let candidateIds = intersectAssetIdSets(candidateSets);
-
+  // 如果没有候选素材：用户没有勾选素材 and 关键字也没匹配到
   if (candidateIds && candidateIds.size === 0) {
     const mode = semanticQuery?.trim() ? "semantic" : "keyword";
+    // 语义检索/关键字检索的阈值
     const threshold = semanticQuery?.trim()
       ? DEFAULT_RELEVANCE_THRESHOLDS.semantic
       : (keywordMatches.threshold ??
         DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword);
+        // 返回空结果
     return emptyAssetQueryPage(
       safeLimit,
       includeTagStatistics,
@@ -1429,7 +1463,6 @@ export async function queryAssetsPage({
       ),
     );
   }
-
   let keywordSearchMeta = keywordMatches.threshold
     ? searchMetadata(
         "keyword",
@@ -1467,6 +1500,7 @@ export async function queryAssetsPage({
     let semanticScores: Map<string, number> | undefined;
     if (semanticSearchEnabled()) {
       try {
+        // {素材ID:语义相似度得分}
         semanticScores = await searchAnalysis(
           keywordMatches.semanticText ?? keywords.join(" "),
           Math.min(800, Math.max(safeLimit * 8, eligibleIds.length * 5)),
@@ -1589,7 +1623,7 @@ export async function queryAssetsPage({
 
   if (candidateIds) conditions.push(inArray(assets.id, [...candidateIds]));
   const where = conditions.length ? and(...conditions) : undefined;
-
+  // 语义召回
   if (semanticQuery?.trim()) {
     const semanticThreshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
     if (!semanticSearchEnabled()) {
@@ -1610,6 +1644,7 @@ export async function queryAssetsPage({
       .where(where)
       .orderBy(desc(assets.createdAt), desc(assets.id));
     const filteredIds = rows.map((row) => row.id);
+    // 为空
     if (!filteredIds.length) {
       return emptyAssetQueryPage(
         safeLimit,
@@ -1625,6 +1660,7 @@ export async function queryAssetsPage({
     let semanticScores: Map<string, number>;
     try {
       semanticScores = await searchAnalysis(
+        // 对query进行切分
         normalizeSemanticText(semanticQuery),
         // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
         Math.max(safeLimit * 8, safeLimit),
@@ -1645,6 +1681,7 @@ export async function queryAssetsPage({
     }
     const rawScores = [...semanticScores.values()];
     const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+    // 筛选分数大于semanticThreshold的素材
     const qualifiedScores = new Map(
       [...semanticScores].filter(([, score]) => score > semanticThreshold),
     );
@@ -1660,6 +1697,7 @@ export async function queryAssetsPage({
         ),
       );
     }
+    // 按分数排序
     const rankedIds = [...qualifiedScores.entries()]
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, safeLimit)
@@ -1837,7 +1875,12 @@ export async function listAssets({
 async function publishedAssetIdsMatchingKeywords(
   keywords: string[],
   scope: AssetScope,
+  candidateAssetIds?: readonly string[],
 ) {
+  const constrainedIds = candidateAssetIds === undefined
+    ? undefined
+    : [...new Set(candidateAssetIds)];
+  if (constrainedIds?.length === 0) return [];
   const ownership = scopeCondition(scope);
   if (!keywords.length) {
     const conditions: SQL[] = [
@@ -1845,6 +1888,7 @@ async function publishedAssetIdsMatchingKeywords(
       isNull(assets.deletedAt),
     ];
     if (ownership) conditions.push(ownership);
+    if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
     return (
       await db
         .select({ id: assets.id })
@@ -1861,6 +1905,7 @@ async function publishedAssetIdsMatchingKeywords(
     inArray(assets.id, matchedAssetIds),
   ];
   if (ownership) conditions.push(ownership);
+  if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
   return (
     await db
       .select({ id: assets.id })
@@ -1877,10 +1922,17 @@ export interface DescriptionSearchResult {
   message: string | null;
 }
 
+export interface DescriptionSearchOptions {
+  /** When present, semantic recall is restricted to this explicit asset set. */
+  candidateAssetIds?: readonly string[];
+}
+
 export async function searchAssetsByDescriptionDetailed(
   { description, keywords = [], limit }: DescriptionSearch,
   scope: AssetScope = {},
+  options: DescriptionSearchOptions = {},
 ): Promise<DescriptionSearchResult> {
+  // 语义搜索
   const threshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
   const result = (
     items: AssetSummary[],
@@ -1903,6 +1955,7 @@ export async function searchAssetsByDescriptionDetailed(
   const candidateIds = await publishedAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
+    options.candidateAssetIds,
   );
   if (!candidateIds.length) return result([], null, "no_candidates");
   if (!semanticSearchEnabled()) {

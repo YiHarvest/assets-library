@@ -211,7 +211,7 @@ describe("compatibility segment matching", () => {
     ]);
   });
 
-  it("returns an absolute matched asset URL with its normalized score", async () => {
+  it.each(["published", "pending_review", "deleted"])("checks %s before returning a matched asset URL", async (reviewStatus) => {
     const segment = alignCompatibilitySegments(request())[0]!;
     const search = vi.fn(async () => ({
       items: [candidate()],
@@ -229,7 +229,7 @@ describe("compatibility segment matching", () => {
         search,
         getAsset: async () => ({
           userId: "759",
-          reviewStatus: "published",
+          reviewStatus,
         }),
       },
     );
@@ -242,6 +242,13 @@ describe("compatibility segment matching", () => {
         isRandom: false,
       },
     );
+    if (reviewStatus === "deleted") {
+      expect(matched).toMatchObject({
+        matched_candidate_url: null,
+        matched_candidate_reason: "no_candidates",
+      });
+      return;
+    }
     expect(matched).toMatchObject({
       matched_candidate_url:
         "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=1&user_id=759",

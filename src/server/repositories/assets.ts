@@ -1885,7 +1885,7 @@ export async function listAssets({
   };
 }
 
-async function publishedAssetIdsMatchingKeywords(
+async function searchableAssetIdsMatchingKeywords(
   keywords: string[],
   scope: AssetScope,
   candidateAssetIds?: readonly string[],
@@ -1895,10 +1895,10 @@ async function publishedAssetIdsMatchingKeywords(
     : [...new Set(candidateAssetIds)];
   if (constrainedIds?.length === 0) return [];
   const ownership = scopeCondition(scope);
-  // keywords=[] 时，返回所有勾选的已发布素材
+  // keywords=[] 时，返回所有勾选的待审核或已发布素材
   if (!keywords.length) {
     const conditions: SQL[] = [
-      eq(assets.reviewStatus, "published"),
+      inArray(assets.reviewStatus, ["pending_review", "published"]),
       isNull(assets.deletedAt),
     ];
     if (ownership) conditions.push(ownership);
@@ -1915,7 +1915,7 @@ async function publishedAssetIdsMatchingKeywords(
   const matchedAssetIds = [...(keywordMatches.assetIds ?? [])];
   if (!matchedAssetIds.length) return [];
   const conditions: SQL[] = [
-    eq(assets.reviewStatus, "published"),
+    inArray(assets.reviewStatus, ["pending_review", "published"]),
     isNull(assets.deletedAt),
     inArray(assets.id, matchedAssetIds),
   ];
@@ -1986,7 +1986,7 @@ export async function searchAssetsByDescriptionDetailed(
     ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
   ];
   // 根据scope和candidateAssetIds过滤出候选素材id
-  const candidateIds = await publishedAssetIdsMatchingKeywords(
+  const candidateIds = await searchableAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
     options.candidateAssetIds,
@@ -2009,7 +2009,7 @@ export async function searchAssetsByDescriptionDetailed(
   }
   const rawScores = [...scores.values()];
   const maxScore = rawScores.length ? Math.max(...rawScores) : null;
-  // 筛选大于阈值0.55的素材
+  // 筛选大于阈值的素材
   const qualifiedScores = new Map(
     [...scores].filter(([, score]) => score > threshold),
   );
@@ -2031,7 +2031,7 @@ export async function searchAssetsByDescriptionDetailed(
     .from(assets)
     .where(
       and(
-        eq(assets.reviewStatus, "published"),
+        inArray(assets.reviewStatus, ["pending_review", "published"]),
         isNull(assets.deletedAt),
         inArray(assets.id, rankedIds),
       ),

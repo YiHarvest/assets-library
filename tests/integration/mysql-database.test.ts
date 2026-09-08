@@ -2169,7 +2169,7 @@ mysqlTest("MySQL 数据层", () => {
     expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
   }, 30_000);
 
-  test("兼容匹配任务持久化、复用语义召回并投递 camelCase 回调", async () => {
+  test.each(["published", "pending_review"] as const)("兼容匹配 %s 素材、持久化任务并投递 camelCase 回调", async (reviewStatus) => {
     const assetId = crypto.randomUUID();
     await repository.createAsset({
       assetId,
@@ -2193,7 +2193,7 @@ mysqlTest("MySQL 数据层", () => {
     );
     await migrationConnection.db
       .update(privateAssets)
-      .set({ processingStatus: "completed" })
+      .set({ processingStatus: "completed", reviewStatus })
       .where(eq(privateAssets.id, assetId));
     searchAnalysisMock.mockResolvedValue(new Map([[assetId, 0.91]]));
 

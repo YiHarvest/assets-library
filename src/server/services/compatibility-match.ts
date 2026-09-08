@@ -339,7 +339,7 @@ export async function matchCompatibilitySegments(
     const rawCandidateScore =
       candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
     const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
-    if (!record || record.reviewStatus !== "published") {
+    if (!record || !["pending_review", "published"].includes(record.reviewStatus)) {
       return unmatchedSegment(segment, {
         maxScore: candidateScore,
         reason: "no_candidates",

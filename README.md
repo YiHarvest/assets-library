@@ -263,6 +263,11 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 完整的客户端配置、工具参数、数据隔离和排障方法见 [docs/mcp.md](docs/mcp.md)。通过
 `./scripts/start.sh` 启动后，MCP 请求、来源拉取、上传进度和 worker 耗时会以同一个
 `request_id` 写入 `.run/app.log`，便于定位连接中断、字节数不一致和排队延迟。
+API（含管理、登录和退出接口）与 MCP 的请求日志包含路径、`query` 实际值、`input`
+入参，以及完成/失败时的 `output` 出参、状态码和耗时；可按 `request_id` 串联。
+JSON 与 MCP SSE 返回内容随响应流记录，不预读媒体流；二进制仅记录类型和字节数。
+密钥、Cookie、token 和 URL 签名会脱敏；响应体最多采集 64 KiB，字符串最多 512 字符、
+数组最多 50 项、嵌套最多 12 层；超大响应体或无法解析的内容会标注省略原因。
 
 ## API
 

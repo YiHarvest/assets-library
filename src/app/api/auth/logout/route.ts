@@ -1,3 +1,4 @@
+import { withApiV1 } from "@/server/api/handler";
 import { NextResponse } from "next/server";
 import {
   legacyWebUiCookieDeletion,
@@ -8,7 +9,7 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export function POST(request: Request) {
+function logout(request: Request) {
   const lockUrl = new URL(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/lock`, request.url);
   const response = NextResponse.redirect(lockUrl, 303);
   response.cookies.set(WEBUI_LOCK_COOKIE_NAME, "", {
@@ -23,4 +24,8 @@ export function POST(request: Request) {
   if (legacyCookie) response.headers.append("set-cookie", legacyCookie);
   response.headers.set("cache-control", "no-store");
   return response;
+}
+
+export function POST(request: Request) {
+  return withApiV1(request, () => logout(request));
 }

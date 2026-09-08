@@ -6,11 +6,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const authorizationFailure = await ensureWebUiApiAuthorized(request);
-  if (authorizationFailure) return authorizationFailure;
+  return withApiV1(request, async () => {
+    const authorizationFailure = await ensureWebUiApiAuthorized(request);
+    if (authorizationFailure) return authorizationFailure;
 
-  return withApiV1(request, async () =>
-    Response.json(
+    return Response.json(
       { items: await getApiV1Service().listUsers() },
       {
         headers: {
@@ -18,6 +18,6 @@ export async function GET(request: Request) {
           vary: "authorization, cookie",
         },
       },
-    ),
-  );
+    );
+  });
 }

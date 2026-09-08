@@ -104,9 +104,9 @@ describe("OpenAPI and unlock authorization", () => {
     expect((await request(key, "rate-limit-agent-b")).status).toBe(303);
   });
 
-  it("clears the root-scoped session on logout", () => {
+  it("clears the root-scoped session on logout", async () => {
     enableLock();
-    const response = logout(
+    const response = await logout(
       new Request("https://media.example.com/feisu/assets-library/api/auth/logout", {
         method: "POST",
       }),

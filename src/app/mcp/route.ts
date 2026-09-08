@@ -7,9 +7,11 @@ import { registerTools } from "@/server/mcp/tools";
 import { mcpUserContext } from "@/server/mcp/user-context";
 import {
   auditLog,
+  currentAuditFields,
   elapsedMilliseconds,
   errorAuditFields,
   requestAuditFields,
+  responseBodyAudit,
   runWithAuditContext,
 } from "@/server/observability/audit-log";
 
@@ -109,6 +111,7 @@ async function mcpRequestDescriptor(request: Request) {
       params?: { name?: unknown };
     };
     return {
+      input: payload,
       rpc_method:
         typeof payload.method === "string" ? payload.method : "unknown",
       rpc_id:
@@ -153,6 +156,7 @@ async function routeMcpRequest(request: Request) {
       const denied = authorize(request, config);
       if (denied) {
         auditLog("mcp_request_rejected", {
+          output: await denied.clone().text(),
           http_status: denied.status,
           duration_ms: elapsedMilliseconds(started),
           rejection: denied.status === 401 ? "unauthorized" : "not_configured",
@@ -162,6 +166,7 @@ async function routeMcpRequest(request: Request) {
       const userId = resolveRequestUserId(request, config);
       if (userId instanceof Response) {
         auditLog("mcp_request_rejected", {
+          output: await userId.clone().text(),
           http_status: userId.status,
           duration_ms: elapsedMilliseconds(started),
           rejection: "user_id_not_allowed",
@@ -175,6 +180,8 @@ async function routeMcpRequest(request: Request) {
           handleMcpRequest(request),
         );
         const headers = new Headers(response.headers);
+        const output = responseBodyAudit(response);
+        Object.assign(context.fields, currentAuditFields());
         headers.set("x-request-id", requestId);
         auditLog("mcp_response_opened", {
           user_id: userId || null,
@@ -187,6 +194,7 @@ async function routeMcpRequest(request: Request) {
             http_status: response.status,
             duration_ms: elapsedMilliseconds(started),
             response_streamed: false,
+            ...output.fields(),
           });
           return new Response(null, {
             status: response.status,
@@ -212,6 +220,7 @@ async function routeMcpRequest(request: Request) {
                 http_status: response.status,
                 duration_ms: elapsedMilliseconds(started),
                 response_streamed: true,
+                ...output.fields(),
                 ...fields,
               },
               level,
@@ -227,6 +236,7 @@ async function routeMcpRequest(request: Request) {
                 controller.close();
                 return;
               }
+              output.write(chunk.value);
               controller.enqueue(chunk.value);
             } catch (error) {
               logFinal("mcp_request_failed", errorAuditFields(error), "error");

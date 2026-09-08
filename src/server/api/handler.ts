@@ -12,9 +12,11 @@ import { userIdSchema } from "@/shared/contracts";
 import {
   addAuditFields,
   auditLog,
+  currentAuditFields,
   elapsedMilliseconds,
   errorAuditFields,
   requestAuditFields,
+  responseBodyAudit,
   runWithAuditContext,
 } from "@/server/observability/audit-log";
 
@@ -208,6 +210,8 @@ export async function withApiV1(
       try {
         authorize(request);
         const response = await handler();
+        const output = responseBodyAudit(response);
+        Object.assign(context.fields, currentAuditFields());
         const headers = new Headers(response.headers);
         headers.set("x-request-id", id);
         const location = headers.get("location");
@@ -221,6 +225,7 @@ export async function withApiV1(
             http_status: response.status,
             duration_ms: elapsedMilliseconds(started),
             response_streamed: false,
+            ...output.fields(),
             location,
           });
           return new Response(null, {
@@ -249,6 +254,7 @@ export async function withApiV1(
                 http_status: response.status,
                 duration_ms: elapsedMilliseconds(started),
                 response_streamed: true,
+                ...output.fields(),
                 location,
                 ...fields,
               },
@@ -265,6 +271,7 @@ export async function withApiV1(
                 controller.close();
                 return;
               }
+              output.write(chunk.value);
               controller.enqueue(chunk.value);
             } catch (error) {
               logFinal(
@@ -296,6 +303,7 @@ export async function withApiV1(
           {
             http_status: response.status,
             duration_ms: elapsedMilliseconds(started),
+            output: await response.clone().json(),
             ...errorAuditFields(error),
           },
           response.status >= 500 ? "error" : "warn",
@@ -328,10 +336,11 @@ export async function parseJson<T>(request: Request, schema: ZodType<T>) {
     value = JSON.parse(text);
   } catch (error) {
     if (error instanceof ApiV1Error) throw error;
+    addAuditFields({ input: { omitted: "invalid_json" } });
     throw new ApiV1Error("invalid_request", "请求体必须是有效的 JSON。", 400);
   }
+  addParsedInputAuditFields(value);
   const parsed = schema.parse(value);
-  addParsedInputAuditFields(parsed);
   return parsed;
 }
 
@@ -354,11 +363,13 @@ export async function parseOptionalJson<T>(
     );
   }
   try {
-    const parsed = schema.parse(JSON.parse(text));
-    addParsedInputAuditFields(parsed);
+    const value: unknown = JSON.parse(text);
+    addParsedInputAuditFields(value);
+    const parsed = schema.parse(value);
     return parsed;
   } catch (error) {
     if (error instanceof ZodError) throw error;
+    addAuditFields({ input: { omitted: "invalid_json" } });
     throw new ApiV1Error("invalid_request", "请求体必须是有效的 JSON。", 400);
   }
 }

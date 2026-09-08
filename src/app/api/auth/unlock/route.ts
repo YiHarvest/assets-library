@@ -1,3 +1,5 @@
+import { addAuditFields } from "@/server/observability/audit-log";
+import { withApiV1 } from "@/server/api/handler";
 import { NextResponse } from "next/server";
 import {
   createWebUiSession,
@@ -19,7 +21,7 @@ const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW_MS = 5 * 60 * 1_000;
 const rateLimiter = createInMemoryRateLimiter(MAX_ATTEMPTS, ATTEMPT_WINDOW_MS);
 
-export async function POST(request: Request) {
+async function unlock(request: Request) {
   let config;
   try {
     config = readWebUiLockConfig();
@@ -48,6 +50,9 @@ export async function POST(request: Request) {
     return new NextResponse("Payload Too Large", { status: 413 });
   }
 
+  const form = new URLSearchParams(body);
+  addAuditFields({ input: Object.fromEntries(form) });
+
   const client = clientAddress(request);
   const now = Date.now();
   if (rateLimiter.isRateLimited(client, now)) {
@@ -57,7 +62,6 @@ export async function POST(request: Request) {
     });
   }
 
-  const form = new URLSearchParams(body);
   const returnPath = safeWebUiReturnPath(form.get("next"));
   const origin = resolveOrigin(request);
   if (!webUiLockKeyMatches(form.get("key"), config.key)) {
@@ -172,4 +176,8 @@ function unavailable() {
     status: 503,
     headers: { "cache-control": "no-store" },
   });
+}
+
+export function POST(request: Request) {
+  return withApiV1(request, () => unlock(request));
 }

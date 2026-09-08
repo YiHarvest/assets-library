@@ -749,6 +749,18 @@ components:
                 properties:
                   file_url: { type: string, format: uri }
                   type: { type: string }
+        is_random:
+          type: boolean
+          default: true
+          description: >-
+            true 时从当前语义召回且超过 semantic_threshold 的不同素材中等概率随机选择；
+            false 时选择语义分最高的素材。
+        semantic_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.3
+          description: 语义召回阈值；只有分数严格大于该值的素材可以命中。
         callback_url:
           type: string
           format: uri

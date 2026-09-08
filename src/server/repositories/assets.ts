@@ -1925,6 +1925,23 @@ export interface DescriptionSearchResult {
 export interface DescriptionSearchOptions {
   /** When present, semantic recall is restricted to this explicit asset set. */
   candidateAssetIds?: readonly string[];
+  /** Override the default semantic threshold for compatibility callers. */
+  semanticThreshold?: number;
+  /** Randomize qualified recall before applying input.limit. */
+  isRandom?: boolean;
+}
+
+function sampleAssetIds(
+  assetIds: readonly string[],
+  limit: number,
+) {
+  const remaining = [...assetIds];
+  const sampled: string[] = [];
+  while (sampled.length < limit && remaining.length > 0) {
+    const index = crypto.randomInt(remaining.length);
+    sampled.push(...remaining.splice(index, 1));
+  }
+  return sampled;
 }
 
 export async function searchAssetsByDescriptionDetailed(
@@ -1933,7 +1950,8 @@ export async function searchAssetsByDescriptionDetailed(
   options: DescriptionSearchOptions = {},
 ): Promise<DescriptionSearchResult> {
   // 语义搜索
-  const threshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
+  const threshold =
+    options.semanticThreshold ?? DEFAULT_RELEVANCE_THRESHOLDS.semantic;
   const result = (
     items: AssetSummary[],
     maxScore: number | null,
@@ -1977,10 +1995,12 @@ export async function searchAssetsByDescriptionDetailed(
   const qualifiedScores = new Map(
     [...scores].filter(([, score]) => score > threshold),
   );
-  const rankedIds = [...qualifiedScores.entries()]
+  const allRankedIds = [...qualifiedScores.entries()]
     .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
-    .slice(0, limit)
     .map(([assetId]) => assetId);
+  const rankedIds = options.isRandom
+    ? sampleAssetIds(allRankedIds, limit)
+    : allRankedIds.slice(0, limit);
   if (!rankedIds.length) {
     return result(
       [],

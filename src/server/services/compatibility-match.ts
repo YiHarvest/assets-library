@@ -22,7 +22,6 @@ import {
 } from "@/shared/contracts";
 
 const callbackPayloadKey = "compatibilityCallback";
-const maximumConcurrentMatches = 4;
 const maximumMatchAttempts = 3;
 const compatibilityMediaPathPattern =
   /\/api\/v1\/media\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i;
@@ -225,27 +224,6 @@ function compatibilityCandidateAssetIds(
   }))];
 }
 
-async function mapConcurrent<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  mapper: (value: T, index: number) => Promise<R>,
-) {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-  async function worker() {
-    for (;;) {
-      const index = nextIndex;
-      nextIndex += 1;
-      if (index >= values.length) return;
-      results[index] = await mapper(values[index]!, index);
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, values.length) }, () => worker()),
-  );
-  return results;
-}
-
 interface CompatibilityMatchDependencies {
   search: typeof searchAssetsByDescriptionDetailed;
   getAsset: (
@@ -313,11 +291,15 @@ export async function matchCompatibilitySegments(
   const allowedAssetIds = candidateAssetIds
     ? new Set(candidateAssetIds)
     : undefined;
-  const matched = await mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
+  const matched: MatchedCompatibilitySegment[] = [];
+  const usedAssetIds = new Set<string>();
+  // ponytail: 顺序检索避免并发选中同一素材；吞吐成为瓶颈时再拆分召回与分配。
+  for (const segment of segments) {
     // keywords=[] 只有语义搜索
     const searchInput = { description: segment.text, keywords: [], limit: 1 };
     const searchOptions = {
       ...(candidateAssetIds ? { candidateAssetIds } : {}),
+      excludedAssetIds: [...usedAssetIds],
       semanticThreshold,
       isRandom,
     };
@@ -327,26 +309,32 @@ export async function matchCompatibilitySegments(
       searchOptions,
     );
     const candidate = search.items[0];
-    if (!candidate) return unmatchedSegment(segment, search);
+    if (!candidate || usedAssetIds.has(candidate.id)) {
+      matched.push(unmatchedSegment(segment, search));
+      continue;
+    }
     if (allowedAssetIds && !allowedAssetIds.has(candidate.id.toLowerCase())) {
-      return unmatchedSegment(segment, {
+      matched.push(unmatchedSegment(segment, {
         maxScore: search.maxScore,
         reason: "no_candidates",
         message: "匹配结果不在 asset_url_list 指定的素材范围内。",
-      });
+      }));
+      continue;
     }
     const record = await dependencies.getAsset(candidate.id);
     const rawCandidateScore =
       candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
     const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
     if (!record || !["pending_review", "published"].includes(record.reviewStatus)) {
-      return unmatchedSegment(segment, {
+      matched.push(unmatchedSegment(segment, {
         maxScore: candidateScore,
         reason: "no_candidates",
         message: "匹配到的素材在生成结果前已不可用。",
-      });
+      }));
+      continue;
     }
-    return {
+    usedAssetIds.add(candidate.id);
+    matched.push({
       ...segment,
       matched_candidate_url: new URL(
         withUserScope(candidate.mediaUrl, record.userId),
@@ -357,23 +345,9 @@ export async function matchCompatibilitySegments(
       matched_candidate_score: candidateScore,
       matched_candidate_reason: null,
       matched_candidate_message: null,
-    } satisfies MatchedCompatibilitySegment;
-  });
-  if (isRandom) return matched;
-  // 对匹配到的相同的素材进行去重
-  const usedUrls = new Set<string>();
-  return matched.map((segment) => {
-    const url = segment.matched_candidate_url;
-    if (!url || !usedUrls.has(url)) {
-      if (url) usedUrls.add(url);
-      return segment;
-    }
-    return unmatchedSegment(segment, {
-      maxScore: segment.matched_candidate_score,
-      reason: "no_candidates",
-      message: "匹配素材已被前面的分段使用，已去重。",
     });
-  });
+  }
+  return matched;
 }
 
 async function enqueueCompatibilityCallback(

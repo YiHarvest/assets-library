@@ -1940,6 +1940,8 @@ export interface DescriptionSearchResult {
 export interface DescriptionSearchOptions {
   /** When present, semantic recall is restricted to this explicit asset set. */
   candidateAssetIds?: readonly string[];
+  /** Exclude already used assets before vector recall. */
+  excludedAssetIds?: readonly string[];
   /** Override the default semantic threshold for compatibility callers. */
   semanticThreshold?: number;
   /** Randomize qualified recall before applying input.limit. */
@@ -1986,11 +1988,12 @@ export async function searchAssetsByDescriptionDetailed(
     ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
   ];
   // 根据scope和candidateAssetIds过滤出候选素材id
-  const candidateIds = await searchableAssetIdsMatchingKeywords(
+  const excludedIds = new Set(options.excludedAssetIds);
+  const candidateIds = (await searchableAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
     options.candidateAssetIds,
-  );
+  )).filter((id) => !excludedIds.has(id));
   if (!candidateIds.length) return result([], null, "no_candidates");
   if (!semanticSearchEnabled()) {
     return result([], null, "semantic_unavailable");

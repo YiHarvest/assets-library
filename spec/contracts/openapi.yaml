@@ -755,6 +755,7 @@ components:
           description: >-
             true 时从当前语义召回且超过 semantic_threshold 的不同素材中等概率随机选择；
             false 时选择语义分最高的素材。
+            两种模式均按分段顺序在召回前排除本任务已用的素材，剩余候选不足时返回未匹配。
         semantic_threshold:
           type: number
           minimum: 0

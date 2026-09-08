@@ -9,6 +9,13 @@ import {
   compatibilityMatchRequestSchema,
   type AssetSummary,
 } from "@/shared/contracts";
+import { searchAssetsByDescriptionDetailed } from "@/server/repositories/assets";
+import * as chroma from "@/server/search/chroma";
+
+const databaseRows = vi.hoisted(() => vi.fn());
+vi.mock("@/server/db", () => ({
+  db: { select: () => ({ from: () => ({ where: databaseRows }) }) },
+}));
 
 function request() {
   return compatibilityMatchRequestSchema.parse({
@@ -240,6 +247,7 @@ describe("compatibility segment matching", () => {
       {
         semanticThreshold: 0.55,
         isRandom: false,
+        excludedAssetIds: [],
       },
     );
     if (reviewStatus === "deleted") {
@@ -260,8 +268,8 @@ describe("compatibility segment matching", () => {
     });
   });
 
-  it("randomly selects from recalled assets and allows repeats", async () => {
-    const segments = alignCompatibilitySegments(request()).slice(0, 2);
+  it.each([true, false])("fills later segments from unused assets with isRandom=%s", async (isRandom) => {
+    const segments = alignCompatibilitySegments(request());
     const secondCandidate: AssetSummary = {
       ...candidate(),
       id: "00000000-0000-4000-8000-000000000002",
@@ -272,18 +280,23 @@ describe("compatibility segment matching", () => {
       searchScore: 0.72,
       semanticScore: 0.72,
     };
-    const search = vi.fn(async () => ({
-      items: [secondCandidate],
-      threshold: 0.3,
-      maxScore: 0.91,
-      reason: "matched" as const,
-      message: null,
-    }));
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (_input, _scope, options) => {
+      const next = [candidate(), secondCandidate].find(
+        (item) => !options?.excludedAssetIds?.includes(item.id),
+      );
+      return {
+        items: next ? [next] : [],
+        threshold: 0.3,
+        maxScore: next?.semanticScore ?? null,
+        reason: next ? "matched" : "no_candidates",
+        message: null,
+      };
+    });
 
     const matched = await matchCompatibilitySegments(
       segments,
       "https://focus.example.test",
-      { isRandom: true, semanticThreshold: 0.3 },
+      { isRandom, semanticThreshold: 0.3 },
       {
         search,
         getAsset: async () => ({
@@ -293,26 +306,44 @@ describe("compatibility segment matching", () => {
       },
     );
 
-    expect(search).toHaveBeenCalledWith(
-      expect.objectContaining({ limit: 1 }),
-      { includeAllUsers: true },
-      {
-        semanticThreshold: 0.3,
-        isRandom: true,
-      },
-    );
     expect(matched.map((segment) => segment.matched_candidate_url)).toEqual([
+      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=1",
       "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
-      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
+      null,
     ]);
+    expect(matched.map((segment) => segment.segment_id)).toEqual([1, 2, 3]);
+    expect(matched[2]?.matched_candidate_reason).toBe("no_candidates");
   });
 
-  it("returns each matched candidate URL only once", async () => {
+  it("excludes used assets before vector recall and stops when none remain", async () => {
+    databaseRows.mockResolvedValue([{ id: "asset-a" }, { id: "asset-b" }]);
+    vi.spyOn(chroma, "semanticSearchEnabled").mockReturnValue(true);
+    const search = vi.spyOn(chroma, "searchAnalysis").mockResolvedValue(new Map());
+    try {
+      await searchAssetsByDescriptionDetailed(
+        { description: "夕阳", keywords: [], limit: 1 },
+        { includeAllUsers: true },
+        { excludedAssetIds: ["asset-a"] },
+      );
+      expect(search).toHaveBeenCalledWith("夕阳", 5, ["asset-b"], { minimumSimilarity: 0 });
+      const exhausted = await searchAssetsByDescriptionDetailed(
+        { description: "夕阳", keywords: [], limit: 1 },
+        { includeAllUsers: true },
+        { excludedAssetIds: ["asset-a", "asset-b"] },
+      );
+      expect(exhausted).toMatchObject({ items: [], reason: "no_candidates" });
+      expect(search).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each([true, false])("rejects repeated candidates even if search ignores exclusions with isRandom=%s", async (isRandom) => {
     const segments = alignCompatibilitySegments(request()).slice(0, 2);
     const matched = await matchCompatibilitySegments(
       segments,
       "https://focus.example.test",
-      { isRandom: false, semanticThreshold: 0.55 },
+      { isRandom, semanticThreshold: 0.55 },
       {
         search: async () => ({
           items: [candidate()],
@@ -337,7 +368,7 @@ describe("compatibility segment matching", () => {
       matched_candidate_desc: null,
       matched_candidate_score: 0.91,
       matched_candidate_reason: "no_candidates",
-      matched_candidate_message: "匹配素材已被前面的分段使用，已去重。",
+      matched_candidate_message: "没有可用的匹配素材。",
     });
   });
 
@@ -435,6 +466,7 @@ describe("compatibility segment matching", () => {
       { includeAllUsers: true },
       {
         candidateAssetIds: ["00000000-0000-4000-8000-000000000001"],
+        excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
       },

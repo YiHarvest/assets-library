@@ -121,13 +121,30 @@ function tokenize(text: string) {
 }
 
 function analysisPassages(result: AnalysisResult) {
+
+  // 每一行是一个独立 passage、一个独立向量。
+  // 每个 passage 在 embedding 前会经过 tokenize()：
+  //  压缩空白字符。
+  // 提取中文连续文本和英文/数字词。
+  // 长度至少为 3 的连续中文，会额外生成相邻二元词组。
+  // 智能素材管理 -> 智能素材管理 智能 能素 素材 材管 管理
   if (result.kind === "image") {
+    // VLM 生成的描述、标签、OCR 文本
     return [
       result.description,
+      // 类别 标签值
+      // 例如：
+      /*
+      scene 城市夜景
+      object 跑车
+      style 电影感
+      */
       ...Object.entries(result.tags).flatMap(([category, values]) => values.map((value) => `${category} ${value}`)),
       result.ocr.text ?? "",
     ].filter(Boolean);
   }
+  // 视频
+  // VLM 生成的描述、主题、标签、片段摘要、关键时刻摘要、时间线摘要
   return [
     result.description,
     ...result.topics,
@@ -143,6 +160,7 @@ export function semanticSearchEnabled() {
 }
 
 export async function indexAnalysis(assetId: string, result: AnalysisResult) {
+  // 得到要入库的内容
   const passages = analysisPassages(result).map(tokenize).filter(Boolean);
   if (!passages.length) return;
   const vectors = await embed(passages);

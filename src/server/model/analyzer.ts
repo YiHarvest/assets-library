@@ -157,6 +157,7 @@ const PRIMARY_TAG_CATEGORIES = ["城市风貌", "建筑", "科技", "财经", "�
 const PRIMARY_TAG_SET = new Set<string>(PRIMARY_TAG_CATEGORIES);
 
 function promptFor(mediaType: MediaType, durationSeconds: number | null) {
+  // LLM 的prompt
   const scope =
     mediaType === "video"
       ? "输入是按时间分位采样的关键帧。只分析画面，不分析音轨，不输出 ASR 或语言。根据每帧标注时间生成时间轴，时间必须使用秒。"
@@ -578,6 +579,7 @@ async function mediaContent(
     const bytes = await fs.readFile(
       resolveMediaPath(input.relativePath, config.mediaRoot),
     );
+    // LLM对图片进行分析，直接将图片给LLM
     return {
       durationSeconds: null,
       chat: [
@@ -602,11 +604,13 @@ async function mediaContent(
   ) {
     throw new AppError("model_video_unsupported");
   }
+  // LLM 对视频的关键帧进行分析
   const frameSet = readVideoFrameSet(input.relativePath, config.mediaRoot);
   const chat: Array<
     | { type: "text"; text: string }
     | { type: "image_url"; image_url: { url: string } }
   > = [];
+  // 所有的关键帧都分析
   for (const [index, frame] of frameSet.frames.entries()) {
     const bytes = await fs.readFile(frame.absolutePath);
     chat.push(

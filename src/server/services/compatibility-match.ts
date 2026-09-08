@@ -282,10 +282,12 @@ export async function matchCompatibilitySegments(
   assetUrls: CompatibilityMatchRequest["asset_url_list"] = [],
   dependencies: CompatibilityMatchDependencies = compatibilityMatchDependencies,
 ) {
+  // 只在用户勾选的素材assetUrls中召回
   const restrictCandidates = assetUrls.length > 0;
   const candidateAssetIds = restrictCandidates
     ? compatibilityCandidateAssetIds(assetUrls)
     : undefined;
+
   if (restrictCandidates && candidateAssetIds?.length === 0) {
     return segments.map((segment) => unmatchedSegment(segment, {
       maxScore: null,
@@ -297,6 +299,7 @@ export async function matchCompatibilitySegments(
     ? new Set(candidateAssetIds)
     : undefined;
   const matched = await mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
+    // keywords=[] 只有语义搜索
     const searchInput = { description: segment.text, keywords: [], limit: 1 };
     const search = candidateAssetIds
       ? await dependencies.search(
@@ -517,8 +520,9 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
     .where(eq(tasks.id, job.taskId));
 
   try {
+    // 把 LLM 文本顺序对齐到 ASR 逐词时间，计算时间范围和 group_id，小程序那边传过来的格式已经做了对齐
     const aligned = alignCompatibilitySegments(payload.request);
-    // 素材匹配
+    // 对每个segment 进行素材匹配，语义检索
     const matched = await matchCompatibilitySegments(
       aligned,
       payload.publicOrigin,

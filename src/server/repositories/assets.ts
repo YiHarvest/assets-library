@@ -1318,6 +1318,7 @@ async function assetIdsMatchingKeywords(
   }
 
   const scoringQuery = keywords.length === 1 ? keywords[0]! : tokens;
+  //根据关键字计算所有候选素材的匹配分数
   const scoreAll = (allowTypo: boolean) => {
     // 素材id -> 匹配分数
     const scores = new Map<string, RankedAssetMatch>();
@@ -1340,9 +1341,9 @@ async function assetIdsMatchingKeywords(
     }
     return scores;
   };
-
-  const strongScores = scoreAll(false);
   // 强关键词匹配
+  const strongScores = scoreAll(false);
+  // 根据阈值筛选
   const strongMatches = qualifiedMatches(
     strongScores,
     DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
@@ -1355,6 +1356,7 @@ async function assetIdsMatchingKeywords(
       ? DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
       : normalizeSemanticText(queryText),
   };
+  // 如果有强匹配，直接返回
   if (strongMatches.size) {
     return {
       assetIds: new Set(strongMatches.keys()),
@@ -1365,11 +1367,12 @@ async function assetIdsMatchingKeywords(
       ...shared,
     };
   }
-
+  // 如果没有强匹配，尝试错别字匹配
   const fallbackScores = scoreAll(true);
   const typoScores = new Map(
     [...fallbackScores].filter(([, match]) => match.matchType === "typo"),
   );
+  // 根据阈值筛选
   const fallbackMatches = qualifiedMatches(
     typoScores,
     DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
@@ -1463,6 +1466,7 @@ export async function queryAssetsPage({
       ),
     );
   }
+
   let keywordSearchMeta = keywordMatches.threshold
     ? searchMetadata(
         "keyword",
@@ -1471,19 +1475,22 @@ export async function queryAssetsPage({
         keywordMatches.reason ?? "matched",
       )
     : null;
-
+  
+    // 宽泛查询，例如用户输入AI这类词的时候
   if (
     !semanticQuery?.trim() &&
     keywordMatches.broadQuery &&
     keywordMatches.scores &&
     candidateIds
   ) {
+    // 筛选候选素材
     const broadWhere = and(...conditions, inArray(assets.id, [...candidateIds]));
     const eligibleRows = await db
       .select({ id: assets.id })
       .from(assets)
       .where(broadWhere)
       .orderBy(desc(assets.createdAt), desc(assets.id));
+      // 已经通过所有硬性过滤条件的候选素材 ID。
     const eligibleIds = eligibleRows.map((row) => row.id);
     if (!eligibleIds.length) {
       return emptyAssetQueryPage(
@@ -1497,11 +1504,14 @@ export async function queryAssetsPage({
         ),
       );
     }
+
     let semanticScores: Map<string, number> | undefined;
     if (semanticSearchEnabled()) {
       try {
-        // {素材ID:语义相似度得分}
+        // 使用这些宽泛词进行语义搜索
         semanticScores = await searchAnalysis(
+          // DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
+          // ai aigc 人工智能 生成式人工智能 智能科技
           keywordMatches.semanticText ?? keywords.join(" "),
           Math.min(800, Math.max(safeLimit * 8, eligibleIds.length * 5)),
           eligibleIds,
@@ -1514,7 +1524,7 @@ export async function queryAssetsPage({
         );
       }
     }
-
+    // 素材的语义相似度得分和关键字的匹配得分
     const broadCandidates = eligibleIds.flatMap((assetId) => {
       const lexical = keywordMatches.scores?.get(assetId);
       return lexical
@@ -1525,6 +1535,7 @@ export async function queryAssetsPage({
           }]
         : [];
     });
+    // 
     const tier = selectBroadQueryRecallTier(
       broadCandidates,
       DEFAULT_RELEVANCE_THRESHOLDS.semantic,
@@ -1583,6 +1594,7 @@ export async function queryAssetsPage({
         if (!lexical || semanticScore === undefined) continue;
         hybridScores.set(assetId, {
           ...lexical,
+          // 合并语义相似度得分和关键字的匹配得分
           finalScore: hybridRelevanceScore(
             lexical.keywordScore,
             semanticScore,
@@ -1603,6 +1615,7 @@ export async function queryAssetsPage({
         );
         const maxScore = Math.max(...allHybridScores);
         candidateIds = new Set(qualified.keys());
+        // 合并语义相似度得分和关键字的匹配得分的结果
         keywordMatches = {
           ...keywordMatches,
           assetIds: candidateIds,
@@ -1882,6 +1895,7 @@ async function publishedAssetIdsMatchingKeywords(
     : [...new Set(candidateAssetIds)];
   if (constrainedIds?.length === 0) return [];
   const ownership = scopeCondition(scope);
+  // keywords=[] 时，返回所有勾选的已发布素材
   if (!keywords.length) {
     const conditions: SQL[] = [
       eq(assets.reviewStatus, "published"),
@@ -1896,6 +1910,7 @@ async function publishedAssetIdsMatchingKeywords(
         .where(and(...conditions))
     ).map((row) => row.id);
   }
+  // 关键词匹配的结果
   const keywordMatches = await assetIdsMatchingKeywords(keywords);
   const matchedAssetIds = [...(keywordMatches.assetIds ?? [])];
   if (!matchedAssetIds.length) return [];
@@ -1952,6 +1967,7 @@ export async function searchAssetsByDescriptionDetailed(
   const normalizedKeywords = [
     ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
   ];
+  // 根据scope和candidateAssetIds过滤出候选素材id
   const candidateIds = await publishedAssetIdsMatchingKeywords(
     normalizedKeywords,
     scope,
@@ -1963,6 +1979,7 @@ export async function searchAssetsByDescriptionDetailed(
   }
   let scores: Map<string, number>;
   try {
+    // 根据语义搜索
     scores = await searchAnalysis(
       normalizeSemanticText(description),
       Math.max(limit * 5, limit),
@@ -1974,6 +1991,7 @@ export async function searchAssetsByDescriptionDetailed(
   }
   const rawScores = [...scores.values()];
   const maxScore = rawScores.length ? Math.max(...rawScores) : null;
+  // 筛选大于阈值0.55的素材
   const qualifiedScores = new Map(
     [...scores].filter(([, score]) => score > threshold),
   );

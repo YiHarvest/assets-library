@@ -286,21 +286,26 @@ export function classifyTagMatch(
   const token = normalizeSearchText(tokenValue);
   const tag = normalizeSearchText(tagValue);
   if (!token || !tag) return null;
+  // 完全匹配
   if (token === tag) return { matchType: "exact", quality: MATCH_QUALITY.exact };
-
+  // 属于同一个业务组别名，别名匹配
+  // ["ai", "aigc", "人工智能", "生成式人工智能", "智能科技"],
   const aliases = options.aliases ?? DEFAULT_BUSINESS_ALIASES;
   const tokenAliasGroup = aliasGroupFor(token, aliases);
+
   if (tokenAliasGroup?.includes(tag)) {
     return { matchType: "alias", quality: MATCH_QUALITY.alias };
   }
-
+  // 前缀匹配，keyword是素材中某个标签的前缀
   const shortLatin = latinTokenPattern.test(token) && Array.from(token).length < 4;
   if (!shortLatin && tag.startsWith(token)) {
     return { matchType: "prefix", quality: MATCH_QUALITY.prefix };
   }
+  // 标签中包含查询的keyword
   if (!shortLatin && tag.includes(token)) {
     return { matchType: "contains", quality: MATCH_QUALITY.contains };
   }
+  // 编辑距离为 1 的错别字
   if (
     options.allowTypo &&
     !shortLatin &&
@@ -329,6 +334,10 @@ export function scoreKeywordRelevance(
   tags: readonly SearchableTag[],
   options: KeywordScoringOptions = {},
 ): KeywordRelevance {
+  // 对查询进行分词
+  // 例如：
+  // "复古 风格" -> ["复古", "风格"]
+  // "城市夜景" -> ["城市", "夜景"]
   const tokens = [...new Set(
     (typeof queryOrTokens === "string"
       ? tokenizeKeywordQuery(queryOrTokens, options.aliases)
@@ -349,10 +358,12 @@ export function scoreKeywordRelevance(
   const scoringTokens = tokens.length > 1
     ? tokens.filter((token) => !isIntentMarker(token))
     : tokens;
+
   const effectiveTokens = scoringTokens.length ? scoringTokens : tokens;
   const bestEvidence = (token: string) => {
     let best: TagMatchEvidence | null = null;
     for (const tag of tags) {
+      // 对应的匹配类型以及得分
       const match = classifyTagMatch(token, tag.value, options);
       if (!match) continue;
       const weight = categoryWeight(tag.category, intent, options.categoryWeights);

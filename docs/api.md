@@ -401,13 +401,165 @@ curl -X PUT \
 
 ### `POST /api/v1/compat/segment-match`
 
-接收旧剪辑业务的分段、`callback_url` 和素材地址列表，持久化为异步 `match`
-任务。支持两种请求格式：传入 ASR 逐词时间时自动对齐；`asr` 为空对象时，直接
-复用 `llm.segments` 中已有的 `group_id`、`start_time` 和 `end_time`。`llm` 可传
-对象或字符串化 JSON，`asset_url_list` 可传 URL 字符串或
-`{"file_url":"...","type":"video"}` 对象。可选参数 `semantic_threshold` 控制
-语义召回阈值，取值范围为 `[0,1]`、默认 `0.3`；可选参数 `is_random` 控制最终
-选择策略，默认 `true`。接口立即返回 `202 Accepted`：
+为 `llm.segments` 中的每个文本分段匹配一个图片或视频素材。接口先持久化异步
+`match` 任务并返回 `202 Accepted`，Worker 完成后再向 `callback_url` 发送结果。
+同步响应不包含匹配结果；某段或全部分段未命中素材，也可以正常完成任务。
+
+#### 请求格式与顶层字段
+
+使用 `Content-Type: application/json`，请求体上限为 **1 MiB**（包含所有嵌套字段
+及自定义字段）。以下“无”表示不提供默认值；可选字段省略与显式传 `null` 不等价，
+下列已知请求字段均不接受 `null`。数字和布尔值不接受字符串形式。
+
+| 字段 | 类型 | 必填 | 默认值 | 作用与约束 |
+| --- | --- | --- | --- | --- |
+| `asr` | object | 是 | 无 | 语音识别结果，用于给 LLM 分段对齐时间轴。已有时间轴时传 `{}`，不能省略整个字段。 |
+| `llm` | object 或 JSON string | 是 | 无 | 包含 `segments` 的分段结果；支持直接传对象，也支持该对象序列化后的 JSON 字符串。接口使用已有分段，不负责调用 LLM 生成分段。 |
+| `text` | string | 否 | 无 | 兼容旧调用方的全文字段，最长 1,000,000 字符。当前不参与对齐或素材搜索，也不回传。搜索使用每段的 `text`。 |
+| `asset_url_list` | array | 否 | `[]` | 最多 10,000 项。空数组表示从所有已发布、未删除的公共及个人素材中召回；非空时限定素材范围，详见下文。 |
+| `semantic_threshold` | number | 否 | `0.3` | 语义相似度阈值，范围 `[0,1]`。只接受分数**严格大于**该值的素材；等于阈值也不命中。传 `0` 接受正分候选，传 `1` 不会命中。 |
+| `is_random` | boolean | 否 | `true` | `true`：从本次达标候选中等概率随机选一个，不同分段允许重复；`false`：选最高分，并对跨分段重复结果去重。 |
+| `callback_url` | string (URL) | 是 | 无 | 接收任务成功或失败结果的地址，仅支持 HTTP/HTTPS，最长 2,048 字符。 |
+| 其他顶层字段 | 任意 JSON 值 | 否 | 无 | 作为业务自定义字段透传到终态回调，例如 `business_id`。不参与匹配；顶层 `user_id` 也不会限制素材范围。避免使用回调保留字段 `taskId`、`status`、`result`、`error`、`completed_at`，同名值可能被系统覆盖。 |
+
+`asset_url_list` 每项可以是 URL 字符串，也可以是以下对象，两种格式可混用：
+
+| 对象字段 | 类型 | 必填 | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `file_url` | string (URL) | 是 | 无 | 素材库媒体 URL，其路径须能解析为 `/api/v1/media/{asset_id}`，其中 `asset_id` 为 UUID。查询参数不影响素材 ID 解析。 |
+| `type` | string | 是 | 无 | 旧业务的素材类型标记，如 `image`、`video`。当前仅接收，不用于类型过滤；结果类型以素材库记录为准。 |
+
+重复素材 ID 会合并。非空列表中无法识别的 URL 不参与召回；若全部无法识别，
+所有分段返回 `no_candidates`，不会回退到全库，也不会下载列表中的外部文件。
+
+#### ASR 字段：自动对齐模式
+
+下表中数组元素的“必填”表示提供对应父对象时必填；ASR 可选字段均无默认值。
+
+| 字段路径 | 类型 | 必填 | 含义与约束 |
+| --- | --- | --- | --- |
+| `asr.transcripts` | object[] | 否 | 提供时为 1–20 项；当前仅使用第一项 `transcripts[0]` 进行对齐。省略时使用分段自带时间轴；不能用空数组代替省略。 |
+| `asr.transcripts[].sentences` | object[] | 是 | 按语音顺序排列的原句，1–10,000 项。 |
+| `sentences[].text` | string | 是 | 原句文本。当前实际对齐依据是 `words[].text`。 |
+| `sentences[].words` | object[] | 是 | 按顺序排列的词及其时间，1–10,000 项。 |
+| `sentences[].begin_time` | integer | 否 | 原句开始时间，单位毫秒，非负；当前不用于计算输出时间。 |
+| `sentences[].end_time` | integer | 否 | 原句结束时间，单位毫秒，非负；当前不用于计算输出时间。 |
+| `sentences[].sentence_id` | integer | 否 | 原句业务编号，非负。分组依据是原句在数组中的位置，不使用此编号。 |
+| `words[].text` | string | 是 | 词语文本，用于顺序匹配 LLM 分段。 |
+| `words[].begin_time` | integer | 是 | 词语开始时间，单位毫秒，非负。 |
+| `words[].end_time` | integer | 是 | 词语结束时间，单位毫秒，非负，且不得早于该词的 `begin_time`。 |
+| `words[].punctuation` | string | 否 | 词后的标点，当前不参与对齐。 |
+
+对齐时会归一化文字、忽略大小写及标点等非字母数字字符，按 `llm.segments` 的
+数组顺序在 ASR 词语文本中向后查找，不会自动重排分段或改写文字。每段的开始时间
+取首个匹配词的开始时间，结束时间取最后一个匹配词的结束时间，并从毫秒转换为秒。
+没有可对齐文字或无法顺序匹配时，任务以 `invalid_request` 失败并回调。
+
+#### LLM 分段字段
+
+`llm.segments` 必填，为包含 **1–500** 个对象的数组；对象字段如下：
+
+| 字段 | 类型 | 必填 | 默认值／缺省行为 | 含义与约束 |
+| --- | --- | --- | --- | --- |
+| `segment_id` | integer | 是 | 无 | 正整数分段编号，原样返回。处理和返回顺序由数组顺序决定，不按此编号排序。 |
+| `text` | string | 是 | 无 | 分段文本，去除首尾空白后为 1–10,000 字符；同时用于 ASR 对齐和语义搜索。 |
+| `high_light_word` | string | 否 | 回退到 `keyword` | 旧格式的高亮词，最长 1,000 字符；优先转换为输出的 `keyword`，不再输出 `high_light_word`。显式空字符串也优先。 |
+| `keyword` | string | 否 | 输出时回退到 `""` | 关键词，最长 1,000 字符。仅在未提供 `high_light_word` 时使用；不参与关键词检索或筛选。 |
+| `level` | integer | 是 | 无 | 非负整数业务等级，原样返回，当前不影响搜索、排序或随机概率。 |
+| `group_id` | `[number, number]` | 条件必填 | ASR 模式自动计算 | 含义为 `[句内分段序号, 该句分段总数]`。无 ASR transcripts 时必须提供并原样返回；有 ASR 时覆盖为从 1 开始的计算结果。跨句分段按起始词所在原句分组。 |
+| `start_time` | number | 条件必填 | ASR 模式自动计算 | 分段开始时间，单位秒。无 ASR transcripts 时必须提供并原样返回；有 ASR 时覆盖。 |
+| `end_time` | number | 条件必填 | ASR 模式自动计算 | 分段结束时间，单位秒。无 ASR transcripts 时必须提供并原样返回；有 ASR 时覆盖。 |
+| 其他分段字段 | 任意 JSON 值 | 否 | 无 | 保留到对应结果分段；系统生成的时间轴、关键词和 `matched_candidate_*` 等同名字段以系统结果为准。 |
+
+已有时间轴模式下，调用方应保证 `group_id` 的业务含义及起止时间合理；当前校验
+仅要求 `group_id` 为两个数字、起止时间为数字，不额外验证正数、整数或时间先后关系。
+缺少条件必填字段的检查发生在 Worker 中，因此可能先收到 `202`，随后收到失败回调。
+
+#### 请求示例
+
+已有时间轴时可直接发送：
+
+```json
+{
+  "business_id": "edit_20260908_001",
+  "asr": {},
+  "llm": {
+    "segments": [
+      {
+        "segment_id": 1,
+        "text": "夕阳下的海边",
+        "keyword": "海边",
+        "level": 1,
+        "group_id": [1, 1],
+        "start_time": 0.32,
+        "end_time": 2.2
+      }
+    ]
+  },
+  "asset_url_list": [
+    {
+      "file_url": "https://assets.example.com/api/v1/media/7f5966d8-598f-43a1-bc79-5d8b8ba21fe4",
+      "type": "video"
+    }
+  ],
+  "semantic_threshold": 0.3,
+  "is_random": true,
+  "callback_url": "https://internal.example/callbacks/segment-match"
+}
+```
+
+需要自动对齐时，提供 ASR 词语时间即可省略分段时间轴。本例还省略了三个可选
+控制字段，实际使用 `asset_url_list=[]`、`semantic_threshold=0.3`、`is_random=true`：
+
+```json
+{
+  "asr": {
+    "transcripts": [
+      {
+        "sentences": [
+          {
+            "text": "夕阳下的海边",
+            "words": [
+              { "text": "夕阳下的", "begin_time": 320, "end_time": 1200 },
+              { "text": "海边", "begin_time": 1200, "end_time": 2200 }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "llm": {
+    "segments": [
+      { "segment_id": 1, "text": "夕阳下的海边", "high_light_word": "海边", "level": 1 }
+    ]
+  },
+  "callback_url": "https://internal.example/callbacks/segment-match"
+}
+```
+
+此例生成的时间轴为 `group_id=[1,1]`、`start_time=0.32`、`end_time=2.2`。
+若使用字符串格式的 `llm`，应将整个 `{ "segments": [...] }` 对象序列化为字符串，
+其内部字段和校验规则完全相同。
+
+#### 匹配与选择规则
+
+1. 在上述素材范围中，仅用每段 `text` 进行语义搜索。每段最终最多一个结果，
+   内部 `limit=1`，沿用 `limit * 5` 的召回逻辑，向 Chroma 请求前 **5 条向量记录**。
+   同一素材可能占据多条向量记录，因此这不保证有 5 个不同素材。
+2. 以 `1 / (1 + distance)` 计算相似度并限制在 `[0,1]`，同一素材 ID 的多个
+   passage 取最高分，再过滤出分数严格大于 `semantic_threshold` 的不同素材。
+3. `is_random=true` 时，从这次召回的达标素材中等概率选择一个，不按分数加权；
+   随机池受上述召回数量限制，不是全库所有达标素材。不同分段可重复命中同一素材。
+4. `is_random=false` 时，每段先选达标素材中的最高分，之后按输入分段顺序对素材
+   URL 去重。相同 URL 仅保留首次命中，后续分段改为未匹配，**不会补选第二名**。
+5. 生成结果前再次检查所选素材是否可用、是否已发布。失效时返回未匹配，不补选；
+   个人素材 URL 自动追加 `user_id` 查询参数。
+
+本接口没有可配置的 `limit` 请求字段。上述规则只描述兼容分段匹配接口。
+
+#### 同步响应：任务已受理
+
+HTTP `202 Accepted`，JSON 格式如下：
 
 ```json
 {
@@ -416,58 +568,152 @@ curl -X PUT \
 }
 ```
 
-存在 ASR transcripts 时，worker 会按 LLM 分段顺序在 ASR 文本中逐字对齐，生成
-秒制 `start_time` / `end_time`，并按 ASR 原句生成 `[句内序号, 句内总数]` 形式的
-`group_id`；ASR 为空时不重复对齐，直接保留分段自带的三个时间轴字段。
-`high_light_word` 会转换为 `keyword`；LLM 每个 segment 上的其他字段会继续保留。
+| 字段／响应头 | 类型 | 含义 |
+| --- | --- | --- |
+| `taskId` | string (UUID) | 已创建的任务 ID。本兼容接口使用 camelCase `taskId`，不是 `task_id`。 |
+| `status` | string | 固定为 `processing`，表示已受理，任务可能仍在排队，不代表已完成或已命中。 |
+| `Location`（响应头） | string | 任务查询路径 `/api/v1/tasks/{taskId}`，部署配置了路径前缀时包含该前缀。 |
+| `X-Request-Id`（响应头） | string (UUID) | 本次 HTTP 请求的跟踪 ID，与任务 ID 不同。 |
+| `Cache-Control`（响应头） | string | 固定为 `no-store`。 |
 
-每个分段都复用描述语义匹配：候选范围是所有已发布的公共及个人素材，归一化
-相似度必须严格大于 `semantic_threshold`。`is_random=true` 时从当前语义召回并
-达标的不同素材中等概率随机选择一个，且不同分段可以重复使用同一素材；
-`is_random=false`
-时按相似度降序只取一个，并保留跨分段去重。每段始终返回六个
-`matched_candidate_*` 字段。命中时 URL、类型、描述和 `[0,1]` 分数有值，
-`reason` / `message` 为 `null`；未命中时前三项为 `null`，若存在低分候选则
-`score` 返回阈值过滤前最高分，并通过 `reason` / `message` 说明原因。个人素材 URL
-会自动附加 `user_id`。`asset_url_list` 为空时保持旧行为，从所有已发布的公共及
-个人素材中召回；非空时只从其中可解析为 `/api/v1/media/{asset_id}` 的素材库 URL
-对应素材中召回。非空列表不包含可识别的素材库 URL 时返回未匹配结果，不会回退
-到全库。
+#### 成功回调及结果字段
 
-成功后系统向 `callback_url` 发送：
+系统向 `callback_url` 发起 HTTP `POST`，请求头包含 `Content-Type: application/json`
+及 `X-Assets-Task-Id: <taskId>`。成功回调示例：
 
 ```json
 {
-  "business_id": "调用方自定义字段会透传",
+  "business_id": "edit_20260908_001",
   "taskId": "ff34e53d-884e-4945-a2d3-3caadfbb6e28",
   "status": "success",
   "result": {
     "segments": [
       {
         "segment_id": 1,
-        "text": "如果能回到二十岁",
-        "keyword": "",
+        "text": "夕阳下的海边",
+        "keyword": "海边",
         "level": 1,
-        "group_id": [1, 3],
+        "group_id": [1, 1],
         "start_time": 0.32,
         "end_time": 2.2,
-        "matched_candidate_url": "https://example.com/api/v1/media/asset-id?v=1",
+        "matched_candidate_url": "https://assets.example.com/api/v1/media/7f5966d8-598f-43a1-bc79-5d8b8ba21fe4?v=1",
         "matched_candidate_type": "video",
-        "matched_candidate_desc": "夕阳下女性剪影",
+        "matched_candidate_desc": "夕阳下的海岸与沙滩",
         "matched_candidate_score": 0.91,
         "matched_candidate_reason": null,
         "matched_candidate_message": null
       }
     ]
   },
-  "completed_at": "2026-09-02T07:59:38.839000"
+  "completed_at": "2026-09-08T07:59:38.839000"
 }
 ```
 
-请求中除 `asr`、`llm`、`text`、`asset_url_list`、`is_random`、
-`semantic_threshold`、`callback_url` 外的未知顶层字段会原样放入回调；这些已知
-输入字段不重复回传。匹配作业失败可重试
-最多 3 次，终态回调沿用统一回调投递器，失败指数退避、最多投递 5 次。
+| 回调字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `taskId` | string (UUID) | 与受理响应一致的任务 ID，可用于关联业务和回调去重。 |
+| `status` | string | 正常完成为 `success`，任务执行失败为 `failed`。`success` 不保证每段都命中素材。 |
+| `result` | object | 成功时提供，包含 `segments`；系统在失败回调中改为提供 `error`。 |
+| `result.segments` | object[] | 与输入 `llm.segments` 数量和顺序一致的处理结果，未命中的分段也保留。 |
+| `completed_at` | string | 任务完成时间，格式为 `YYYY-MM-DDTHH:mm:ss.SSS000`。本兼容接口的实际值按 **UTC** 生成，但不带 `Z` 或时区偏移；精度为毫秒，末三位补零。不同于本文通用接口的上海时区时间格式。 |
+| 自定义业务字段 | 与请求一致 | 请求中的未知顶层字段在成功、失败回调中均透传；七个已知顶层请求字段不重复回传。 |
+
+`result.segments[]` 字段如下。所有列出的结果字段都会出现；可空字段用 `null`
+表示无值，不以省略字段代替：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `segment_id` | integer | 输入分段编号。 |
+| `text` | string | 去除首尾空白后的输入分段文本。 |
+| `keyword` | string | 优先取输入 `high_light_word`，其次取 `keyword`，均未提供时为 `""`。 |
+| `level` | integer | 输入业务等级。 |
+| `group_id` | `[number, number]` | `[句内序号, 句内总数]`；来自 ASR 对齐计算或调用方已有时间轴。 |
+| `start_time` | number | 分段开始时间，单位秒，来自 ASR 计算或输入。不是所选素材内的裁剪起点。 |
+| `end_time` | number | 分段结束时间，单位秒，来自 ASR 计算或输入。不是所选素材内的裁剪终点。 |
+| `matched_candidate_url` | string (URL) 或 null | 命中素材的绝对媒体 URL；个人素材带 `user_id`。未命中为 `null`。 |
+| `matched_candidate_type` | `image`、`video` 或 null | 命中素材的实际媒体类型，未命中为 `null`。 |
+| `matched_candidate_desc` | string 或 null | 命中素材的描述，未命中为 `null`。 |
+| `matched_candidate_score` | number 或 null | `[0,1]` 相似度。命中时为所选素材分数；全部候选未达阈值时为过滤前最高分；因去重或最终检查失效而未命中时可能保留候选分数；没有可用分数时为 `null`。不能只凭分数判断是否命中。 |
+| `matched_candidate_reason` | string 或 null | 命中为 `null`；未命中时为下表中的机器可读原因。 |
+| `matched_candidate_message` | string 或 null | 命中为 `null`；未命中时为说明文本。文本可能变化，业务判断应使用 `reason`。 |
+| 其他分段字段 | 与请求一致 | 保留输入分段的自定义字段，系统生成字段除外。 |
+
+| `matched_candidate_reason` | 含义 |
+| --- | --- |
+| `no_candidates` | 没有可用候选，包括指定 URL 无法识别、范围内没有已发布素材、没有召回结果、所选素材失效或被跨分段去重等；具体情况见 `message`。 |
+| `below_threshold` | 已召回带分数的候选，但没有分数严格大于阈值的素材。 |
+| `semantic_unavailable` | 语义服务未启用或调用失败。当前作为分段未匹配结果返回，不直接令整个任务失败。 |
+
+例如，默认阈值 `0.3` 下最高候选仅为 `0.28`，该分段的六个匹配字段为：
+
+```json
+{
+  "matched_candidate_url": null,
+  "matched_candidate_type": null,
+  "matched_candidate_desc": null,
+  "matched_candidate_score": 0.28,
+  "matched_candidate_reason": "below_threshold",
+  "matched_candidate_message": "找到候选素材，但最高匹配分为 0.280，未超过展示阈值 0.300。"
+}
+```
+
+上例只展示匹配字段，完整结果仍包含分段编号、文本、时间轴等字段。
+
+#### 失败格式与回调重试
+
+请求受理前的错误直接返回 HTTP 错误响应。例如发送无效 JSON 时返回 `400`：
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "请求体必须是有效的 JSON。"
+  },
+  "request_id": "9264af56-01cc-4fbe-9560-8df51ef3f668"
+}
+```
+
+| 同步错误字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `error` | object | 错误信息容器。 |
+| `error.code` | string | 机器可读错误码，例如 `invalid_request`、`internal_error`。 |
+| `error.message` | string | 本次错误的说明文本；字段校验错误通常只返回首条说明。 |
+| `error.details` | array（可选） | 统一错误格式的附加诊断；普通 JSON／字段校验错误不提供。 |
+| `request_id` | string (UUID) | 与响应头 `X-Request-Id` 一致，用于定位请求。 |
+
+| HTTP 状态 | 本接口的典型场景 |
+| --- | --- |
+| `400` | 无效 JSON、缺少必填字段、类型错误、数组或字符串超限、阈值越界、非法回调 URL。 |
+| `413` | 整个 JSON 请求体超过 1 MiB，错误码为 `invalid_request`。 |
+| `409` | 创建任务时遇到数据库死锁等已映射的操作冲突。 |
+| `500` | 创建任务时发生未处理的内部错误。 |
+
+这些错误不返回成功受理的 `taskId`，也不会建立一个成功受理任务的终态回调流程。
+已经返回 `202` 后发生的时间轴检查、对齐或执行错误通过失败回调报告，例如：
+
+```json
+{
+  "business_id": "edit_20260908_001",
+  "taskId": "ff34e53d-884e-4945-a2d3-3caadfbb6e28",
+  "status": "failed",
+  "error": {
+    "code": "invalid_request",
+    "message": "分段 1 缺少 group_id、start_time 或 end_time。"
+  },
+  "completed_at": "2026-09-08T07:59:38.839000"
+}
+```
+
+失败回调的 `taskId`、`status`、`completed_at` 和业务透传字段含义同上；`error`
+是错误对象，其中 `code` 为任务错误码，`message` 为失败说明。对齐／时间轴输入错误
+通常为 `invalid_request`，未分类执行异常为 `internal_error`。此回调不会自动附带
+同步错误响应中的 `request_id` 或 `error.details`。
+
+匹配作业最多执行 **3 次（含首次）**，`invalid_request` 不重试；可重试执行错误
+在前两次失败后分别延迟 30 秒、60 秒再尝试。回调投递独立重试，最多 **5 次（含首次）**，
+失败后按 1、2、4、8 分钟退避。接收方应在 15 秒内返回任意 `2xx` 状态；系统不跟随
+重定向，非 `2xx`、超时或网络失败都算投递失败。接收方应按 `taskId` 幂等处理可能
+重复到达的回调。回调重试只重新投递已保存的结果，不重新随机选择素材。
 
 ## 8. 异步素材变更
 

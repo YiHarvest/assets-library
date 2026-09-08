@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   alignCompatibilitySegments,
   compatibilityCallbackFromJob,
+  compatibilityCallbackFields,
   matchCompatibilitySegments,
 } from "@/server/services/compatibility-match";
 import {
@@ -90,6 +91,52 @@ function candidate(): AssetSummary {
 }
 
 describe("compatibility segment matching", () => {
+  it("defaults and validates semantic selection controls", () => {
+    const parsed = request();
+    expect(parsed).toMatchObject({
+      is_random: true,
+      semantic_threshold: 0.3,
+    });
+
+    expect(
+      compatibilityMatchRequestSchema.parse({
+        ...parsed,
+        is_random: false,
+        semantic_threshold: 0,
+      }),
+    ).toMatchObject({ is_random: false, semantic_threshold: 0 });
+    expect(
+      compatibilityMatchRequestSchema.parse({
+        ...parsed,
+        semantic_threshold: 1,
+      }).semantic_threshold,
+    ).toBe(1);
+    expect(() =>
+      compatibilityMatchRequestSchema.parse({
+        ...parsed,
+        semantic_threshold: -0.01,
+      }),
+    ).toThrow();
+    expect(() =>
+      compatibilityMatchRequestSchema.parse({
+        ...parsed,
+        semantic_threshold: 1.01,
+      }),
+    ).toThrow();
+    expect(() =>
+      compatibilityMatchRequestSchema.parse({
+        ...parsed,
+        is_random: "true",
+      }),
+    ).toThrow();
+  });
+
+  it("does not copy matching controls into callback passthrough fields", () => {
+    expect(compatibilityCallbackFields(request())).toEqual({
+      business_id: "biz-1",
+    });
+  });
+
   it("parses the stringified LLM payload and aligns segment times and groups", () => {
     const parsed = request();
     expect(parsed.llm.segments).toHaveLength(3);
@@ -177,7 +224,7 @@ describe("compatibility segment matching", () => {
     const [matched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
-      [],
+      { isRandom: false, semanticThreshold: 0.55 },
       {
         search,
         getAsset: async () => ({
@@ -190,6 +237,10 @@ describe("compatibility segment matching", () => {
     expect(search).toHaveBeenCalledWith(
       { description: segment.text, keywords: [], limit: 1 },
       { includeAllUsers: true },
+      {
+        semanticThreshold: 0.55,
+        isRandom: false,
+      },
     );
     expect(matched).toMatchObject({
       matched_candidate_url:
@@ -202,12 +253,59 @@ describe("compatibility segment matching", () => {
     });
   });
 
+  it("randomly selects from recalled assets and allows repeats", async () => {
+    const segments = alignCompatibilitySegments(request()).slice(0, 2);
+    const secondCandidate: AssetSummary = {
+      ...candidate(),
+      id: "00000000-0000-4000-8000-000000000002",
+      name: "城市夜景",
+      description: "城市夜景中的车流",
+      mediaUrl:
+        "/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
+      searchScore: 0.72,
+      semanticScore: 0.72,
+    };
+    const search = vi.fn(async () => ({
+      items: [secondCandidate],
+      threshold: 0.3,
+      maxScore: 0.91,
+      reason: "matched" as const,
+      message: null,
+    }));
+
+    const matched = await matchCompatibilitySegments(
+      segments,
+      "https://focus.example.test",
+      { isRandom: true, semanticThreshold: 0.3 },
+      {
+        search,
+        getAsset: async () => ({
+          userId: null,
+          reviewStatus: "published",
+        }),
+      },
+    );
+
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 1 }),
+      { includeAllUsers: true },
+      {
+        semanticThreshold: 0.3,
+        isRandom: true,
+      },
+    );
+    expect(matched.map((segment) => segment.matched_candidate_url)).toEqual([
+      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
+      "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
+    ]);
+  });
+
   it("returns each matched candidate URL only once", async () => {
     const segments = alignCompatibilitySegments(request()).slice(0, 2);
     const matched = await matchCompatibilitySegments(
       segments,
       "https://focus.example.test",
-      [],
+      { isRandom: false, semanticThreshold: 0.55 },
       {
         search: async () => ({
           items: [candidate()],
@@ -241,7 +339,7 @@ describe("compatibility segment matching", () => {
     const [unmatched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
-      [],
+      { isRandom: false, semanticThreshold: 0.55 },
       {
         search: async () => ({
           items: [],
@@ -270,7 +368,7 @@ describe("compatibility segment matching", () => {
     const [unmatched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
-      [],
+      { isRandom: false, semanticThreshold: 0.55 },
       {
         search: async () => ({
           items: [],
@@ -308,10 +406,14 @@ describe("compatibility segment matching", () => {
     const [matched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
-      [
-        selectedUrl,
-        { file_url: selectedUrl, type: "video" },
-      ],
+      {
+        assetUrls: [
+          selectedUrl,
+          { file_url: selectedUrl, type: "video" },
+        ],
+        isRandom: false,
+        semanticThreshold: 0.55,
+      },
       {
         search,
         getAsset: async () => ({
@@ -326,6 +428,8 @@ describe("compatibility segment matching", () => {
       { includeAllUsers: true },
       {
         candidateAssetIds: ["00000000-0000-4000-8000-000000000001"],
+        semanticThreshold: 0.55,
+        isRandom: false,
       },
     );
     expect(matched.matched_candidate_url).toContain(
@@ -340,7 +444,11 @@ describe("compatibility segment matching", () => {
     const [unmatched] = await matchCompatibilitySegments(
       [segment],
       "https://focus.example.test",
-      ["https://media.example.test/source.mp4"],
+      {
+        assetUrls: ["https://media.example.test/source.mp4"],
+        isRandom: false,
+        semanticThreshold: 0.55,
+      },
       {
         search,
         getAsset: async () => null,

@@ -405,7 +405,9 @@ curl -X PUT \
 任务。支持两种请求格式：传入 ASR 逐词时间时自动对齐；`asr` 为空对象时，直接
 复用 `llm.segments` 中已有的 `group_id`、`start_time` 和 `end_time`。`llm` 可传
 对象或字符串化 JSON，`asset_url_list` 可传 URL 字符串或
-`{"file_url":"...","type":"video"}` 对象。接口立即返回 `202 Accepted`：
+`{"file_url":"...","type":"video"}` 对象。可选参数 `semantic_threshold` 控制
+语义召回阈值，取值范围为 `[0,1]`、默认 `0.3`；可选参数 `is_random` 控制最终
+选择策略，默认 `true`。接口立即返回 `202 Accepted`：
 
 ```json
 {
@@ -420,7 +422,10 @@ curl -X PUT \
 `high_light_word` 会转换为 `keyword`；LLM 每个 segment 上的其他字段会继续保留。
 
 每个分段都复用描述语义匹配：候选范围是所有已发布的公共及个人素材，归一化
-相似度必须严格大于 `0.55`，按相似度降序只取一个。每段始终返回六个
+相似度必须严格大于 `semantic_threshold`。`is_random=true` 时从当前语义召回并
+达标的不同素材中等概率随机选择一个，且不同分段可以重复使用同一素材；
+`is_random=false`
+时按相似度降序只取一个，并保留跨分段去重。每段始终返回六个
 `matched_candidate_*` 字段。命中时 URL、类型、描述和 `[0,1]` 分数有值，
 `reason` / `message` 为 `null`；未命中时前三项为 `null`，若存在低分候选则
 `score` 返回阈值过滤前最高分，并通过 `reason` / `message` 说明原因。个人素材 URL
@@ -459,8 +464,9 @@ curl -X PUT \
 }
 ```
 
-请求中除 `asr`、`llm`、`text`、`asset_url_list`、`callback_url` 外的未知顶层
-字段会原样放入回调；这些体积较大的已知输入字段不重复回传。匹配作业失败可重试
+请求中除 `asr`、`llm`、`text`、`asset_url_list`、`is_random`、
+`semantic_threshold`、`callback_url` 外的未知顶层字段会原样放入回调；这些已知
+输入字段不重复回传。匹配作业失败可重试
 最多 3 次，终态回调沿用统一回调投递器，失败指数退避、最多投递 5 次。
 
 ## 8. 异步素材变更

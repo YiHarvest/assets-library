@@ -30,7 +30,9 @@ const knownRequestFields = new Set([
   "asr",
   "asset_url_list",
   "callback_url",
+  "is_random",
   "llm",
+  "semantic_threshold",
   "text",
 ]);
 
@@ -195,7 +197,9 @@ export function alignCompatibilitySegments(
   });
 }
 
-function callbackFields(request: CompatibilityMatchRequest) {
+export function compatibilityCallbackFields(
+  request: CompatibilityMatchRequest,
+) {
   return Object.fromEntries(
     Object.entries(request).filter(([key]) => !knownRequestFields.has(key)),
   );
@@ -254,6 +258,12 @@ const compatibilityMatchDependencies: CompatibilityMatchDependencies = {
   getAsset: getAssetRecord,
 };
 
+interface CompatibilityMatchOptions {
+  assetUrls?: CompatibilityMatchRequest["asset_url_list"];
+  isRandom?: boolean;
+  semanticThreshold?: number;
+}
+
 function unmatchedSegment(
   segment: AlignedCompatibilitySegment,
   diagnostic: Pick<
@@ -279,9 +289,14 @@ function unmatchedSegment(
 export async function matchCompatibilitySegments(
   segments: AlignedCompatibilitySegment[],
   publicOrigin: string,
-  assetUrls: CompatibilityMatchRequest["asset_url_list"] = [],
+  options: CompatibilityMatchOptions = {},
   dependencies: CompatibilityMatchDependencies = compatibilityMatchDependencies,
 ) {
+  const {
+    assetUrls = [],
+    isRandom = true,
+    semanticThreshold = 0.3,
+  } = options;
   // 只在用户勾选的素材assetUrls中召回
   const restrictCandidates = assetUrls.length > 0;
   const candidateAssetIds = restrictCandidates
@@ -301,14 +316,17 @@ export async function matchCompatibilitySegments(
   const matched = await mapConcurrent(segments, maximumConcurrentMatches, async (segment) => {
     // keywords=[] 只有语义搜索
     const searchInput = { description: segment.text, keywords: [], limit: 1 };
-    const search = candidateAssetIds
-      ? await dependencies.search(
-          searchInput,
-          { includeAllUsers: true },
-          { candidateAssetIds },
-        )
-      : await dependencies.search(searchInput, { includeAllUsers: true });
-    const [candidate] = search.items;
+    const searchOptions = {
+      ...(candidateAssetIds ? { candidateAssetIds } : {}),
+      semanticThreshold,
+      isRandom,
+    };
+    const search = await dependencies.search(
+      searchInput,
+      { includeAllUsers: true },
+      searchOptions,
+    );
+    const candidate = search.items[0];
     if (!candidate) return unmatchedSegment(segment, search);
     if (allowedAssetIds && !allowedAssetIds.has(candidate.id.toLowerCase())) {
       return unmatchedSegment(segment, {
@@ -341,6 +359,7 @@ export async function matchCompatibilitySegments(
       matched_candidate_message: null,
     } satisfies MatchedCompatibilitySegment;
   });
+  if (isRandom) return matched;
   // 对匹配到的相同的素材进行去重
   const usedUrls = new Set<string>();
   return matched.map((segment) => {
@@ -476,7 +495,7 @@ export async function createCompatibilityMatchTask(
       payload: {
         request,
         publicOrigin: normalizedOrigin,
-        callbackFields: callbackFields(request),
+        callbackFields: compatibilityCallbackFields(request),
       },
       availableAt: now,
       createdAt: now,
@@ -526,7 +545,11 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
     const matched = await matchCompatibilitySegments(
       aligned,
       payload.publicOrigin,
-      payload.request.asset_url_list,
+      {
+        assetUrls: payload.request.asset_url_list,
+        isRandom: payload.request.is_random,
+        semanticThreshold: payload.request.semantic_threshold,
+      },
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);
     await completeJob(job);

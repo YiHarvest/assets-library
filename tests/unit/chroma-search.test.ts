@@ -86,6 +86,7 @@ describe("Chroma analysis index", () => {
       "/collections/collection-id/query",
     );
     expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+      n_results: 10,
       where: { assetId: { $in: ["asset-1", "asset-2"] } },
     });
 

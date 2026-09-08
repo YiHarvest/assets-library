@@ -403,7 +403,9 @@ describe("API v1 contracts and routes", () => {
     expect(service.createCompatibilityMatchTask).toHaveBeenCalledWith(
       expect.objectContaining({
         business_id: "biz-7",
+        is_random: true,
         llm: expect.objectContaining({ segments: expect.any(Array) }),
+        semantic_threshold: 0.3,
       }),
       "https://focus.example.com",
     );
@@ -443,6 +445,8 @@ describe("API v1 contracts and routes", () => {
               type: "video",
             },
           ],
+          is_random: false,
+          semantic_threshold: 0.72,
         }),
       }),
     );
@@ -455,9 +459,38 @@ describe("API v1 contracts and routes", () => {
         asset_url_list: [
           expect.objectContaining({ type: "video" }),
         ],
+        is_random: false,
+        semantic_threshold: 0.72,
       }),
       "https://focus.example.com",
     );
+  });
+
+  it("rejects invalid compatibility semantic controls", async () => {
+    const service = fakeService();
+    installApiV1Service(service);
+    const response = await createCompatibilityMatch(
+      jsonRequest("http://localhost/api/v1/compat/segment-match", {
+        callback_url: "https://callback.example.test/legacy",
+        asr: {},
+        llm: {
+          segments: [
+            {
+              segment_id: 1,
+              text: "做过生意的人都明白",
+              level: 1,
+              group_id: [1, 1],
+              start_time: 0.28,
+              end_time: 1.56,
+            },
+          ],
+        },
+        semantic_threshold: 1.01,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.createCompatibilityMatchTask).not.toHaveBeenCalled();
   });
 
   it("passes the upload stream to the service without buffering it in the route", async () => {

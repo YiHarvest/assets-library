@@ -345,6 +345,8 @@ export const compatibilityMatchRequestSchema = z
       .array(compatibilityAssetUrlSchema)
       .max(10_000)
       .default([]),
+    is_random: z.boolean().default(true),
+    semantic_threshold: z.number().min(0).max(1).default(0.3),
     callback_url: z
       .string()
       .url()

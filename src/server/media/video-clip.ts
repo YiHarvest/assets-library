@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
 import { AppError } from "@/server/errors";
-import { runMediaCommand } from "@/server/media/ffmpeg";
+import { runH264Encode, runMediaCommand } from "@/server/media/ffmpeg";
 import { resolveMediaPath } from "@/server/media/storage";
 
 const pending = new Map<string, Promise<string | null>>();
@@ -54,7 +54,7 @@ export async function prepareVideoClip(
         // 统一图片格式、应用 EXIF 方向，动画图片也只取第一帧。
         await sharp(source).rotate().png().toFile(image);
         inputArgs = ["-loop", "1", "-framerate", "25", "-i", image];
-        outputArgs = ["-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-tune", "stillimage"];
+        outputArgs = ["-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"];
       } else {
         const { stdout } = await runMediaCommand("ffprobe", [
           "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "v:0", "-show_entries",
@@ -78,12 +78,10 @@ export async function prepareVideoClip(
           "-vf", `fps=${video!.avg_frame_rate}`, "-frames:v", String(Math.max(1, Math.floor(durationMs * fps / 1000))),
           "-c:a", "aac"];
       }
-      await runMediaCommand("ffmpeg", [
+      await runH264Encode([
         "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", ...inputArgs,
         "-t", String(durationMs / 1000), ...outputArgs,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart", temporary,
-      ], failure);
+      ], temporary, failure, stillImage);
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       await fs.rename(temporary, output);
       return output;

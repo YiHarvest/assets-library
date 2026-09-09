@@ -172,6 +172,8 @@ Web 与 worker 是两个独立进程，会各自创建最多 6 条数据库连�
 Uvicorn 进程，视频级并发由内部 4 个队列 worker 控制；不要再通过增加 Uvicorn workers
 复制进程内队列。
 
+召回的视频裁剪、图片转视频也复用 `FFMPEG_HW_ACCEL`：`auto` 优先 NVENC，探测或实际转码失败时使用 CPU；`none` 仅用 CPU；`cuda` 要求 GPU 编码成功，失败直接报错。CPU 负责输入解码、图片处理、滤镜与音频，GPU 负责编码 H.264。FFmpeg 通过异步子进程执行，每个 Web 进程最多同时准备两个片段；首次媒体下载会等转码完成后再返回，后续读取缓存。驱动与 FFmpeg 的 NVENC API 必须兼容，仅能在编码器列表里看到 `h264_nvenc` 不代表 GPU 可用。
+
 ### 模型与向量
 
 ```dotenv

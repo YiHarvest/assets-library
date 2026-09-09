@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import { Readable } from "node:stream";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import { db } from "@/server/db";
 import { mediaObjects } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import { resolveMediaPath } from "@/server/media/storage";
 import { prepareVideoClip } from "@/server/media/video-clip";
-import { getAssetRecord } from "@/server/repositories/assets";
+import { getAssetDetail, getAssetRecord } from "@/server/repositories/assets";
+import { userIdSchema } from "@/shared/contracts";
 import { getAssetThumbnailObject } from "@/server/repositories/user-media";
 import type { ObjectStorage } from "@/server/storage/object-storage";
 import { createZosObjectStorage } from "@/server/storage/zos";
@@ -197,6 +199,15 @@ async function zosMediaResponse(
 
 type StoredMediaObject = typeof mediaObjects.$inferSelect;
 
+async function downloadMediaObject(object: StoredMediaObject, destination: string) {
+  if (object.provider === "local") {
+    if (!object.localPath) throw new AppError("storage_error", "本地媒体对象缺少存储路径。", 500);
+    await fs.promises.copyFile(resolveMediaPath(object.localPath), destination);
+  } else {
+    await zosStorage().downloadToFile(object.objectKey, destination);
+  }
+}
+
 export async function mediaObjectResponse(
   object: StoredMediaObject,
   media: MediaPresentation,
@@ -247,6 +258,38 @@ export async function mediaResponse(assetId: string, request: Request) {
   }
   const params = new URL(request.url).searchParams;
   const clipMs = params.get("clip_ms");
+  if (params.has("concat")) {
+    let parts: Array<{ assetId: string; userId: string | null }>;
+    try {
+      parts = z.array(z.object({ assetId: z.string().uuid(), userId: userIdSchema.nullable() }).strict()).min(2).max(100)
+        .parse(JSON.parse(Buffer.from(params.get("concat")!, "base64url").toString("utf8")));
+      if (parts[0].assetId !== assetId || new Set(parts.map(part => part.assetId.toLowerCase())).size !== parts.length || params.has("still_ms")) throw new Error();
+    } catch {
+      throw new AppError("invalid_request", "短视频组合参数无效。", 400);
+    }
+    const objects: StoredMediaObject[] = [];
+    let totalMs = 0;
+    for (const part of parts) {
+      // 每个组成素材都重新执行原有作用域检查，缓存命中也不能绕过权限或删除状态。
+      const detail = await getAssetDetail(part.assetId, part.userId ? { userId: part.userId } : {});
+      const durationMs = (detail.segmentEndMs ?? 0) - (detail.segmentStartMs ?? 0);
+      const record = part.assetId === assetId ? asset : await getAssetRecord(part.assetId);
+      if (!record || record.deletedAt || record.reviewStatus === "deleted" || !mediaIsReady(record) ||
+        detail.mediaType !== "video" || durationMs <= 0 || durationMs >= 3000) {
+        throw new AppError("invalid_request", "短视频组合中的素材已不可用。", 404);
+      }
+      const [stored] = part.assetId === assetId ? [object] : await db.select().from(mediaObjects)
+        .where(eq(mediaObjects.id, record.mediaObjectId!)).limit(1);
+      if (!stored || stored.status !== "persisted") throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
+      objects.push(stored);
+      totalMs += durationMs;
+    }
+    if (totalMs < 3000) throw new AppError("invalid_request", "短视频组合时长不足 3 秒。", 400);
+    const clipped = await prepareVideoClip(objects.map(item => `${item.id}:${item.updatedAt.getTime()}`).join(","),
+      clipMs === null ? totalMs : Number(clipMs), destination => downloadMediaObject(objects[0], destination), false,
+      objects.slice(1).map(item => destination => downloadMediaObject(item, destination)));
+    return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-concat.mp4` }, clipped!, request);
+  }
   const stillImage = asset.mediaType === "image" && params.has("still_ms");
   if (stillImage && params.get("still_ms") !== "3000") {
     throw new AppError("invalid_request", "静态图片视频时长固定为 3000 毫秒。", 400);
@@ -255,14 +298,8 @@ export async function mediaResponse(assetId: string, request: Request) {
     if (object.status !== "persisted") {
       throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
     }
-    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, stillImage ? 3000 : Number(clipMs), async destination => {
-      if (object.provider === "local") {
-        if (!object.localPath) throw new AppError("storage_error", "本地媒体对象缺少存储路径。", 500);
-        await fs.promises.copyFile(resolveMediaPath(object.localPath), destination);
-      } else {
-        await zosStorage().downloadToFile(object.objectKey, destination);
-      }
-    }, stillImage);
+    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, stillImage ? 3000 : Number(clipMs),
+      destination => downloadMediaObject(object, destination), stillImage);
     if (clipped) {
       return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-clip.mp4` }, clipped, request);
     }

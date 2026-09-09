@@ -16,11 +16,12 @@ export async function prepareVideoClip(
   durationMs: number,
   downloadSource: (destination: string) => Promise<unknown>,
   stillImage = false,
+  additionalSources: Array<(destination: string) => Promise<unknown>> = [],
 ) {
   if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
     throw new AppError("invalid_request", "裁剪时长必须是正整数毫秒。", 400);
   }
-  const key = createHash("sha256").update(`${stillImage ? "still:" : ""}${sourceVersion}:${durationMs}`).digest("hex");
+  const key = createHash("sha256").update(`${additionalSources.length ? "concat:" : stillImage ? "still:" : ""}${sourceVersion}:${durationMs}`).digest("hex");
   const directory = resolveMediaPath(path.join(".staging", `recall-${key}`));
   const output = path.join(directory, "clip.mp4");
   if (await fs.stat(output).then(stat => stat.size > 0, () => false)) {
@@ -49,7 +50,40 @@ export async function prepareVideoClip(
       await downloadSource(source);
       let inputArgs: string[];
       let outputArgs: string[];
-      if (stillImage) {
+      let outputDurationMs = durationMs;
+      if (additionalSources.length) {
+        const files = [source];
+        for (const [index, download] of additionalSources.entries()) {
+          const file = path.join(workspace, `source-${index + 1}.mp4`);
+          await download(file);
+          files.push(file);
+        }
+        const probes = [];
+        for (const file of files) {
+          const { stdout } = await runMediaCommand("ffprobe", ["-v", "error", "-protocol_whitelist", "file,pipe",
+            "-show_entries", "stream=codec_type,width,height,duration:format=duration", "-of", "json", file], failure);
+          const probe = JSON.parse(stdout) as { streams: Array<{ codec_type: string; width?: number; height?: number; duration?: string }>; format: { duration?: string } };
+          const video = probe.streams.find(stream => stream.codec_type === "video");
+          const duration = Number(video?.duration ?? probe.format.duration);
+          if (!video?.width || !video.height || !Number.isFinite(duration) || duration <= 0 || duration >= 3) throw failure;
+          probes.push({ width: video.width, height: video.height, duration, audio: probe.streams.some(stream => stream.codec_type === "audio") });
+        }
+        const totalMs = Math.round(probes.reduce((sum, probe) => sum + probe.duration * 1000, 0));
+        if (totalMs < 3000) throw new AppError("invalid_request", "短视频组合实际时长不足 3 秒。", 400);
+        outputDurationMs = Math.min(durationMs, totalMs);
+        const width = Math.ceil(probes[0].width / 2) * 2, height = Math.ceil(probes[0].height / 2) * 2;
+        const filters = probes.flatMap((probe, i) => {
+          const seconds = Math.ceil(probe.duration * 25) / 25;
+          return [
+            `[${i}:v:0]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25,tpad=stop_mode=clone:stop_duration=0.04,trim=duration=${seconds},setpts=PTS-STARTPTS[v${i}]`,
+            `${probe.audio ? `[${i}:a:0]aresample=48000,aformat=channel_layouts=stereo,apad` : "anullsrc=r=48000:cl=stereo"},atrim=duration=${seconds},asetpts=PTS-STARTPTS[a${i}]`,
+          ];
+        });
+        filters.push(probes.map((_, i) => `[v${i}][a${i}]`).join("") + `concat=n=${files.length}:v=1:a=1[v][a]`);
+        inputArgs = files.flatMap(file => ["-protocol_whitelist", "file,pipe", "-i", file]);
+        outputArgs = ["-filter_complex_threads", "1", "-filter_complex", filters.join(";"), "-map", "[v]", "-map", "[a]",
+          "-frames:v", String(Math.max(1, Math.floor(outputDurationMs * 25 / 1000))), "-c:a", "aac"];
+      } else if (stillImage) {
         const image = path.join(workspace, "still.png");
         // 统一图片格式、应用 EXIF 方向，动画图片也只取第一帧。
         await sharp(source).rotate().png().toFile(image);
@@ -80,7 +114,7 @@ export async function prepareVideoClip(
       }
       await runH264Encode([
         "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", ...inputArgs,
-        "-t", String(durationMs / 1000), ...outputArgs,
+        "-t", String(outputDurationMs / 1000), ...outputArgs,
       ], temporary, failure, stillImage);
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       await fs.rename(temporary, output);

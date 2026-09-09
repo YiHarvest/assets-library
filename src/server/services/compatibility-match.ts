@@ -17,6 +17,7 @@ import {
 import { persistedTaskError } from "@/server/services/task-lifecycle";
 import { segmentRecallContexts } from "@/server/search/segment-context";
 import { balancedAssetAssignment } from "./balanced-asset-assignment";
+import { addShortVideoGroups, fitShortVideoGroups, type MatchMaterial } from "./short-video-groups";
 import {
   compatibilityMatchRequestSchema,
   type CompatibilityMatchAccepted,
@@ -302,29 +303,41 @@ export async function matchCompatibilitySegments(
   const usedAssetIds = new Set<string>();
   const clipEnabled = loadConfig().SEGMENT_MATCH_CLIP_ENABLED;
   const contexts = segmentRecallContexts(segments);
-  const searches: DescriptionSearchResult[] = [];
-  // Collect complete pools before assigning assets; later segments retain their choices.
-  for (let start = 0; start < segments.length; start += 4) {
-    searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
-      { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
-      { includeAllUsers: true }, {
-        minDurationMs: 3000,
-        ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
-        ...(candidateAssetIds ? { candidateAssetIds } : {}),
-        excludedAssetIds: [], semanticThreshold, isRandom: false,
-      },
-    ))));
+  const recall = async (shortVideosOnly = false) => {
+    const searches: DescriptionSearchResult[] = [];
+    // Collect complete pools before assigning assets; later segments retain their choices.
+    for (let start = 0; start < segments.length; start += 4) {
+      searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
+        { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
+        { includeAllUsers: true }, {
+          ...(shortVideosOnly ? { shortVideosOnly: true } : { minDurationMs: 3000 }),
+          ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
+          ...(candidateAssetIds ? { candidateAssetIds } : {}),
+          excludedAssetIds: [], semanticThreshold, isRandom: false,
+        },
+      ))));
+    }
+    return searches.map(search => ({ ...search, items: search.items
+      .filter(candidate => !allowedAssetIds || allowedAssetIds.has(candidate.id.toLowerCase())) }));
+  };
+  const searches = await recall();
+  let pools: MatchMaterial[][] = searches.map(search => search.items);
+  let shortSearches: DescriptionSearchResult[] = [];
+  if ((!candidateAssetIds || candidateAssetIds.length >= 2) && balancedAssetAssignment(segments, pools).size < segments.length) {
+    shortSearches = await recall(true);
+    pools = addShortVideoGroups(segments, pools, shortSearches);
   }
-  const assignment = balancedAssetAssignment(segments, searches.map(search => search.items
-    .filter(candidate => !allowedAssetIds || allowedAssetIds.has(candidate.id.toLowerCase()))), isRandom);
+  const assignment = balancedAssetAssignment(segments, pools, isRandom);
+  fitShortVideoGroups(segments, assignment, shortSearches);
   for (const [index, segment] of segments.entries()) {
     const search = searches[index];
     const candidate = assignment.get(index);
-    if (!candidate || usedAssetIds.has(candidate.id)) {
+    const parts = candidate?.parts ?? (candidate ? [candidate] : []);
+    if (!candidate || parts.some(part => usedAssetIds.has(part.id))) {
       matched.push(unmatchedSegment(segment, search));
       continue;
     }
-    if (allowedAssetIds && !allowedAssetIds.has(candidate.id.toLowerCase())) {
+    if (allowedAssetIds && parts.some(part => !allowedAssetIds.has(part.id.toLowerCase()))) {
       matched.push(unmatchedSegment(segment, {
         maxScore: search.maxScore,
         reason: "no_candidates",
@@ -332,11 +345,12 @@ export async function matchCompatibilitySegments(
       }));
       continue;
     }
-    const record = await dependencies.getAsset(candidate.id);
+    const records = await Promise.all(parts.map(part => dependencies.getAsset(part.id)));
+    const record = records[0];
     const rawCandidateScore =
       candidate.searchScore ?? search.maxScore ?? 0;
     const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
-    if (!record || !["pending_review", "published"].includes(record.reviewStatus)) {
+    if (!record || records.some(item => !item || !["pending_review", "published"].includes(item.reviewStatus))) {
       matched.push(unmatchedSegment(segment, {
         maxScore: candidateScore,
         reason: "no_candidates",
@@ -344,10 +358,13 @@ export async function matchCompatibilitySegments(
       }));
       continue;
     }
-    usedAssetIds.add(candidate.id);
-    const mediaUrl = new URL(withUserScope(candidate.mediaUrl, record.userId), publicOrigin);
+    parts.forEach(part => usedAssetIds.add(part.id));
+    const mediaUrl = new URL(withUserScope(parts[0].mediaUrl, record.userId), publicOrigin);
     const durationMs = Math.round((segment.end_time - segment.start_time) * 1000);
-    if (candidate.mediaType === "image") {
+    if (candidate.parts) {
+      mediaUrl.searchParams.set("concat", Buffer.from(JSON.stringify(parts.map((part, i) => ({ assetId: part.id, userId: records[i]!.userId })))).toString("base64url"));
+      if (clipEnabled && durationMs > 0) mediaUrl.searchParams.set("clip_ms", String(durationMs));
+    } else if (candidate.mediaType === "image") {
       mediaUrl.searchParams.set("still_ms", "3000");
     } else if (clipEnabled && durationMs > 0 &&
       record.segmentStartMs != null && record.segmentEndMs != null &&

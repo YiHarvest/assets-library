@@ -15,7 +15,9 @@ import { loadTestConfig } from "../helpers/config";
 
 const databaseRows = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db", () => ({
-  db: { select: () => ({ from: () => ({ where: databaseRows }) }) },
+  db: { select: () => ({ from: () => ({ where: databaseRows,
+    innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
+  }) }) },
 }));
 
 function request() {
@@ -395,6 +397,42 @@ describe("compatibility segment matching", () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it("uses raw similarity strictly above 0.5 for short videos, not high RRF or BM25 scores", async () => {
+    const candidates = [
+      { assetId: "pass", searchScore: 0.2, semanticSimilarity: 0.51 },
+      { assetId: "boundary", searchScore: 1, semanticSimilarity: 0.5 },
+      { assetId: "low", searchScore: 1, semanticSimilarity: 0.49 },
+      { assetId: "keyword", searchScore: 1 },
+    ];
+    databaseRows.mockResolvedValueOnce(candidates.map(candidate => ({ id: candidate.assetId })))
+      .mockResolvedValueOnce([{ ...candidate(), id: "pass", createdAt: new Date(), updatedAt: new Date(), segmentStartMs: 2000, segmentEndMs: 3600 }]);
+    vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue(candidates);
+    try {
+      const result = await searchAssetsByDescriptionDetailed({ description: "居家", limit: 10 }, {}, { shortVideosOnly: true });
+      expect(result.items.map(item => item.id)).toEqual(["pass"]);
+      expect(result.shortVideoDurations).toEqual({ pass: 1600 });
+      expect(result.items[0]).not.toHaveProperty("semanticSimilarity");
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it.each(["true", "false"])("returns one combined video URL with unchanged fields and clipping=%s", async enabled => {
+    vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", enabled);
+    const parts = [candidate(), { ...candidate(), id: "00000000-0000-4000-8000-000000000002" }];
+    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 7.6 };
+    const [result] = await matchCompatibilitySegments([segment], "https://focus.example.test", {}, {
+      search: async (_input, _scope, options) => ({ items: options?.shortVideosOnly ? parts : [],
+        shortVideoDurations: Object.fromEntries(parts.map(part => [part.id, 1600])),
+        threshold: 0, maxScore: 0.5, reason: "matched", message: null }),
+      getAsset: async () => ({ userId: "759", reviewStatus: "published", segmentStartMs: 5000, segmentEndMs: 6600 }),
+    });
+    expect(result).toMatchObject(segment);
+    const url = new URL(result.matched_candidate_url!);
+    expect(JSON.parse(Buffer.from(url.searchParams.get("concat")!, "base64url").toString())).toEqual(parts.map(part => ({ assetId: part.id, userId: "759" })));
+    expect(url.searchParams.get("clip_ms")).toBe(enabled === "true" ? "1480" : null);
+    expect(result.matched_candidate_type).toBe("video");
+    expect(result).not.toHaveProperty("parts");
   });
 
   it.each([true, false])("rejects repeated candidates even if search ignores exclusions with isRandom=%s", async (isRandom) => {

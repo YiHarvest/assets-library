@@ -394,7 +394,7 @@ v1 分段匹配另用当前组和前一组补充语境：上下文仅为已有�
 
 - `SEARCH_VECTOR_TOP_K` / `SEARCH_KEYWORD_TOP_K`：每路候选分块数，默认各 100。
 - `SEARCH_SEMANTIC_THRESHOLD`：原始余弦相似度下限，两个业务接口共用，默认 `0.5`，范围 `[-1,1]`；设为 `-1` 不限制。v2 使用策略文件中的 `semanticThreshold`，当前同为 `0.5`。
-- `SEGMENT_MATCH_CLIP_ENABLED`：默认 `true`。分段匹配命中长视频时，在原媒体 URL 上附带 `clip_ms`，首次下载截取素材开头 N 秒（N 为文本段时长）并缓存 MP4。设为 `false` 后新的视频匹配使用原 URL。原视频不足 3 秒时在召回前排除；图片固定生成 3 秒静态视频（URL 带 `still_ms=3000`，返回类型为 `video`），这两条规则不受裁剪开关影响。达到 3 秒但短于文本的视频不循环或拼接。下游原样使用 `matched_candidate_url`，请求和响应字段不变。
+- `SEGMENT_MATCH_CLIP_ENABLED`：默认 `true`。分段匹配命中长视频时，在原媒体 URL 上附带 `clip_ms`，首次下载截取素材开头 N 秒（N 为文本段时长）并缓存 MP4。设为 `false` 后独立视频使用原 URL，短片组合返回完整拼接视频。原视频不足 3 秒时可作为补充组合候选：各片段对当前文本的原始语义分数须大于 0.5，组合累计至少 3 秒，尽量贴近目标时长，否则放弃；图片固定生成 3 秒静态视频（URL 带 `still_ms=3000`，返回类型为 `video`），这两条规则不受裁剪开关影响。达到 3 秒但短于文本的视频不循环或拼接。下游原样使用 `matched_candidate_url`，请求和响应字段不变。
 - `SEARCH_KEYWORD_THRESHOLD`：BM25 原始分数下限，默认 `22.25`；设为 `0` 不限制。
 - `SEARCH_NUM_CANDIDATES`：向量近邻候选数，默认 200，不小于向量 Top-K。
 - `SEARCH_RRF_K`：RRF 常数，默认 60；两路等权。

@@ -52,7 +52,7 @@ describe("ES asset recall", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await searchAssets(query, ["visual"], undefined, "父爱则母静，母静则子安，家和万事兴");
-    expect(result).toEqual(fuseResults([chunk("visual:0")], [], 60));
+    expect(result).toEqual(fuseResults([{ ...chunk("visual:0"), score: 1 }], [], 60));
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).knn.similarity).toBe(0.5);
   });
 
@@ -61,6 +61,13 @@ describe("ES asset recall", () => {
       ["a:1", "a:2", "context-only:0"].map(chunk));
     expect(result).toEqual([{ assetId: "a", searchScore: 1, semanticScore: 0.6, keywordScore: 0.4 }]);
     expect(fuseResults([], [], 60, [chunk("context-only:0")])).toEqual([]);
+  });
+
+  it("keeps raw phrase similarity separate from RRF and context scores", () => {
+    const [result] = fuseResults([{ ...chunk("a:0"), score: 0.51 }], [chunk("a:1")], 60,
+      [{ ...chunk("a:2"), score: 0.9 }]);
+    expect(result.semanticSimilarity).toBe(0.51);
+    expect(result.semanticSimilarity).not.toBe(result.semanticScore);
   });
 
   it("fuses chunk ranks before keeping the best chunk per asset", () => {

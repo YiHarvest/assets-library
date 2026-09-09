@@ -8,6 +8,8 @@ export interface SearchCandidate {
   searchScore: number;
   keywordScore?: number;
   semanticScore?: number;
+  /** 单句原始余弦相似度，仅供内部短视频组合资格判断。 */
+  semanticSimilarity?: number;
 }
 
 /** 每个描述/摘要独立成块；不混入名称、标签、topics 或 OCR。 */
@@ -147,6 +149,7 @@ export async function deleteAssetIndex(assetId: string) {
 interface ChunkHit {
   chunkId: string;
   assetId: string;
+  score?: number;
 }
 
 /** 两路分块等权 RRF、素材去重后，上下文仅给已有候选加分。 */
@@ -168,6 +171,10 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   const assets = new Map<string, SearchCandidate>();
   for (const [, candidate] of ranked) {
     if (!assets.has(candidate.assetId)) assets.set(candidate.assetId, candidate);
+  }
+  for (const hit of vectorHits) {
+    const candidate = assets.get(hit.assetId)!;
+    if (hit.score !== undefined) candidate.semanticSimilarity = Math.max(candidate.semanticSimilarity ?? -1, hit.score);
   }
   // 上下文权重为单句一路的一半；不同分块的支持也只按素材加一次。
   const contextScores = new Map<string, number>();

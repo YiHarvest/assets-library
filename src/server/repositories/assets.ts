@@ -1306,6 +1306,8 @@ export async function listAssets({
 
 export interface DescriptionSearchResult {
   items: AssetSummary[];
+  /** 内部组合素材使用，不进入业务响应。 */
+  shortVideoDurations?: Record<string, number>;
   threshold: number;
   maxScore: number | null;
   reason: AssetSearchMeta["reason"];
@@ -1313,6 +1315,8 @@ export interface DescriptionSearchResult {
 }
 
 export interface DescriptionSearchOptions {
+  /** 仅召回不足 3 秒且单句原始语义分数大于 0.5 的视频。 */
+  shortVideosOnly?: boolean;
   /** Internal target slot duration; images can fill a slot without this limit. */
   minDurationMs?: number;
   /** Internal source context; never changes the public description or response. */
@@ -1358,9 +1362,12 @@ export async function searchAssetsByDescriptionDetailed(
   if (options.excludedAssetIds?.length) conditions.push(notInArray(assets.id, [...options.excludedAssetIds]));
   if (options.minDurationMs !== undefined) conditions.push(or(eq(assets.mediaType, "image"),
     sql`${assets.segmentEndMs} >= ${assets.segmentStartMs} + ${options.minDurationMs}`)!);
+  if (options.shortVideosOnly) conditions.push(eq(assets.mediaType, "video"),
+    sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + 3000`);
   const where = and(...conditions);
   const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-  const candidates = await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context);
+  const candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context))
+    .filter(candidate => !options.shortVideosOnly || (candidate.semanticSimilarity ?? -1) > 0.5);
   const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
   const ids = candidates.map((item) => item.assetId);
   const rankedIds = options.isRandom ? sampleAssetIds(ids, limit) : ids.slice(0, limit);
@@ -1370,6 +1377,8 @@ export async function searchAssetsByDescriptionDetailed(
   const tagMap = await getTagsForAssets(rankedIds);
   const metadata = searchMetadata(candidates);
   return {
+    ...(options.shortVideosOnly ? { shortVideoDurations: Object.fromEntries(rows.map(row =>
+      [row.id, row.segmentEndMs! - row.segmentStartMs!])) } : {}),
     items: rankedIds.flatMap((id) => {
       const row = rowsById.get(id);
       return row ? [{ ...summaryFromRow(row, tagMap.get(id) ?? []), ...candidateScores(candidateMap.get(id)!) }] : [];

@@ -29,17 +29,38 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
-  it("requires contextual semantic support even when an isolated phrase and BM25 both match", async () => {
+  it("boosts contextual support without excluding visual matches or admitting context-only assets", async () => {
     vi.stubEnv("SEARCH_SEMANTIC_THRESHOLD", "0.5");
     const fetchMock = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
       if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] }] });
       const body = JSON.parse(String(init.body));
-      return json(hits(body.knn?.query_vector[1] === 1 ? ["good:0"] : ["bad:0", "good:0"]));
+      return json(hits(body.knn?.query_vector[1] === 1 ? ["context-only:0", "good:1"] : ["visual:0", "good:0"]));
     });
     vi.stubGlobal("fetch", fetchMock);
-    const result = await searchAssets("结束了吗", ["bad", "good"], undefined, "市场红利是否结束");
-    expect(result.map(candidate => candidate.assetId)).toEqual(["good"]);
+    const result = await searchAssets("是母亲", ["visual", "good", "context-only"], undefined, "母亲让家庭更加和睦");
+    expect(result.map(candidate => candidate.assetId)).toEqual(["good", "visual"]);
+    expect(result[0].searchScore).toBeGreaterThan(result[1].searchScore);
     expect(JSON.parse(fetchMock.mock.calls[3][1].body).knn.similarity).toBe(0.5);
+  });
+
+  it.each(["家和万事兴", "是母亲", "是父亲"])("keeps %s when only the short phrase passes the semantic threshold", async (query) => {
+    vi.stubEnv("SEARCH_SEMANTIC_THRESHOLD", "0.5");
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] }] });
+      const body = JSON.parse(String(init.body));
+      return json(hits(body.knn?.query_vector[0] === 1 ? ["visual:0"] : []));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await searchAssets(query, ["visual"], undefined, "父爱则母静，母静则子安，家和万事兴");
+    expect(result).toEqual(fuseResults([chunk("visual:0")], [], 60));
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).knn.similarity).toBe(0.5);
+  });
+
+  it("adds context support once per asset and keeps RRF scores normalized", () => {
+    const result = fuseResults([chunk("a:0")], [chunk("a:0")], 60,
+      ["a:1", "a:2", "context-only:0"].map(chunk));
+    expect(result).toEqual([{ assetId: "a", searchScore: 1, semanticScore: 0.6, keywordScore: 0.4 }]);
+    expect(fuseResults([], [], 60, [chunk("context-only:0")])).toEqual([]);
   });
 
   it("fuses chunk ranks before keeping the best chunk per asset", () => {

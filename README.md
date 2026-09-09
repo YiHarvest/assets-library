@@ -384,6 +384,8 @@ PRD_ELASTICSEARCH_INDEX=asset_library_prd
 本地模型连接沿用 `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。
 向量维度根据 embedding 返回值自动创建，关键词默认使用 qagent 同款 `standard` 分析器。
 两路按分块 ID 做 RRF 后，再按素材 ID 保留分数最高的块；素材分数及分项贡献取自该块。
+v1 分段匹配另用当前组和前一组补充语境：上下文仅为已有候选加分，权重为单句一路的一半；
+上下文未过线不会淘汰单句候选，也不会独立引入只符合整段主题的素材。计入上下文时总分归一化至 `[0,1]`。
 去重后才执行 rerank、分页或 Top-K；最终素材数可能少于请求数量，不自动补召回。
 
 每个素材当前的 `description`、视频 `visualSegments` / `keyMoments` / `timeline` 中

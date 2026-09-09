@@ -1,10 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { balancedAssetAssignment } from "@/server/services/balanced-asset-assignment";
+
+vi.mock("node:crypto", () => ({ randomInt: () => 0 }));
 
 const segments = Array.from({ length: 9 }, (_, i) => ({ start_time: i, end_time: i + 1 }));
 const a = { id: "a" }, b = { id: "b" }, c = { id: "c" };
 
 describe("balanced material placement", () => {
+  it("preserves recall scores when random selection is enabled", () => {
+    const strong = { id: "strong", searchScore: 0.6 }, weak = { id: "weak", searchScore: 0.4 };
+    expect(balancedAssetAssignment(segments.slice(0, 1), [[strong, weak]], true).get(0)).toBe(strong);
+  });
+  it("still randomizes equally scored candidates", () => {
+    const left = { id: "left", searchScore: 0.5 }, right = { id: "right", searchScore: 0.5 };
+    expect(balancedAssetAssignment(segments.slice(0, 1), [[left, right]], true).get(0)).toBe(right);
+  });
   it("spreads three reusable candidates across the whole timeline instead of consuming them at the start", () => {
     const result = balancedAssetAssignment(segments, segments.map(() => [a, b, c]));
     expect([...result.keys()].sort((x, y) => x - y)).toEqual([1, 4, 7]);

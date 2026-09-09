@@ -3,7 +3,7 @@ import { randomInt } from "node:crypto";
 interface Edge { to: number; reverse: number; capacity: number; cost: number }
 
 /** Maximize supported matches, then minimize distance to evenly spaced time slots. */
-export function balancedAssetAssignment<T extends { id: string }>(
+export function balancedAssetAssignment<T extends { id: string; searchScore?: number }>(
   segments: readonly { start_time: number; end_time: number }[], pools: readonly (readonly T[])[], isRandom = false,
 ): Map<number, T> {
   const ids = [...new Set(pools.flatMap(pool => pool.map(asset => asset.id)))];
@@ -13,7 +13,8 @@ export function balancedAssetAssignment<T extends { id: string }>(
     if (isRandom) for (let i = copy.length - 1; i > 0; i--) {
       const j = randomInt(i + 1); [copy[i], copy[j]] = [copy[j], copy[i]];
     }
-    return copy;
+    // 随机仅打破同分并列，保留语义与上下文的召回排序。
+    return copy.sort((a, b) => (b.searchScore ?? 0) - (a.searchScore ?? 0));
   });
   const start = Math.min(...segments.map(segment => segment.start_time));
   const duration = Math.max(0.001, Math.max(...segments.map(segment => segment.end_time)) - start);

@@ -149,8 +149,8 @@ interface ChunkHit {
   assetId: string;
 }
 
-/** 先按分块排名做等权 RRF，再按素材保留分数最高的块。 */
-export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: number): SearchCandidate[] {
+/** 两路分块等权 RRF、素材去重后，上下文仅给已有候选加分。 */
+export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: number, contextHits: ChunkHit[] = []): SearchCandidate[] {
   const chunks = new Map<string, SearchCandidate>();
   for (const [hits, field] of [
     [vectorHits, "semanticScore"], [keywordHits, "keywordScore"],
@@ -169,7 +169,22 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   for (const [, candidate] of ranked) {
     if (!assets.has(candidate.assetId)) assets.set(candidate.assetId, candidate);
   }
-  return [...assets.values()];
+  // 上下文权重为单句一路的一半；不同分块的支持也只按素材加一次。
+  const contextScores = new Map<string, number>();
+  contextHits.forEach(({ assetId }, index) => {
+    if (!contextScores.has(assetId)) contextScores.set(assetId, (k + 1) / (4 * (k + index + 1)));
+  });
+  if (contextHits.length) {
+    for (const candidate of assets.values()) {
+      const bonus = contextScores.get(candidate.assetId) ?? 0;
+      candidate.searchScore = (candidate.searchScore + bonus) / 1.25;
+      if (candidate.semanticScore !== undefined || bonus) {
+        candidate.semanticScore = ((candidate.semanticScore ?? 0) + bonus) / 1.25;
+      }
+      if (candidate.keywordScore !== undefined) candidate.keywordScore /= 1.25;
+    }
+  }
+  return [...assets.values()].sort((a, b) => b.searchScore - a.searchScore);
 }
 
 /** 后续在这里实现重排；当前保留 RRF 顺序和分数。 */
@@ -184,7 +199,7 @@ interface SearchHits {
   hits: { hits: Array<{ _id: string; _score: number; _source: { assetId: string } }> };
 }
 
-/** 两路原始分块分数供检索与离线阈值评测共用，不作为 API 的 RRF 分项分数。 */
+/** 单句两路及可选上下文的原始分块分数，不作为 API 的 RRF 分项分数。 */
 export async function recallChunks(query: string, assetIds: string[], context?: string) {
   if (!assetIds.length) return [[], []];
   const config = loadConfig();
@@ -227,8 +242,7 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
         score: route !== 1 ? 2 * hit._score - 1 : hit._score,
       }));
   }));
-  const contextualIds = contextVector ? new Set(results[2].map(hit => hit.assetId)) : null;
-  return results.slice(0, 2).map(hits => contextualIds ? hits.filter(hit => contextualIds.has(hit.assetId)) : hits);
+  return results;
 }
 
 export async function searchAssets(query: string, assetIds: string[], revalidate?: (assetIds: string[]) => Promise<string[]>, context?: string): Promise<SearchCandidate[]> {
@@ -236,6 +250,6 @@ export async function searchAssets(query: string, assetIds: string[], revalidate
   const config = loadConfig();
   if (config.SEARCH_RECALL_ENGINE === "v2") return searchWithV2(query, assetIds, revalidate, context);
   const results = await recallChunks(query, assetIds, context);
-  const candidates = fuseResults(results[0], results[1], config.SEARCH_RRF_K);
+  const candidates = fuseResults(results[0], results[1], config.SEARCH_RRF_K, results[2]);
   return config.SEARCH_RERANK_ENABLED ? rerank(query, candidates) : candidates;
 }

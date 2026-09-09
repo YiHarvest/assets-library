@@ -85,7 +85,7 @@ export const videoAnalysisSchema = z.object({
       seconds: z.number().nonnegative(),
       summary: z.string().min(1),
     }),
-  ).max(3),
+  ),
   timeline: z.array(timedSummarySchema).max(5),
 });
 export type VideoAnalysis = z.infer<typeof videoAnalysisSchema>;

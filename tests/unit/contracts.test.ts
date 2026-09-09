@@ -13,6 +13,16 @@ import {
 } from "@/shared/contracts";
 
 describe("shared contracts", () => {
+  it("preserves more than three key moments in stored video analysis", () => {
+    const keyMoments = Array.from({ length: 4 }, (_, seconds) => ({ seconds, summary: "摘要" }));
+    const result = videoAnalysisSchema.parse({
+      kind: "video", description: "测试视频", topics: [],
+      tags: { scene: [], person: [], form: [] },
+      visualSegments: [], timeline: [], keyMoments,
+    });
+    expect(result.keyMoments).toEqual(keyMoments);
+  });
+
   it("accepts a complete image analysis", () => {
     expect(
       imageAnalysisSchema.parse({

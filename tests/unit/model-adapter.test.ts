@@ -472,7 +472,7 @@ describe("model adapter", () => {
       expect(outcome.result.tags.scene).not.toContain("橱窗");
       expect(outcome.result.tags.person).toEqual(["行人"]);
       expect(outcome.result.tags.form).toEqual(["橱窗"]);
-      expect(outcome.result.keyMoments).toHaveLength(3);
+      expect(outcome.result.keyMoments).toHaveLength(5);
       expect(outcome.result.timeline).toHaveLength(5);
       expect(outcome.result.timeline[0]?.startSeconds).toBe(0);
       expect(outcome.result.timeline.at(-1)?.endSeconds).toBe(7);

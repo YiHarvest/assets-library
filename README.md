@@ -101,7 +101,7 @@ Drizzle migration、启动 Web 与 worker。任一服务异常会输出 `.run/` 
 | 模式 | 数据库 | 内部模型服务 | Web |
 | --- | --- | --- | --- |
 | `APP_MODE=dev` | 将 `DATABASE_URL` 的库名替换为 `DEV_DATABASE_NAME`；名称必须以 `_test` 结尾 | 保留 `.env` 中的远程地址，例如开发机访问 `<INTERNAL_SERVER_IP>` | `next dev --turbo` |
-| `APP_MODE=prd` | 将库名强制替换为 `PRD_DATABASE_NAME`；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 主机由 `PRD_INTERNAL_SERVICE_HOST` 注入 | `next start` |
+| `APP_MODE=prd` | 将库名强制替换为 `PRD_DATABASE_NAME`；拒绝 `_test` 库，并把主机改为 `PRD_INTERNAL_SERVICE_HOST` | VLM、LLM、Embedding 的 IP/localhost 主机由 `PRD_INTERNAL_SERVICE_HOST` 注入，外部域名保留 | `next start` |
 
 当前开发配置应得到类似输出：
 
@@ -194,8 +194,8 @@ EMBEDDING_API_KEY=<secret>
 EMBEDDING_MODEL=<model-id>
 ```
 
-dev 保留上述远程地址。prd 部署到内网服务器后会自动把 VLM、LLM 和 Embedding 主机
-替换为 `PRD_INTERNAL_SERVICE_HOST` 的环境配置值，路径保持不变。主模型与 fallback 合计最多 5 个。
+dev 保留上述远程地址。prd 仅将 VLM、LLM 和 Embedding 的 IP/localhost 主机
+替换为 `PRD_INTERNAL_SERVICE_HOST`，外部域名和路径保持不变。主模型与 fallback 合计最多 5 个。
 单次视频请求仍有 120 秒保护，但主模型预算为 60 秒、全候选链路总预算为 90 秒；预算从
 素材开始分析时计算，并包含同模型并发排队、首次请求、纯文本格式修复和 fallback。只有
 5 秒内返回的 HTTP 5xx、429 或短暂网络中断才按 `VLM_RETRY_COUNT` 重试当前候选。模型输出

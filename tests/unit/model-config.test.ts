@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { loadTestConfig as loadConfig } from "../helpers/config";
 
 describe("model configuration", () => {
+  it("preserves hosted model domains in production while routing IP endpoints internally", () => {
+    const config = loadConfig({
+      APP_MODE: "prd",
+      WEBUI_LOCK_KEY: "test-only-webui-lock-key-32-bytes-minimum",
+      PRD_INTERNAL_SERVICE_HOST: "localhost",
+      VLM_BASE_URL: "https://vision.example/",
+      VLM_NAME: "vision-model",
+      VLM_FALLBACK_BASE_URL: "http://192.0.2.1:30000/v1",
+      VLM_FALLBACK_NAMES: "fallback-model",
+      LLM_BASE_URL: "https://text.example/v1",
+      LLM_NAME: "text-model",
+      EMBEDDING_BASE_URL: "http://[::1]:9999/v1",
+      EMBEDDING_MODEL: "embedding-model",
+    });
+
+    expect(config.models.vlm.baseUrl).toBe("https://vision.example");
+    expect(config.models.vlmCandidates[1].baseUrl).toBe("http://localhost:30000/v1");
+    expect(config.models.llm.baseUrl).toBe("https://text.example/v1");
+    expect(config.embeddingBaseUrl).toBe("http://localhost:9999/v1");
+  });
+
   it("uses bounded video requests and per-target concurrency by default", () => {
     const config = loadConfig({});
 

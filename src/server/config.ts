@@ -186,7 +186,8 @@ const envSchema = z
     ELASTICSEARCH_URL: z.string().url().optional().or(z.literal("")),
     ELASTICSEARCH_USERNAME: z.string().optional(),
     ELASTICSEARCH_PASSWORD: z.string().optional(),
-    ELASTICSEARCH_INDEX: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).default("asset_library"),
+    DEV_ELASTICSEARCH_INDEX: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).default("asset_library_dev"),
+    PRD_ELASTICSEARCH_INDEX: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).default("asset_library_prd"),
     ELASTICSEARCH_ANALYZER: z.string().min(1).default("standard"),
     SEARCH_VECTOR_TOP_K: z.coerce.number().int().min(1).max(1000).default(100),
     SEARCH_KEYWORD_TOP_K: z.coerce.number().int().min(1).max(1000).default(100),
@@ -212,6 +213,13 @@ const envSchema = z
     MCP_ALLOW_ANY_USER_ID: booleanSchema.default(false),
   })
   .superRefine((env, context) => {
+    if (env.DEV_ELASTICSEARCH_INDEX === env.PRD_ELASTICSEARCH_INDEX) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRD_ELASTICSEARCH_INDEX"],
+        message: "开发和生产必须使用不同的 ES 索引名。",
+      });
+    }
     if (env.WORKER_ANALYZE_TASK_SOFT_LIMIT > env.WORKER_CONCURRENCY) {
       context.addIssue({
         code: "custom",
@@ -471,6 +479,9 @@ export function loadConfig(
     optionalValue(parsed.EMBEDDING_API_KEY) ?? embeddingFallbackTarget?.apiKey;
   return {
     ...parsed,
+    ELASTICSEARCH_INDEX: parsed.APP_MODE === "dev"
+      ? parsed.DEV_ELASTICSEARCH_INDEX
+      : parsed.PRD_ELASTICSEARCH_INDEX,
     databaseUrl: resolvedDatabaseUrl,
     databaseTarget: resolvedDatabaseTarget,
     databaseSslCaPath: databaseSslCaPath

@@ -368,8 +368,17 @@ Dockerfile 可将同一镜像分别作为 Web 和 worker 运行，但 Elasticsea
 
 ## ES 索引与存量重建
 
-在 `.env` 配置 `ELASTICSEARCH_URL`、用户名、密码和独立的 `ELASTICSEARCH_INDEX`。
-使用现有 ES 8.11+ 服务，不由启动脚本或 Compose 部署 ES；开发与生产应使用不同索引。
+在 `.env` 配置 `ELASTICSEARCH_URL`、用户名、密码和两个环境的索引名：
+
+```dotenv
+DEV_ELASTICSEARCH_INDEX=asset_library_dev
+PRD_ELASTICSEARCH_INDEX=asset_library_prd
+```
+
+`APP_MODE=dev` 使用开发数据库与 `DEV_ELASTICSEARCH_INDEX`，`APP_MODE=prd` 使用生产数据库与
+`PRD_ELASTICSEARCH_INDEX`；入库、检索、删除和重建统一按此选择。两个索引名不能相同。
+旧的 `ELASTICSEARCH_INDEX` 环境变量不再生效，请迁移到对应的分环境配置；更换目标索引后需重建。
+使用现有 ES 8.11+ 服务，不由启动脚本或 Compose 部署 ES。
 本地模型连接沿用 `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。
 向量维度根据 embedding 返回值自动创建，关键词默认使用 qagent 同款 `standard` 分析器。
 两路按分块 ID 做 RRF 后，再按素材 ID 保留分数最高的块；素材分数及分项贡献取自该块。
@@ -405,11 +414,17 @@ Dockerfile 可将同一镜像分别作为 Web 和 worker 运行，但 Elasticsea
 存量素材无需重新分析，执行：
 
 ```bash
-pnpm search:reindex
-pnpm start:worker # 已运行 worker 时不必重复启动
+# 开发环境
+APP_MODE=dev pnpm search:reindex
+APP_MODE=dev pnpm start:worker # 已运行同环境 worker 时不必重复启动
+
+# 生产环境（在生产服务环境执行）
+APP_MODE=prd pnpm search:reindex
+APP_MODE=prd pnpm start:worker
 ```
 
 重建命令按批将未删除、分析完成的公私素材提交到现有任务队列，并不等待索引完成。
+命令会打印当前环境、源数据库和目标索引；worker 须使用相同的 `APP_MODE` 与索引配置。
 按素材 ID 删除旧文档后批量写入所有新分块，可重复执行；也会清理旧版单文档记录。
 替换不是原子操作，期间可能短暂查不到该素材；不要并发重建同一素材。
 更换 embedding 模型、向量维度或分析器时，使用新的独立索引名并全量重建；旧索引由运维在验证后清理。

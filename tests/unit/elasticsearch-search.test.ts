@@ -18,7 +18,8 @@ const asset: AssetDetail = {
 
 beforeEach(() => {
   vi.stubEnv("ELASTICSEARCH_URL", "https://es.example.test");
-  vi.stubEnv("ELASTICSEARCH_INDEX", "assets_test");
+  vi.stubEnv("APP_MODE", "dev");
+  vi.stubEnv("DEV_ELASTICSEARCH_INDEX", "assets_test");
   vi.stubEnv("EMBEDDING_BASE_URL", "https://embedding.example.test/v1");
   vi.stubEnv("EMBEDDING_MODEL", "test-embedding");
   vi.stubEnv("SEARCH_RERANK_ENABLED", "false");

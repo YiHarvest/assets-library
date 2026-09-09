@@ -7,11 +7,12 @@ import { assets, queries } from "./dataset";
 
 // 不导入数据库、仓储或 worker。索引名在本进程内生成，不能指向业务索引。
 const index = `asset_threshold_bench_${Date.now()}_${randomUUID().slice(0, 8)}`;
-process.env.ELASTICSEARCH_INDEX = index;
+process.env[process.env.APP_MODE === "prd" ? "PRD_ELASTICSEARCH_INDEX" : "DEV_ELASTICSEARCH_INDEX"] = index;
 process.env.SEARCH_RERANK_ENABLED = "false";
 process.env.SEARCH_SEMANTIC_THRESHOLD = "-1";
 process.env.SEARCH_KEYWORD_THRESHOLD = "0";
 const config = loadConfig();
+assert.equal(config.ELASTICSEARCH_INDEX, index);
 const ids = assets.map((asset) => asset.id);
 const outputDir = "benchmarks/search/results";
 const limit = 8;

@@ -9,6 +9,7 @@ async function main() {
   if (!config.ELASTICSEARCH_URL || !config.embeddingConfigured) {
     throw new Error("请先配置 ELASTICSEARCH_URL 和 embedding 服务。");
   }
+  console.log(`环境：${config.APP_MODE}，数据库：${config.databaseTarget.database}，目标索引：${config.ELASTICSEARCH_INDEX}`);
   let afterId = "";
   let count = 0;
   for (;;) {
@@ -25,7 +26,7 @@ async function main() {
     afterId = batch.at(-1)!.id;
     console.log(`已提交 ${count} 条索引任务，目标索引：${config.ELASTICSEARCH_INDEX}`);
   }
-  console.log(`共 ${count} 条素材已入队。运行 pnpm start:worker 执行重建；状态见 search_index_state。`);
+  console.log(`共 ${count} 条素材已入队。运行 APP_MODE=${config.APP_MODE} pnpm start:worker 执行重建；状态见 search_index_state。`);
 }
 
 main().catch((error) => {

@@ -230,7 +230,12 @@ interface CompatibilityMatchDependencies {
   search: typeof searchAssetsByDescriptionDetailed;
   getAsset: (
     assetId: string,
-  ) => Promise<{ userId: string | null; reviewStatus: string } | null>;
+  ) => Promise<{
+    userId: string | null;
+    reviewStatus: string;
+    segmentStartMs?: number | null;
+    segmentEndMs?: number | null;
+  } | null>;
 }
 
 const compatibilityMatchDependencies: CompatibilityMatchDependencies = {
@@ -295,6 +300,7 @@ export async function matchCompatibilitySegments(
     : undefined;
   const matched: MatchedCompatibilitySegment[] = [];
   const usedAssetIds = new Set<string>();
+  const clipEnabled = loadConfig().SEGMENT_MATCH_CLIP_ENABLED;
   const contexts = segmentRecallContexts(segments);
   const searches: DescriptionSearchResult[] = [];
   // Collect complete pools before assigning assets; later segments retain their choices.
@@ -302,7 +308,6 @@ export async function matchCompatibilitySegments(
     searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
       { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
       { includeAllUsers: true }, {
-        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
         ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
         ...(candidateAssetIds ? { candidateAssetIds } : {}),
         excludedAssetIds: [], semanticThreshold, isRandom: false,
@@ -339,12 +344,16 @@ export async function matchCompatibilitySegments(
       continue;
     }
     usedAssetIds.add(candidate.id);
+    const mediaUrl = new URL(withUserScope(candidate.mediaUrl, record.userId), publicOrigin);
+    const durationMs = Math.round((segment.end_time - segment.start_time) * 1000);
+    if (clipEnabled && candidate.mediaType === "video" && durationMs > 0 &&
+      record.segmentStartMs != null && record.segmentEndMs != null &&
+      record.segmentEndMs - record.segmentStartMs > durationMs) {
+      mediaUrl.searchParams.set("clip_ms", String(durationMs));
+    }
     matched.push({
       ...segment,
-      matched_candidate_url: new URL(
-        withUserScope(candidate.mediaUrl, record.userId),
-        publicOrigin,
-      ).toString(),
+      matched_candidate_url: mediaUrl.toString(),
       matched_candidate_type: candidate.mediaType,
       matched_candidate_desc: candidate.description,
       matched_candidate_score: candidateScore,

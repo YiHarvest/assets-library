@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   alignCompatibilitySegments,
   compatibilityCallbackFromJob,
@@ -11,6 +11,7 @@ import {
 } from "@/shared/contracts";
 import { searchAssetsByDescriptionDetailed } from "@/server/repositories/assets";
 import * as elasticsearch from "@/server/search/elasticsearch";
+import { loadTestConfig } from "../helpers/config";
 
 const databaseRows = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db", () => ({
@@ -98,6 +99,42 @@ function candidate(): AssetSummary {
 }
 
 describe("compatibility segment matching", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("enables clipping by default and accepts an explicit opt-out", () => {
+    expect(loadTestConfig({}).SEGMENT_MATCH_CLIP_ENABLED).toBe(true);
+    expect(loadTestConfig({ SEGMENT_MATCH_CLIP_ENABLED: "false" }).SEGMENT_MATCH_CLIP_ENABLED).toBe(false);
+    expect(() => loadTestConfig({ SEGMENT_MATCH_CLIP_ENABLED: "invalid" })).toThrow();
+  });
+
+  it.each([
+    { enabled: "true", mediaType: "video" as const, sourceMs: 8500, clip: "1480" },
+    { enabled: "false", mediaType: "video" as const, sourceMs: 8500, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 1000, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 1480, clip: null },
+    { enabled: "true", mediaType: "image" as const, sourceMs: 8500, clip: null },
+  ])("returns a playable URL without changing the timeline: $enabled / $mediaType / $sourceMs", async ({ enabled, mediaType, sourceMs, clip }) => {
+    vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", enabled);
+    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 7.6 };
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({
+      items: [{ ...candidate(), mediaType }], threshold: 0, maxScore: 0.5,
+      reason: "matched" as const, message: null,
+    }));
+    const [matched] = await matchCompatibilitySegments([segment], "https://focus.example.test", {
+      assetUrls: [new URL(candidate().mediaUrl, "https://focus.example.test").toString()],
+    }, {
+      search,
+      getAsset: async () => ({ userId: "759", reviewStatus: "published", segmentStartMs: 5000, segmentEndMs: 5000 + sourceMs }),
+    });
+    expect(matched).toMatchObject(segment);
+    const url = new URL(matched.matched_candidate_url!);
+    expect(url.pathname).toBe(`/api/v1/media/${candidate().id}`);
+    expect(url.searchParams.get("user_id")).toBe("759");
+    expect(url.searchParams.get("v")).toBe("1");
+    expect(url.searchParams.get("clip_ms")).toBe(clip);
+    expect(search.mock.calls[0][2]).not.toHaveProperty("minDurationMs");
+  });
+
   it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
     const base = alignCompatibilitySegments(request())[0];
     const segments = [
@@ -110,8 +147,7 @@ describe("compatibility segment matching", () => {
     });
     expect(search).toHaveBeenLastCalledWith(
       { description: "店关着门它也在干活", keywords: [], limit: 100 }, { includeAllUsers: true },
-      expect.objectContaining({ context: "目前只有安卓手机，店关着门它也在干活", excludedAssetIds: [], isRandom: false,
-        minDurationMs: Math.round((segments[1].end_time - segments[1].start_time) * 1000) }),
+      expect.objectContaining({ context: "目前只有安卓手机，店关着门它也在干活", excludedAssetIds: [], isRandom: false }),
     );
     result.forEach((segment, index) => expect(segment).toMatchObject(segments[index]));
     expect(result[1]).not.toHaveProperty("context");
@@ -267,7 +303,6 @@ describe("compatibility segment matching", () => {
         semanticThreshold: 0.55,
         isRandom: false,
         excludedAssetIds: [],
-        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
       },
     );
     if (reviewStatus === "deleted") {
@@ -487,7 +522,6 @@ describe("compatibility segment matching", () => {
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
-        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
       },
     );
     expect(matched.matched_candidate_url).toContain(

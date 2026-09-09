@@ -5,6 +5,7 @@ import { db } from "@/server/db";
 import { mediaObjects } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import { resolveMediaPath } from "@/server/media/storage";
+import { prepareVideoClip } from "@/server/media/video-clip";
 import { getAssetRecord } from "@/server/repositories/assets";
 import { getAssetThumbnailObject } from "@/server/repositories/user-media";
 import type { ObjectStorage } from "@/server/storage/object-storage";
@@ -243,6 +244,23 @@ export async function mediaResponse(assetId: string, request: Request) {
     .limit(1);
   if (!object) {
     throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
+  }
+  const clipMs = new URL(request.url).searchParams.get("clip_ms");
+  if (clipMs !== null && asset.mediaType === "video") {
+    if (object.status !== "persisted") {
+      throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
+    }
+    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, Number(clipMs), async destination => {
+      if (object.provider === "local") {
+        if (!object.localPath) throw new AppError("storage_error", "本地媒体对象缺少存储路径。", 500);
+        await fs.promises.copyFile(resolveMediaPath(object.localPath), destination);
+      } else {
+        await zosStorage().downloadToFile(object.objectKey, destination);
+      }
+    });
+    if (clipped) {
+      return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-clip.mp4` }, clipped, request);
+    }
   }
   return mediaObjectResponse(
     object,

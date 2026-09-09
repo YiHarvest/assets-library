@@ -11,11 +11,13 @@ import {
   mysqlEnum,
   mysqlTable,
   mysqlView,
+  primaryKey,
   text,
   uniqueIndex,
   varchar,
 } from "drizzle-orm/mysql-core";
 import { sql } from "drizzle-orm";
+import type { SearchAssetSource, SearchBuildManifest } from "@/server/search/v2/types";
 
 const uuid = (name: string) => varchar(name, { length: 36 });
 const utcDateTime = (name: string) => datetime(name, { mode: "date", fsp: 3 });
@@ -684,6 +686,42 @@ export const searchIndexState = mysqlTable(
     ),
   ],
 );
+
+/** Durable recall revisions intentionally have no FK to deletable asset/task rows. */
+export const recallSources = mysqlTable("recall_sources", {
+  assetId: uuid("asset_id").primaryKey(),
+  assetKind: mysqlEnum("asset_kind", ["public", "private"]).notNull(),
+  sourceRevision: byteCount("source_revision").notNull(),
+  sourceHash: varchar("source_hash", { length: 64 }).notNull(),
+  deleted: boolean("deleted").notNull().default(false),
+  snapshotJson: json("snapshot_json").$type<SearchAssetSource>(),
+  updatedAt: utcDateTime("updated_at").notNull(),
+});
+
+export const recallBuilds = mysqlTable("recall_builds", {
+  buildId: varchar("build_id", { length: 191 }).primaryKey(),
+  physicalIndex: varchar("physical_index", { length: 255 }).notNull(),
+  manifestJson: json("manifest_json").$type<SearchBuildManifest>().notNull(),
+  manifestHash: varchar("manifest_hash", { length: 64 }).notNull(),
+  writeEnabled: boolean("write_enabled").notNull().default(true),
+  status: mysqlEnum("status", ["building", "ready", "active", "retired"]).notNull().default("building"),
+  backfillCursor: uuid("backfill_cursor"),
+  backfillCompletedAt: utcDateTime("backfill_completed_at"),
+  createdAt: utcDateTime("created_at").notNull(),
+  updatedAt: utcDateTime("updated_at").notNull(),
+}, (table) => [uniqueIndex("recall_build_index_unique").on(table.physicalIndex)]);
+
+export const recallBuildState = mysqlTable("recall_build_state", {
+  buildId: varchar("build_id", { length: 191 }).notNull().references(() => recallBuilds.buildId),
+  assetId: uuid("asset_id").notNull(),
+  desiredRevision: byteCount("desired_revision").notNull(),
+  indexedRevision: byteCount("indexed_revision"),
+  contentHash: varchar("content_hash", { length: 64 }),
+  status: mysqlEnum("status", ["queued", "running", "done", "failed", "deleted"]).notNull().default("queued"),
+  errorMessage: text("error_message"),
+  indexedAt: utcDateTime("indexed_at"),
+  updatedAt: utcDateTime("updated_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.buildId, table.assetId] }), index("recall_build_status_idx").on(table.buildId, table.status)]);
 
 /** 新运行时的只读统一视图；不包含待迁移的 legacy assets。 */
 export const assetEntries = mysqlView("asset_entries", {

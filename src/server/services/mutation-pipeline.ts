@@ -23,6 +23,7 @@ import {
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import { deleteAssetIndex } from "@/server/search/elasticsearch";
+import { enqueueRecallSource } from "@/server/search/v2/repository";
 import {
   failMutationTask,
   finishMutationTask,
@@ -276,6 +277,8 @@ async function reserveAssetDeletion(ref: AssetRef): Promise<DeletionReservation>
         .set(deletion)
         .where(eq(publicAssets.id, ref.id));
     }
+
+    if (loadConfig().SEARCH_V2_WRITE_ENABLED) await enqueueRecallSource(tx, ref, { deleted: true });
 
     let object: DeletingObject | undefined;
     if (asset.mediaObjectId) {

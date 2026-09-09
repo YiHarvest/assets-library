@@ -98,6 +98,25 @@ function candidate(): AssetSummary {
 }
 
 describe("compatibility segment matching", () => {
+  it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
+    const base = alignCompatibilitySegments(request())[0];
+    const segments = [
+      { ...base, segment_id: 1, text: "目前只有安卓手机", group_id: [1, 1] as [number, number] },
+      { ...base, segment_id: 2, text: "店关着门它也在干活", group_id: [1, 1] as [number, number] },
+    ];
+    const search = vi.fn(async () => ({ items: [], threshold: 0, maxScore: null, reason: "no_candidates" as const, message: null }));
+    const result = await matchCompatibilitySegments(segments, "https://focus.example.test", { isRandom: false }, {
+      search, getAsset: async () => null,
+    });
+    expect(search).toHaveBeenLastCalledWith(
+      { description: "店关着门它也在干活", keywords: [], limit: 100 }, { includeAllUsers: true },
+      expect.objectContaining({ context: "目前只有安卓手机，店关着门它也在干活", excludedAssetIds: [], isRandom: false,
+        minDurationMs: Math.round((segments[1].end_time - segments[1].start_time) * 1000) }),
+    );
+    result.forEach((segment, index) => expect(segment).toMatchObject(segments[index]));
+    expect(result[1]).not.toHaveProperty("context");
+  });
+
   it("defaults and validates semantic selection controls", () => {
     const parsed = request();
     expect(parsed).toMatchObject({
@@ -242,12 +261,13 @@ describe("compatibility segment matching", () => {
     );
 
     expect(search).toHaveBeenCalledWith(
-      { description: segment.text, keywords: [], limit: 1 },
+      { description: segment.text, keywords: [], limit: 100 },
       { includeAllUsers: true },
       {
         semanticThreshold: 0.55,
         isRandom: false,
         excludedAssetIds: [],
+        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
       },
     );
     if (reviewStatus === "deleted") {
@@ -268,7 +288,7 @@ describe("compatibility segment matching", () => {
     });
   });
 
-  it.each([true, false])("fills later segments from unused assets with isRandom=%s", async (isRandom) => {
+  it.each([true, false])("assigns distinct assets from full candidate pools with isRandom=%s", async (isRandom) => {
     const segments = alignCompatibilitySegments(request());
     const secondCandidate: AssetSummary = {
       ...candidate(),
@@ -281,14 +301,14 @@ describe("compatibility segment matching", () => {
       semanticScore: 0.72,
     };
     const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (_input, _scope, options) => {
-      const next = [candidate(), secondCandidate].find(
+      const available = [candidate(), secondCandidate].filter(
         (item) => !options?.excludedAssetIds?.includes(item.id),
       );
       return {
-        items: next ? [next] : [],
+        items: available,
         threshold: 0.3,
-        maxScore: next?.semanticScore ?? null,
-        reason: next ? "matched" : "no_candidates",
+        maxScore: available[0]?.semanticScore ?? null,
+        reason: available.length ? "matched" : "no_candidates",
         message: null,
       };
     });
@@ -306,13 +326,12 @@ describe("compatibility segment matching", () => {
       },
     );
 
-    expect(matched.map((segment) => segment.matched_candidate_url)).toEqual([
+    expect(matched.flatMap(segment => segment.matched_candidate_url ? [segment.matched_candidate_url] : []).sort()).toEqual([
       "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000001?v=1",
       "https://focus.example.test/api/v1/media/00000000-0000-4000-8000-000000000002?v=1",
-      null,
     ]);
     expect(matched.map((segment) => segment.segment_id)).toEqual([1, 2, 3]);
-    expect(matched[2]?.matched_candidate_reason).toBe("no_candidates");
+    expect(matched.find(segment => !segment.matched_candidate_url)?.matched_candidate_reason).toBe("no_candidates");
   });
 
   it("excludes used assets before vector recall and stops when none remain", async () => {
@@ -324,14 +343,14 @@ describe("compatibility segment matching", () => {
         { includeAllUsers: true },
         { excludedAssetIds: ["asset-a"] },
       );
-      expect(search).toHaveBeenCalledWith("夕阳", ["asset-b"]);
+      expect(search).toHaveBeenCalledWith("夕阳", ["asset-b"], undefined, undefined);
       const exhausted = await searchAssetsByDescriptionDetailed(
         { description: "夕阳", keywords: [], limit: 1 },
         { includeAllUsers: true },
         { excludedAssetIds: ["asset-a", "asset-b"] },
       );
       expect(exhausted).toMatchObject({ items: [], reason: "no_candidates" });
-      expect(search).toHaveBeenLastCalledWith("夕阳", []);
+      expect(search).toHaveBeenLastCalledWith("夕阳", [], undefined, undefined);
     } finally {
       vi.restoreAllMocks();
     }
@@ -468,6 +487,7 @@ describe("compatibility segment matching", () => {
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
+        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
       },
     );
     expect(matched.matched_candidate_url).toContain(

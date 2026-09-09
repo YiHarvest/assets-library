@@ -389,7 +389,7 @@ PRD_ELASTICSEARCH_INDEX=asset_library_prd
 不做 tokenize、长度切分或截断。名称、标签、topics、OCR 不进入检索文档；标签仍用于展示和结构化过滤。
 
 - `SEARCH_VECTOR_TOP_K` / `SEARCH_KEYWORD_TOP_K`：每路候选分块数，默认各 100。
-- `SEARCH_SEMANTIC_THRESHOLD`：原始余弦相似度下限，默认 `0.705`，范围 `[-1,1]`；设为 `-1` 不限制。
+- `SEARCH_SEMANTIC_THRESHOLD`：原始余弦相似度下限，两个业务接口共用，默认 `0.5`，范围 `[-1,1]`；设为 `-1` 不限制。v2 使用策略文件中的 `semanticThreshold`，当前同为 `0.5`。
 - `SEARCH_KEYWORD_THRESHOLD`：BM25 原始分数下限，默认 `22.25`；设为 `0` 不限制。
 - `SEARCH_NUM_CANDIDATES`：向量近邻候选数，默认 200，不小于向量 Top-K。
 - `SEARCH_RRF_K`：RRF 常数，默认 60；两路等权。

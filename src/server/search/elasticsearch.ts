@@ -1,6 +1,7 @@
 import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import type { AssetDetail } from "@/shared/contracts";
+import { searchWithV2 } from "./v2/facade";
 
 export interface SearchCandidate {
   assetId: string;
@@ -184,10 +185,10 @@ interface SearchHits {
 }
 
 /** 两路原始分块分数供检索与离线阈值评测共用，不作为 API 的 RRF 分项分数。 */
-export async function recallChunks(query: string, assetIds: string[]) {
+export async function recallChunks(query: string, assetIds: string[], context?: string) {
   if (!assetIds.length) return [[], []];
   const config = loadConfig();
-  const [vector] = await embedTexts([query]);
+  const [vector, contextVector] = await embedTexts(context && context.trim() !== query.trim() ? [query, context] : [query]);
   const filter = { terms: { assetId: assetIds } };
   const bodies = [
     {
@@ -208,8 +209,9 @@ export async function recallChunks(query: string, assetIds: string[]) {
       query: { bool: { must: [{ match: { content: query } }], filter: [filter] } },
       sort: [{ _score: "desc" }, { assetId: "asc" }],
     },
-  ];
-  return Promise.all(bodies.map(async (body, route) => {
+  ] as const;
+  const requests = contextVector ? [...bodies, { ...bodies[0], knn: { ...bodies[0].knn, query_vector: contextVector } }] : bodies;
+  const results = await Promise.all(requests.map(async (body, route) => {
     const response = await esRequest("/_search?allow_partial_search_results=false", {
       method: "POST", body: JSON.stringify(body),
     });
@@ -222,15 +224,18 @@ export async function recallChunks(query: string, assetIds: string[]) {
       .filter((hit) => allowed.has(hit._source.assetId))
       .map((hit) => ({
         chunkId: hit._id, assetId: hit._source.assetId,
-        score: route === 0 ? 2 * hit._score - 1 : hit._score,
+        score: route !== 1 ? 2 * hit._score - 1 : hit._score,
       }));
   }));
+  const contextualIds = contextVector ? new Set(results[2].map(hit => hit.assetId)) : null;
+  return results.slice(0, 2).map(hits => contextualIds ? hits.filter(hit => contextualIds.has(hit.assetId)) : hits);
 }
 
-export async function searchAssets(query: string, assetIds: string[]): Promise<SearchCandidate[]> {
+export async function searchAssets(query: string, assetIds: string[], revalidate?: (assetIds: string[]) => Promise<string[]>, context?: string): Promise<SearchCandidate[]> {
   if (!assetIds.length) return [];
   const config = loadConfig();
-  const results = await recallChunks(query, assetIds);
+  if (config.SEARCH_RECALL_ENGINE === "v2") return searchWithV2(query, assetIds, revalidate, context);
+  const results = await recallChunks(query, assetIds, context);
   const candidates = fuseResults(results[0], results[1], config.SEARCH_RRF_K);
   return config.SEARCH_RERANK_ENABLED ? rerank(query, candidates) : candidates;
 }

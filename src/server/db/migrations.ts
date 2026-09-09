@@ -13,6 +13,9 @@ import {
   privateAssets,
   publicAssets,
   searchIndexState,
+  recallSources,
+  recallBuilds,
+  recallBuildState,
   tags,
   taskItemSegments,
   taskItems,
@@ -48,6 +51,9 @@ const applicationTables = [
   outboxEvents,
   callbackDeliveries,
   searchIndexState,
+  recallSources,
+  recallBuilds,
+  recallBuildState,
 ] as const;
 
 export const expectedDatabaseColumns = applicationTables.flatMap((table) =>

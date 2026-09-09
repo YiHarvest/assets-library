@@ -15,6 +15,8 @@ import {
   type DescriptionSearchResult,
 } from "@/server/repositories/assets";
 import { persistedTaskError } from "@/server/services/task-lifecycle";
+import { segmentRecallContexts } from "@/server/search/segment-context";
+import { balancedAssetAssignment } from "./balanced-asset-assignment";
 import {
   compatibilityMatchRequestSchema,
   type CompatibilityMatchAccepted,
@@ -293,22 +295,25 @@ export async function matchCompatibilitySegments(
     : undefined;
   const matched: MatchedCompatibilitySegment[] = [];
   const usedAssetIds = new Set<string>();
-  // ponytail: 顺序检索避免并发选中同一素材；吞吐成为瓶颈时再拆分召回与分配。
-  for (const segment of segments) {
-    // 分段文本进入 ES 双路召回。
-    const searchInput = { description: segment.text, keywords: [], limit: 1 };
-    const searchOptions = {
-      ...(candidateAssetIds ? { candidateAssetIds } : {}),
-      excludedAssetIds: [...usedAssetIds],
-      semanticThreshold,
-      isRandom,
-    };
-    const search = await dependencies.search(
-      searchInput,
-      { includeAllUsers: true },
-      searchOptions,
-    );
-    const candidate = search.items[0];
+  const contexts = segmentRecallContexts(segments);
+  const searches: DescriptionSearchResult[] = [];
+  // Collect complete pools before assigning assets; later segments retain their choices.
+  for (let start = 0; start < segments.length; start += 4) {
+    searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
+      { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
+      { includeAllUsers: true }, {
+        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
+        ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
+        ...(candidateAssetIds ? { candidateAssetIds } : {}),
+        excludedAssetIds: [], semanticThreshold, isRandom: false,
+      },
+    ))));
+  }
+  const assignment = balancedAssetAssignment(segments, searches.map(search => search.items
+    .filter(candidate => !allowedAssetIds || allowedAssetIds.has(candidate.id.toLowerCase()))), isRandom);
+  for (const [index, segment] of segments.entries()) {
+    const search = searches[index];
+    const candidate = assignment.get(index);
     if (!candidate || usedAssetIds.has(candidate.id)) {
       matched.push(unmatchedSegment(segment, search));
       continue;

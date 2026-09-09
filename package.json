@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.883.0",
+    "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@radix-ui/react-slot": "^1.2.3",
     "@smithy/node-http-handler": "^4.1.10",

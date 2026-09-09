@@ -761,7 +761,7 @@ components:
           minimum: 0
           maximum: 1
           default: 0.3
-          description: 兼容保留，暂不参与过滤；实际使用服务端 SEARCH_SEMANTIC_THRESHOLD 和 SEARCH_KEYWORD_THRESHOLD 分别过滤两路分块。
+          description: 已废弃的兼容参数，保留原校验与默认值但不参与过滤；两路门槛由服务端召回策略控制。
         callback_url:
           type: string
           format: uri

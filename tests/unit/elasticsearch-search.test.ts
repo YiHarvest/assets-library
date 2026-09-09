@@ -29,6 +29,19 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
+  it("requires contextual semantic support even when an isolated phrase and BM25 both match", async () => {
+    vi.stubEnv("SEARCH_SEMANTIC_THRESHOLD", "0.5");
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] }] });
+      const body = JSON.parse(String(init.body));
+      return json(hits(body.knn?.query_vector[1] === 1 ? ["good:0"] : ["bad:0", "good:0"]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await searchAssets("结束了吗", ["bad", "good"], undefined, "市场红利是否结束");
+    expect(result.map(candidate => candidate.assetId)).toEqual(["good"]);
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body).knn.similarity).toBe(0.5);
+  });
+
   it("fuses chunk ranks before keeping the best chunk per asset", () => {
     const result = fuseResults(["a:0", "a:1", "b:0"].map(chunk), ["a:1", "b:0", "a:2"].map(chunk), 60);
     expect(result.map((item) => item.assetId)).toEqual(["a", "b"]);

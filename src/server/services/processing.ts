@@ -45,6 +45,8 @@ import {
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import { indexAsset } from "@/server/search/elasticsearch";
+import { executeRecallJob } from "@/server/search/v2/index-job";
+import { parseRecallJob, recordRecallFailure } from "@/server/search/v2/repository";
 import { SceneDetectClient } from "@/server/scene/client";
 import { processCallbackJob } from "@/server/services/callbacks";
 import { processMutationJob } from "@/server/services/mutation-pipeline";
@@ -471,6 +473,19 @@ async function hydratedAsset(
 }
 
 async function processEmbeddingJob(job: ClaimedJob) {
+  // V2 jobs deliberately have no asset/task FK, so dispatch before the legacy guard.
+  if (job.payload && "recall" in job.payload) {
+    const recall = parseRecallJob(job.payload.recall);
+    try {
+      await executeRecallJob(db, recall);
+      await completeJob(job);
+    } catch (error) {
+      await recordRecallFailure(db, recall, error instanceof AppError ? error.message : "召回构建写入失败。");
+      if (job.attempt < 3) await requeueJob(job, job.attempt * 30_000);
+      else await failJob(job);
+    }
+    return;
+  }
   if (!job.assetId) {
     await failJob(job);
     return;

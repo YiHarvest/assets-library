@@ -39,6 +39,8 @@ import {
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
 import { searchAssets, type SearchCandidate } from "@/server/search/elasticsearch";
+import { loadConfig } from "@/server/config";
+import { enqueueRecallSource } from "@/server/search/v2/repository";
 import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
@@ -1201,6 +1203,18 @@ function candidateScores(candidate: SearchCandidate) {
 }
 
 /** MySQL 先限定权限和结构化过滤，两路 ES 召回使用完全相同的候选范围。 */
+async function recallWithinDatabaseScope(query: string, eligibleIds: string[], where: SQL | undefined, exactTags: ExactTagFilter[] = [], context?: string) {
+  if (loadConfig().SEARCH_RECALL_ENGINE !== "v2") return searchAssets(query, eligibleIds, undefined, context);
+  return searchAssets(query, eligibleIds, async (candidateIds) => {
+    if (!candidateIds.length) return [];
+    // Re-read exact tag membership as well as mutable scope/review/deletion fields.
+    const currentTagIds = exactTags.length ? await assetIdsMatchingExactTags(exactTags) : null;
+    const rows = await db.select({ id: assets.id }).from(assets).where(and(where, inArray(assets.id, candidateIds),
+      currentTagIds ? currentTagIds.size ? inArray(assets.id, [...currentTagIds]) : sql`false` : undefined));
+    return rows.map((row) => row.id);
+  }, context);
+}
+
 export async function queryAssetsPage({
   page = 1, limit = 20, mediaTypes = [], processingStatuses = [],
   reviewStatuses = ["published"], tags: exactTags = [], keywords = [],
@@ -1222,9 +1236,9 @@ export async function queryAssetsPage({
   const offset = (requestedPage - 1) * safeLimit;
 
   if (query) {
-    // ponytail: 沿用 MySQL 候选 ID 过滤；超过 ES terms 上限时改为在 ES 镜像过滤字段。
+    // MySQL owns eligibility; the recall engine enforces an explicit terms capacity limit.
     const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-    const candidates = await searchAssets(query, eligible.map((row) => row.id));
+    const candidates = await recallWithinDatabaseScope(query, eligible.map((row) => row.id), where, exactTags);
     const ids = candidates.map((item) => item.assetId);
     const pageCandidates = candidates.slice(offset, offset + safeLimit);
     const pageIds = pageCandidates.map((item) => item.assetId);
@@ -1299,6 +1313,10 @@ export interface DescriptionSearchResult {
 }
 
 export interface DescriptionSearchOptions {
+  /** Internal target slot duration; images can fill a slot without this limit. */
+  minDurationMs?: number;
+  /** Internal source context; never changes the public description or response. */
+  context?: string;
   /** When present, semantic recall is restricted to this explicit asset set. */
   candidateAssetIds?: readonly string[];
   /** Exclude already used assets before vector recall. */
@@ -1338,9 +1356,11 @@ export async function searchAssetsByDescriptionDetailed(
       ? inArray(assets.id, [...options.candidateAssetIds]) : sql`false`);
   }
   if (options.excludedAssetIds?.length) conditions.push(notInArray(assets.id, [...options.excludedAssetIds]));
+  if (options.minDurationMs !== undefined) conditions.push(or(eq(assets.mediaType, "image"),
+    sql`${assets.segmentEndMs} >= ${assets.segmentStartMs} + ${options.minDurationMs}`)!);
   const where = and(...conditions);
   const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-  const candidates = await searchAssets([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id));
+  const candidates = await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context);
   const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
   const ids = candidates.map((item) => item.assetId);
   const rankedIds = options.isRandom ? sampleAssetIds(ids, limit) : ids.slice(0, limit);
@@ -1421,6 +1441,7 @@ export async function enqueueSearchIndex(tx: AssetTransaction, ref: AssetRef, ta
   await tx.insert(searchIndexState).values({
     id: crypto.randomUUID(), ...associationTarget(ref), status: "queued", updatedAt: now,
   }).onDuplicateKeyUpdate({ set: { status: "queued", errorMessage: null, updatedAt: now } });
+  if (loadConfig().SEARCH_V2_WRITE_ENABLED) await enqueueRecallSource(tx, ref);
 }
 
 async function resolveAssetRef(assetId: string, scope: AssetScope): Promise<AssetRef> {
@@ -1651,6 +1672,7 @@ export async function queuePublicAssetDeletion(assetId: string, taskId: string) 
     if (affectedRows(result) !== 1) {
       throw new AppError("invalid_request", "公共素材不存在。", 404);
     }
+    if (loadConfig().SEARCH_V2_WRITE_ENABLED) await enqueueRecallSource(tx, { id: assetId, kind: "public" }, { deleted: true });
     await tx.insert(jobs).values({
       id: crypto.randomUUID(),
       taskId,

@@ -15,6 +15,8 @@ import {
   type DescriptionSearchResult,
 } from "@/server/repositories/assets";
 import { persistedTaskError } from "@/server/services/task-lifecycle";
+import { segmentRecallContexts } from "@/server/search/segment-context";
+import { balancedAssetAssignment } from "./balanced-asset-assignment";
 import {
   compatibilityMatchRequestSchema,
   type CompatibilityMatchAccepted,
@@ -293,22 +295,25 @@ export async function matchCompatibilitySegments(
     : undefined;
   const matched: MatchedCompatibilitySegment[] = [];
   const usedAssetIds = new Set<string>();
-  // ponytail: 顺序检索避免并发选中同一素材；吞吐成为瓶颈时再拆分召回与分配。
-  for (const segment of segments) {
-    // keywords=[] 只有语义搜索
-    const searchInput = { description: segment.text, keywords: [], limit: 1 };
-    const searchOptions = {
-      ...(candidateAssetIds ? { candidateAssetIds } : {}),
-      excludedAssetIds: [...usedAssetIds],
-      semanticThreshold,
-      isRandom,
-    };
-    const search = await dependencies.search(
-      searchInput,
-      { includeAllUsers: true },
-      searchOptions,
-    );
-    const candidate = search.items[0];
+  const contexts = segmentRecallContexts(segments);
+  const searches: DescriptionSearchResult[] = [];
+  // Collect complete pools before assigning assets; later segments retain their choices.
+  for (let start = 0; start < segments.length; start += 4) {
+    searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
+      { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
+      { includeAllUsers: true }, {
+        minDurationMs: Math.round((segment.end_time - segment.start_time) * 1000),
+        ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
+        ...(candidateAssetIds ? { candidateAssetIds } : {}),
+        excludedAssetIds: [], semanticThreshold, isRandom: false,
+      },
+    ))));
+  }
+  const assignment = balancedAssetAssignment(segments, searches.map(search => search.items
+    .filter(candidate => !allowedAssetIds || allowedAssetIds.has(candidate.id.toLowerCase()))), isRandom);
+  for (const [index, segment] of segments.entries()) {
+    const search = searches[index];
+    const candidate = assignment.get(index);
     if (!candidate || usedAssetIds.has(candidate.id)) {
       matched.push(unmatchedSegment(segment, search));
       continue;
@@ -323,7 +328,7 @@ export async function matchCompatibilitySegments(
     }
     const record = await dependencies.getAsset(candidate.id);
     const rawCandidateScore =
-      candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
+      candidate.searchScore ?? search.maxScore ?? 0;
     const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
     if (!record || !["pending_review", "published"].includes(record.reviewStatus)) {
       matched.push(unmatchedSegment(segment, {
@@ -515,7 +520,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
   try {
     // 把 LLM 文本顺序对齐到 ASR 逐词时间，计算时间范围和 group_id，小程序那边传过来的格式已经做了对齐
     const aligned = alignCompatibilitySegments(payload.request);
-    // 对每个segment 进行素材匹配，语义检索
+    // 每个分段复用 ES 双路召回和 RRF 排序。
     const matched = await matchCompatibilitySegments(
       aligned,
       payload.publicOrigin,

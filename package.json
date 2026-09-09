@@ -30,10 +30,13 @@
     "metabase:logs": "./ops/metabase/scripts/metabase.sh logs",
     "metabase:provision-reader": "node --env-file=ops/metabase/.reader.env --env-file=ops/metabase/.admin.env ops/metabase/scripts/provision-reader.mjs",
     "metabase:verify-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/verify-reader.mjs",
-    "metabase:sync-reporting-metadata": "node --env-file=ops/metabase/.admin.env ops/metabase/scripts/sync-reporting-metadata.mjs"
+    "metabase:sync-reporting-metadata": "node --env-file=ops/metabase/.admin.env ops/metabase/scripts/sync-reporting-metadata.mjs",
+    "search:reindex": "tsx --env-file=.env scripts/reindex-search.ts",
+    "benchmark:search": "node --env-file=.env --import tsx benchmarks/search/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.883.0",
+    "@huggingface/tokenizers": "0.2.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@radix-ui/react-slot": "^1.2.3",
     "@smithy/node-http-handler": "^4.1.10",

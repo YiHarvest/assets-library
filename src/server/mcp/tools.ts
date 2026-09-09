@@ -512,7 +512,7 @@ export function registerTools(
     {
       title: "查询素材",
       description:
-        "语义搜索与过滤素材。scope 决定可见范围：own 仅本人、user 指定用户、public 仅公共、all 公共+所有用户（默认 own）。支持游标分页与标签统计。",
+        "混合搜索与过滤素材。scope 决定可见范围：own 仅本人、user 指定用户、public 仅公共、all 公共+所有用户（默认 own）。支持游标分页与标签统计。",
       inputSchema: z.object({
         query: z
           .string()
@@ -520,12 +520,12 @@ export function registerTools(
           .min(1)
           .max(1_000)
           .optional()
-          .describe("自然语言语义搜索描述"),
+          .describe("自然语言查询，与 keywords 合并进行混合检索；提供 query 时不支持 cursor"),
         keywords: z
           .array(z.string().trim().min(1).max(64))
           .max(10)
           .optional()
-          .describe("标签候选粗筛关键词"),
+          .describe("与 query 合并检索的关键词，不作为标签硬过滤"),
         scope: z
           .enum(["own", "user", "public", "all"])
           .optional()

@@ -183,13 +183,32 @@ const envSchema = z
     LLM_NAME: z.string().optional(),
     LLM_FALLBACK_NAMES: z.string().optional(),
     LLM_ENABLE_THINKING: optionalBooleanSchema,
-    CHROMA_URL: z.string().url(),
-    CHROMA_COLLECTION: z.string().min(3).default("asset_analysis"),
-    CHROMA_TENANT: z.string().default("default_tenant"),
-    CHROMA_DATABASE: z.string().default("default_database"),
+    ELASTICSEARCH_URL: z.string().url().optional().or(z.literal("")),
+    ELASTICSEARCH_USERNAME: z.string().optional(),
+    ELASTICSEARCH_PASSWORD: z.string().optional(),
+    DEV_ELASTICSEARCH_INDEX: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).default("asset_library_dev"),
+    PRD_ELASTICSEARCH_INDEX: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).default("asset_library_prd"),
+    ELASTICSEARCH_ANALYZER: z.string().min(1).default("standard"),
+    SEARCH_VECTOR_TOP_K: z.coerce.number().int().min(1).max(1000).default(100),
+    SEARCH_KEYWORD_TOP_K: z.coerce.number().int().min(1).max(1000).default(100),
+    SEARCH_SEMANTIC_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.5),
+    SEARCH_KEYWORD_THRESHOLD: z.coerce.number().min(0).default(22.25),
+    SEARCH_NUM_CANDIDATES: z.coerce.number().int().min(1).max(10000).default(200),
+    SEARCH_RRF_K: z.coerce.number().int().positive().default(60),
+    SEARCH_RERANK_ENABLED: booleanSchema.default(false),
+    SEARCH_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    SEARCH_V2_WRITE_ENABLED: booleanSchema.default(false),
+    SEARCH_RECALL_ENGINE: z.enum(["v1", "v2"]).default("v1"),
+    SEARCH_V2_POLICY_PATH: z.string().min(1).default("./config/recall/experimental-policy.json"),
+    SEARCH_V2_TOKENIZER_DIR: z.string().min(1).default("./data/recall-tokenizers/bge-m3"),
+    SEARCH_V2_EMBED_BATCH_TEXTS: z.coerce.number().int().min(1).max(128).default(16),
+    SEARCH_V2_EMBED_BATCH_TOKENS: z.coerce.number().int().min(512).max(131072).default(4096),
+    SEARCH_V2_EMBED_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+    SEARCH_V2_EMBED_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     EMBEDDING_BASE_URL: z.string().url().optional().or(z.literal("")),
     EMBEDDING_API_KEY: z.string().optional(),
     EMBEDDING_MODEL: z.string().optional(),
+    EMBEDDING_REVISION: z.string().optional(),
     // MCP Streamable HTTP endpoint。token 留空时 MCP 端点关闭（fail-closed）。
     MCP_ACCESS_TOKEN: z.string().optional(),
     // 逗号分隔的额外 SSRF 白名单域名（不含端口），用于 upload_from_url 拉取。
@@ -203,6 +222,13 @@ const envSchema = z
     MCP_ALLOW_ANY_USER_ID: booleanSchema.default(false),
   })
   .superRefine((env, context) => {
+    if (env.DEV_ELASTICSEARCH_INDEX === env.PRD_ELASTICSEARCH_INDEX) {
+      context.addIssue({
+        code: "custom",
+        path: ["PRD_ELASTICSEARCH_INDEX"],
+        message: "开发和生产必须使用不同的 ES 索引名。",
+      });
+    }
     if (env.WORKER_ANALYZE_TASK_SOFT_LIMIT > env.WORKER_CONCURRENCY) {
       context.addIssue({
         code: "custom",
@@ -462,6 +488,9 @@ export function loadConfig(
     optionalValue(parsed.EMBEDDING_API_KEY) ?? embeddingFallbackTarget?.apiKey;
   return {
     ...parsed,
+    ELASTICSEARCH_INDEX: parsed.APP_MODE === "dev"
+      ? parsed.DEV_ELASTICSEARCH_INDEX
+      : parsed.PRD_ELASTICSEARCH_INDEX,
     databaseUrl: resolvedDatabaseUrl,
     databaseTarget: resolvedDatabaseTarget,
     databaseSslCaPath: databaseSslCaPath

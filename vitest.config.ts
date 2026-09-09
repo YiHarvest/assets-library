@@ -17,7 +17,7 @@ export default defineConfig({
         "mysql://root@localhost/assets_library_dev_test",
       SCENE_DETECT_BASE_URL:
         process.env.TEST_SCENE_DETECT_BASE_URL ?? "https://your.com",
-      CHROMA_URL: process.env.TEST_CHROMA_URL ?? "https://your.com",
+      ELASTICSEARCH_URL: process.env.TEST_ELASTICSEARCH_URL ?? "https://your.com",
       API_INTERNAL_ORIGIN: "https://your.com",
     },
   },

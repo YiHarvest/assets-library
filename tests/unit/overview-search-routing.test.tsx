@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("@/lib/server-api-v1", () => apiMocks);
 
 import OverviewPage from "@/app/page";
+import { AssetScopeSwitcher } from "@/components/asset-scope-switcher";
 
 function emptyPage(search: {
   mode: "keyword" | "semantic" | "hybrid";
@@ -61,7 +62,7 @@ describe("overview search routing", () => {
   });
 
   it.each(["AI", "城市夜景航拍", "海边 小船 夕阳"])(
-    "routes label query %s through keyword recall",
+    "routes label query %s through paginated hybrid recall",
     async (tag) => {
       await renderSearch(tag);
 
@@ -74,11 +75,11 @@ describe("overview search routing", () => {
     "夕阳下一个人在山间行走",
     "帮我找一段适合产品发布的视频",
     "a woman walking on the beach",
-  ])("routes sentence query %s through semantic recall", async (tag) => {
+  ])("routes sentence query %s through paginated hybrid recall", async (tag) => {
     await renderSearch(tag);
 
-    expect(requestedBody()).toMatchObject({ query: tag });
-    expect(requestedBody()).not.toHaveProperty("keywords");
+    expect(requestedBody()).toMatchObject({ keywords: [tag] });
+    expect(requestedBody()).not.toHaveProperty("query");
   });
 
   it("renders the API explanation when all candidates are below threshold", async () => {
@@ -96,7 +97,7 @@ describe("overview search routing", () => {
 
     const text = renderedText(view);
     expect(text).toContain(message);
-    expect(text.replace(/\s+/g, "")).toContain("最高相关度61%");
+    expect(text.replace(/\s+/g, "")).toContain("最高排序分0.610");
   });
 
   it("shows the pending review view for a private library", async () => {
@@ -118,5 +119,31 @@ describe("overview search routing", () => {
       },
     });
     expect(renderedText(view)).toContain("待入库");
+  });
+
+  it("drops the personal user when switching to public and ignores stale public URL user IDs", async () => {
+    apiMocks.serverApiV1.mockResolvedValue(emptyPage());
+    apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
+    const view = await OverviewPage({
+      searchParams: Promise.resolve({ scope: "private", user_id: "user-7", tag: "海边" }),
+    });
+    const switcher = React.Children.toArray(view.props.children).find(
+      (child) => React.isValidElement(child) && child.type === AssetScopeSwitcher,
+    );
+    if (!React.isValidElement<{ publicHref: string }>(switcher)) throw new Error("Missing scope switcher");
+    const target = new URL(switcher.props.publicHref, "http://localhost");
+    expect(target.searchParams.get("scope")).toBe("public");
+    expect(target.searchParams.get("tag")).toBe("海边");
+    expect(target.searchParams.has("user_id")).toBe(false);
+
+    apiMocks.serverApiV1.mockClear();
+    await OverviewPage({
+      searchParams: Promise.resolve({ scope: "public", user_id: "user-7", tag: "海边" }),
+    });
+    expect(requestedBody()).toMatchObject({
+      keywords: ["海边"],
+      filter: { user_scope: { mode: "public" } },
+    });
+    expect((requestedBody().filter as { user_scope: object }).user_scope).not.toHaveProperty("user_id");
   });
 });

@@ -27,13 +27,12 @@ import {
 } from "../helpers/integration-database";
 
 const execFileAsync = promisify(execFile);
-const semanticSearchEnabledMock = vi.hoisted(() => vi.fn(() => false));
+const indexAssetMock = vi.hoisted(() => vi.fn<(_asset: unknown) => Promise<void>>(async () => undefined));
 
-vi.mock("@/server/search/chroma", () => ({
-  semanticSearchEnabled: semanticSearchEnabledMock,
-  indexAnalysis: vi.fn(async () => undefined),
-  searchAnalysis: vi.fn(async () => new Map()),
-  deleteAnalysis: vi.fn(async () => undefined),
+vi.mock("@/server/search/elasticsearch", () => ({
+  indexAsset: indexAssetMock,
+  searchAssets: vi.fn(async () => []),
+  deleteAssetIndex: vi.fn(async () => undefined),
 }));
 
 try {
@@ -285,6 +284,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       force: true,
     });
     vi.clearAllMocks();
+    indexAssetMock.mockReset().mockResolvedValue(undefined);
     analyzeMock.mockClear();
   });
 
@@ -438,6 +438,38 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     await expect(
       fs.stat(path.join(process.env.MEDIA_ROOT!, ".staging", taskId)),
     ).rejects.toThrow();
+  }, 30_000);
+
+  test("索引失败保留分析结果，重试、编辑和存量重建复用同一索引任务", async () => {
+    const image = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#335577" } }).png().toBuffer();
+    indexAssetMock.mockRejectedValueOnce(new Error("Embedding 暂不可用"));
+    const { service, taskId } = await createAndSeal("reindex.png", image, null);
+    await processUntilIdle();
+    const status = await service.getTask(taskId);
+    const assetId = status.items[0]!.public_asset_ids[0]!;
+    expect((await repository.getAssetDetail(assetId)).processingStatus).toBe("completed");
+    expect(analyzeMock).toHaveBeenCalledTimes(1);
+    const [queued] = await database.db.select().from(schema.jobs).where(eq(schema.jobs.type, "embed"));
+    expect(queued).toMatchObject({ status: "queued", attempt: 1 });
+    await database.db.update(schema.jobs).set({ availableAt: new Date(0) }).where(eq(schema.jobs.id, queued.id));
+    await processUntilIdle();
+    const [state] = await database.db.select().from(schema.searchIndexState);
+    expect(state.status).toBe("done");
+    await repository.updateAssetMetadata(assetId, { name: "人工名称", description: "人工描述", tags: [{ category: "scene", value: "海边" }] });
+    await processUntilIdle();
+    expect(indexAssetMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      id: assetId, name: "人工名称", description: "人工描述",
+      tags: [expect.objectContaining({ value: "海边" })],
+    }));
+    for (let run = 0; run < 2; run += 1) {
+      const result = await execFileAsync("pnpm", ["search:reindex"], { env: {
+        ...process.env, EMBEDDING_MODEL: "test", EMBEDDING_BASE_URL: "https://embedding.test/v1", ELASTICSEARCH_URL: "https://es.test",
+      } });
+      expect(result.stdout).toContain("共 1 条素材已入队");
+      await processUntilIdle();
+    }
+    expect(analyzeMock).toHaveBeenCalledTimes(1);
+    expect(indexAssetMock).toHaveBeenCalledTimes(5);
   }, 30_000);
 
   test("公共直传只创建公共记录和一套对象，分析后仍待审核", async () => {

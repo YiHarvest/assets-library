@@ -31,6 +31,35 @@ function withHostname(url: string, hostname: string) {
 }
 
 describe("database configuration", () => {
+  it.each(["dev", "prd"])("selects the %s ES index with the database", (mode) => {
+    const env = {
+      APP_MODE: mode,
+      WEBUI_LOCK_KEY: webUiLockKey,
+      DATABASE_URL: productionDatabaseUrl,
+      // 旧的全局索引配置不再覆盖分环境配置。
+      ELASTICSEARCH_INDEX: "legacy_shared_index",
+    };
+    const defaults = loadConfig(env);
+    expect(defaults.ELASTICSEARCH_INDEX).toBe(`asset_library_${mode}`);
+    const custom = loadConfig({
+      ...env,
+      DEV_DATABASE_NAME: "custom_dev_test",
+      PRD_DATABASE_NAME: "custom_prd",
+      DEV_ELASTICSEARCH_INDEX: "custom_dev_index",
+      PRD_ELASTICSEARCH_INDEX: "custom_prd_index",
+    });
+    expect(custom.ELASTICSEARCH_INDEX).toBe(`custom_${mode}_index`);
+    expect(custom.databaseTarget.database).toBe(mode === "dev" ? "custom_dev_test" : "custom_prd");
+  });
+
+  it("rejects sharing an ES index across environments", () => {
+    expect(() => loadConfig({
+      DATABASE_URL: productionDatabaseUrl,
+      DEV_ELASTICSEARCH_INDEX: "shared_index",
+      PRD_ELASTICSEARCH_INDEX: "shared_index",
+    })).toThrow(/开发和生产必须使用不同的 ES 索引名/);
+  });
+
   it("defaults to four workers and a per-task analyze soft limit of two", () => {
     const config = loadConfig({
       APP_MODE: "dev",

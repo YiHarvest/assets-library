@@ -167,7 +167,7 @@ function promptFor(mediaType: MediaType, durationSeconds: number | null) {
     "每个标签值必须至少包含一个中文汉字；禁止英文标签、拼音和 snake_case。JSON 字段名与标签分类键保持结构中规定的英文。",
     `必须先单独输出 primaryCategory 字段，取值为以下五个一级分类词之一，逐字一致、一字不能多也不能少：${PRIMARY_TAG_CATEGORIES.join("、")}。系统会自动把 primaryCategory 作为该素材的首标签（tags.scene 的第一个值）。`,
     "除 primaryCategory 外，其余任何标签值与 topics 不得再出现这五个一级分类词（互斥，不重复）。",
-    "每个标签分类最多输出 5 个标签。视频 keyMoments 最多 3 个，timeline 最多 5 段。不要输出 visualSegments，系统会根据 timeline 自动生成。",
+    "每个标签分类最多输出 5 个标签。视频 timeline 最多 5 段。不要输出 visualSegments，系统会根据 timeline 自动生成。",
     "描述与所有 summary 必须使用简体中文，可以保留画面中出现的英文原文（如产品名、界面文字、专业术语）；标签值与 topics 必须为纯简体中文，禁止夹杂英文单词。",
     mediaType === "video"
       ? `视频总时长精确为 ${durationSeconds} 秒。timeline 必须从 0 秒开始、连续覆盖，并精确结束于 ${durationSeconds} 秒。`
@@ -192,7 +192,7 @@ function repairPromptFor(
     `修复原因：${correction}`,
     `必须严格符合此结构：${mediaType === "image" ? imageShape : videoShape}`,
     `必须输出 primaryCategory 字段，取值为五个一级分类词之一，逐字一致：${PRIMARY_TAG_CATEGORIES.join("、")}。`,
-    "每个标签分类最多 5 个标签。视频 keyMoments 最多 3 个，timeline 最多 5 段。不要输出 visualSegments。",
+    "每个标签分类最多 5 个标签。视频 timeline 最多 5 段。不要输出 visualSegments。",
     mediaType === "image"
       ? "ocr.text 只保留关键可见文字，最多 600 字，超出时截断。"
       : "",
@@ -340,9 +340,8 @@ function normalizedTimeline(value: unknown, durationSeconds: number | null) {
 }
 
 function normalizedKeyMoments(value: unknown, durationSeconds: number | null) {
-  const limited = limitArray(value, 3);
-  if (!Array.isArray(limited) || durationSeconds === null) return limited;
-  return limited.map((entry) => {
+  if (!Array.isArray(value) || durationSeconds === null) return value;
+  return value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
     const item = entry as Record<string, unknown>;
     if (typeof item.seconds !== "number" || !Number.isFinite(item.seconds)) {

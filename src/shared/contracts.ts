@@ -54,11 +54,11 @@ export const imageAnalysisSchema = z.object({
   kind: z.literal("image"),
   description: z.string().min(1),
   tags: z.object({
-    scene: z.array(z.string()).max(5),
-    object: z.array(z.string()).max(5),
-    person: z.array(z.string()).max(5),
-    style: z.array(z.string()).max(5),
-    color_composition: z.array(z.string()).max(5),
+    scene: z.array(z.string()),
+    object: z.array(z.string()),
+    person: z.array(z.string()),
+    style: z.array(z.string()),
+    color_composition: z.array(z.string()),
   }),
   ocr: unavailableTextSchema,
 });
@@ -75,9 +75,9 @@ export const videoAnalysisSchema = z.object({
   description: z.string().min(1),
   topics: z.array(z.string()),
   tags: z.object({
-    scene: z.array(z.string()).max(5),
-    person: z.array(z.string()).max(5),
-    form: z.array(z.string()).max(5),
+    scene: z.array(z.string()),
+    person: z.array(z.string()),
+    form: z.array(z.string()),
   }),
   visualSegments: z.array(timedSummarySchema).max(5),
   keyMoments: z.array(
@@ -85,7 +85,7 @@ export const videoAnalysisSchema = z.object({
       seconds: z.number().nonnegative(),
       summary: z.string().min(1),
     }),
-  ).max(3),
+  ),
   timeline: z.array(timedSummarySchema).max(5),
 });
 export type VideoAnalysis = z.infer<typeof videoAnalysisSchema>;

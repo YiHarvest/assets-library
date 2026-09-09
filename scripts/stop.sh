@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 停止 assets-library 的所有服务：Web + worker + 分镜服务 + Chroma
+# 停止 assets-library 的所有服务：Web + worker + 分镜服务
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -75,8 +75,5 @@ stop_pid_file "Web+worker" "$PID_DIR/app.pid"
 # 再停只监听回环地址的分镜服务
 stop_pid_file "分镜服务" "$PID_DIR/scene.pid"
 
-# 最后停 Chroma
-stop_pid_file "Chroma" "$PID_DIR/chroma.pid"
-
 echo
-c_ok "全部已停止。数据保留在 ./data、./media、./chroma-data。"
+c_ok "全部已停止。数据保留在 ./data、./media。"

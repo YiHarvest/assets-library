@@ -6,7 +6,6 @@ import type { MySqlRawQueryResult } from "drizzle-orm/mysql2";
 import { db } from "@/server/db";
 import { loadConfig } from "@/server/config";
 import {
-  analysisResultEntries,
   analysisResults,
   assetTagRejectionEntries,
   assetTags,
@@ -35,16 +34,19 @@ import {
 } from "@/server/model/analyzer";
 import {
   completeJob,
+  enqueueSearchIndex,
+  getAssetDetail,
   associationTarget,
   failJob,
   getAssetRecord,
   heartbeatJob,
-  jobTarget,
   requeueJob,
   type AssetRef,
   type ClaimedJob,
 } from "@/server/repositories/assets";
-import { indexAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
+import { indexAsset } from "@/server/search/elasticsearch";
+import { executeRecallJob } from "@/server/search/v2/index-job";
+import { parseRecallJob, recordRecallFailure } from "@/server/search/v2/repository";
 import { SceneDetectClient } from "@/server/scene/client";
 import { processCallbackJob } from "@/server/services/callbacks";
 import { processMutationJob } from "@/server/services/mutation-pipeline";
@@ -63,7 +65,6 @@ import {
   errorAuditFields,
 } from "@/server/observability/audit-log";
 import {
-  analysisResultSchema,
   type AnalysisResult,
   type FailureCode,
 } from "@/shared/contracts";
@@ -357,31 +358,7 @@ async function persistAnalysis(
         failureMessage: null,
         updatedAt: now,
       });
-      if (semanticSearchEnabled()) {
-        await tx.insert(jobs).values({
-          id: crypto.randomUUID(),
-          taskId: job.taskId,
-          ...jobTarget(ref),
-          type: "embed",
-          status: "queued",
-          phase: "analyzing",
-          attempt: 0,
-          availableAt: now,
-          createdAt: now,
-          updatedAt: now,
-        });
-        await tx
-          .insert(searchIndexState)
-          .values({
-            id: crypto.randomUUID(),
-            ...associationTarget(ref),
-            status: "queued",
-            updatedAt: now,
-          })
-          .onDuplicateKeyUpdate({
-            set: { status: "queued", errorMessage: null, updatedAt: now },
-          });
-      }
+      await enqueueSearchIndex(tx, ref, job.taskId);
     }
     return true;
   });
@@ -496,6 +473,19 @@ async function hydratedAsset(
 }
 
 async function processEmbeddingJob(job: ClaimedJob) {
+  // V2 jobs deliberately have no asset/task FK, so dispatch before the legacy guard.
+  if (job.payload && "recall" in job.payload) {
+    const recall = parseRecallJob(job.payload.recall);
+    try {
+      await executeRecallJob(db, recall);
+      await completeJob(job);
+    } catch (error) {
+      await recordRecallFailure(db, recall, error instanceof AppError ? error.message : "召回构建写入失败。");
+      if (job.attempt < 3) await requeueJob(job, job.attempt * 30_000);
+      else await failJob(job);
+    }
+    return;
+  }
   if (!job.assetId) {
     await failJob(job);
     return;
@@ -506,17 +496,8 @@ async function processEmbeddingJob(job: ClaimedJob) {
     return;
   }
   const ref = recordRef(asset);
-  const [analysis] = await db
-    .select()
-    .from(analysisResultEntries)
-    .where(eq(analysisResultEntries.assetId, job.assetId))
-    .limit(1);
-  if (!analysis) {
-    await completeJob(job);
-    return;
-  }
   try {
-    await indexAnalysis(job.assetId, analysisResultSchema.parse(analysis.resultJson));
+    await indexAsset(await getAssetDetail(job.assetId, { includeAllUsers: true }));
     await db
       .insert(searchIndexState)
       .values({
@@ -540,13 +521,13 @@ async function processEmbeddingJob(job: ClaimedJob) {
           id: crypto.randomUUID(),
           ...associationTarget(ref),
           status: "failed",
-          errorMessage: error instanceof Error ? error.message : "向量索引失败。",
+          errorMessage: error instanceof Error ? error.message : "搜索索引失败。",
           updatedAt: new Date(),
         })
         .onDuplicateKeyUpdate({
           set: {
             status: "failed",
-            errorMessage: error instanceof Error ? error.message : "向量索引失败。",
+            errorMessage: error instanceof Error ? error.message : "搜索索引失败。",
             updatedAt: new Date(),
           },
         });

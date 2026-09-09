@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   heartbeatJob: vi.fn().mockResolvedValue(1),
   mutation: vi.fn(),
   validate: vi.fn(),
+  recallIndex: vi.fn(),
 }));
 
 vi.mock("@/server/config", () => ({
@@ -36,6 +37,7 @@ vi.mock("@/server/services/compatibility-match", () => ({
 vi.mock("@/server/services/callbacks", () => ({
   processCallbackJob: mocks.callback,
 }));
+vi.mock("@/server/search/v2/index-job", () => ({ executeRecallJob: mocks.recallIndex }));
 vi.mock("@/server/services/task-lifecycle", () => ({
   failMutationTask: vi.fn(),
   finishMutationTask: vi.fn(),
@@ -73,6 +75,15 @@ beforeEach(() => {
 });
 
 describe("worker dispatcher", () => {
+  it("processes durable recall jobs after their asset FK is absent", async () => {
+    const recall = { schemaVersion: 2, assetId: crypto.randomUUID(), assetKind: "public", sourceRevision: 3,
+      buildId: "build", physicalIndex: "test_recall_v2_worker", manifestHash: "a".repeat(64), deleted: true };
+    const claimed = { ...job("embed"), taskId: null, assetId: null, payload: { recall } };
+    await processJob(claimed, analyzer, undefined, undefined, storage);
+    expect(mocks.recallIndex).toHaveBeenCalledWith({}, recall);
+    expect(mocks.completeJob).toHaveBeenCalledWith(claimed);
+    expect(mocks.failJob).not.toHaveBeenCalled();
+  });
   it("把 validate 作业交给上传流水线", async () => {
     const claimed = job("validate");
     await processJob(claimed, analyzer, undefined, undefined, storage);

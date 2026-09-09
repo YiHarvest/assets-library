@@ -16,7 +16,6 @@ import { Input } from "@/components/ui/input";
 import { WebUiLink } from "@/components/webui-link";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
-import { detectSearchInputMode } from "@/server/search/relevance";
 import type {
   AssetQueryResponse,
   UserDirectoryResponse,
@@ -69,7 +68,7 @@ function overviewHref(input: {
     parameters.set("tag", input.tag);
   }
   if (input.layout === "list") parameters.set("layout", "list");
-  if (input.userId) parameters.set("user_id", input.userId);
+  if (input.scope === "private" && input.userId) parameters.set("user_id", input.userId);
   return appUrl(`/?${parameters.toString()}`);
 }
 
@@ -95,8 +94,9 @@ export default async function OverviewPage({
     view === "published"
       ? firstParameter(parameters.tag)?.trim().slice(0, 128) ?? ""
       : "";
-  const searchMode = tagQuery ? detectSearchInputMode(tagQuery) : null;
-  const userId = firstParameter(parameters.user_id)?.trim().slice(0, 191) ?? "";
+  const userId = firstParameter(parameters.scope) === "private"
+    ? firstParameter(parameters.user_id)?.trim().slice(0, 191) ?? ""
+    : "";
   const scope: LibraryScope =
     firstParameter(parameters.scope) === "private" && userId
       ? "private"
@@ -106,18 +106,12 @@ export default async function OverviewPage({
   const history = decodeHistory(firstParameter(parameters.history));
   const userScope: UserScope = scope === "private"
     ? { mode: "user", user_id: userId }
-    : userId
-      ? { mode: "exclude_user", user_id: userId }
-      : { mode: "public" };
+    : { mode: "public" };
   const [page, userDirectory] = await Promise.all([
     serverApiV1<AssetQueryResponse>("/assets/query", {
       method: "POST",
       body: JSON.stringify({
-        ...(searchMode === "semantic"
-          ? { query: tagQuery }
-          : searchMode === "keyword"
-            ? { keywords: [tagQuery] }
-            : {}),
+        ...(tagQuery ? { keywords: [tagQuery] } : {}),
         filter: {
           user_scope: userScope,
           review_statuses: [
@@ -299,7 +293,7 @@ export default async function OverviewPage({
           {page.search?.max_score !== null &&
             page.search?.max_score !== undefined && (
               <span className="text-xs">
-                最高相关度 {(page.search.max_score * 100).toFixed(0)}%
+                最高排序分 {page.search.max_score.toFixed(3)}
               </span>
             )}
         </div>

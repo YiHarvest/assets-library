@@ -1,0 +1,26 @@
+{
+  "version": "v2-context-experiment-4",
+  "validated": false,
+  "vectorEnabled": true,
+  "lexicalEnabled": true,
+  "vectorTopK": 100,
+  "lexicalTopK": 100,
+  "expansionTopK": 200,
+  "numCandidates": 200,
+  "rrfK": 60,
+  "maxEligibleIds": 65536,
+  "semanticThreshold": 0.5,
+  "lexicalMinScore": 0,
+  "lexicalMinimumShouldMatch": "75%",
+  "includeMetadata": true,
+  "weights": {
+    "name": 2,
+    "humanTags": 2,
+    "modelTags": 1,
+    "topics": 1,
+    "exactName": 4,
+    "exactHumanTags": 4,
+    "exactModelTags": 2,
+    "exactTopics": 2
+  }
+}

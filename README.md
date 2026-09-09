@@ -18,7 +18,7 @@
   视觉分析、标签提取、对象存储与语义检索。
 </p>
 
-项目由 Next.js Web/API、MySQL 作业 worker、Chroma、私有 ZOS，以及内置的
+项目由 Next.js Web/API、MySQL 作业 worker、Elasticsearch、私有 ZOS，以及内置的
 `scene-detect-service` 分镜子模块组成。默认针对支持 NVIDIA NVENC 的单机部署优化。
 
 ## 功能
@@ -26,7 +26,7 @@
 - 批量上传图片与视频，支持任务状态、逐项进度、失败重试和可靠回调。
 - 图片正规化后写入私有 ZOS；视频先切成独立分镜，再作为素材分析和入库。
 - VLM 自动生成描述与结构化标签，支持主模型及有序 fallback 候选链。
-- MySQL 负责关系数据和可靠作业，Chroma 负责语义向量检索。
+- MySQL 负责关系数据和可靠作业，Elasticsearch 负责向量与关键词双路检索，经 RRF 融合排序。
 - 支持待审核、发布、修改、删除，以及个人素材与公共素材的作用域管理。
 - 媒体接口支持私有文件代理、下载和 HTTP Range，不向浏览器暴露 ZOS 密钥。
 - 内置带 Bearer 鉴权的 MCP 服务，支持 URL/批量入库、任务恢复、素材检索与异步管理。
@@ -43,7 +43,7 @@
 | GPU 加速 | NVIDIA CUDA / NVENC | 视频硬件解码与 H.264 硬件编码，失败自动回退 CPU |
 | 对象存储 | 电信云 ZOS、AWS S3 SDK | 私有父视频、分片、图片和缩略图存储 |
 | AI 分析 | OpenAI-compatible VLM / Embedding API | 描述生成、结构化标签、模型 fallback |
-| 语义检索 | Chroma | 分析结果向量化与受作用域约束的语义召回 |
+| 语义检索 | Elasticsearch | 分析结果向量化与受作用域约束的语义召回 |
 | 工程质量 | Zod、Vitest、Playwright、Pytest、Ruff、ESLint | 配置校验、单元/集成/E2E 与静态检查 |
 
 ## 视频处理流程
@@ -61,7 +61,7 @@
   → 父视频、分片、缩略图上传 ZOS（最多 8 路并发）
   → 单个 MySQL 事务整批建档
   → 主应用作业池（4 路）并行调用 VLM
-  → 分析结果写入 MySQL，向量写入 Chroma
+  → 分析结果写入 MySQL，向量写入 Elasticsearch
 ```
 
 分镜接口采用 `POST 202 + GET 轮询`，不会让上传请求一直阻塞。队列有容量上限，
@@ -90,7 +90,7 @@ cp .env.example .env
 ./scripts/stop.sh
 ```
 
-`start.sh` 会依次执行数据库目标安全检查、启动并等待 Chroma、启动分镜服务、执行
+`start.sh` 会依次执行数据库目标安全检查、启动分镜服务、执行
 Drizzle migration、启动 Web 与 worker。任一服务异常会输出 `.run/` 中对应日志并终止，
 不会继续执行后续步骤。
 
@@ -263,6 +263,11 @@ ZOS_SECRET_ACCESS_KEY=<secret>
 完整的客户端配置、工具参数、数据隔离和排障方法见 [docs/mcp.md](docs/mcp.md)。通过
 `./scripts/start.sh` 启动后，MCP 请求、来源拉取、上传进度和 worker 耗时会以同一个
 `request_id` 写入 `.run/app.log`，便于定位连接中断、字节数不一致和排队延迟。
+API（含管理、登录和退出接口）与 MCP 的请求日志包含路径、`query` 实际值、`input`
+入参，以及完成/失败时的 `output` 出参、状态码和耗时；可按 `request_id` 串联。
+JSON 与 MCP SSE 返回内容随响应流记录，不预读媒体流；二进制仅记录类型和字节数。
+密钥、Cookie、token 和 URL 签名会脱敏；响应体最多采集 64 KiB，字符串最多 512 字符、
+数组最多 50 项、嵌套最多 12 层；超大响应体或无法解析的内容会标注省略原因。
 
 ## API
 
@@ -358,5 +363,73 @@ pnpm build
 迁移账本为准并幂等执行；schema 来源为 [src/server/db/schema.ts](src/server/db/schema.ts)。
 服务日志和 PID 位于 `.run/`。
 
-Dockerfile 可将同一镜像分别作为 Web 和 worker 运行，但 Chroma、MySQL、ZOS 与分镜服务
+Dockerfile 可将同一镜像分别作为 Web 和 worker 运行，但 Elasticsearch、MySQL、ZOS 与分镜服务
 需要单独部署或挂载。当前完整单机部署的推荐入口仍是 `./scripts/start.sh`。
+
+## ES 索引与存量重建
+
+在 `.env` 配置 `ELASTICSEARCH_URL`、用户名、密码和两个环境的索引名：
+
+```dotenv
+DEV_ELASTICSEARCH_INDEX=asset_library_dev
+PRD_ELASTICSEARCH_INDEX=asset_library_prd
+```
+
+`APP_MODE=dev` 使用开发数据库与 `DEV_ELASTICSEARCH_INDEX`，`APP_MODE=prd` 使用生产数据库与
+`PRD_ELASTICSEARCH_INDEX`；入库、检索、删除和重建统一按此选择。两个索引名不能相同。
+旧的 `ELASTICSEARCH_INDEX` 环境变量不再生效，请迁移到对应的分环境配置；更换目标索引后需重建。
+使用现有 ES 8.11+ 服务，不由启动脚本或 Compose 部署 ES。
+本地模型连接沿用 `EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。
+向量维度根据 embedding 返回值自动创建，关键词默认使用 qagent 同款 `standard` 分析器。
+两路按分块 ID 做 RRF 后，再按素材 ID 保留分数最高的块；素材分数及分项贡献取自该块。
+去重后才执行 rerank、分页或 Top-K；最终素材数可能少于请求数量，不自动补召回。
+
+每个素材当前的 `description`、视频 `visualSegments` / `keyMoments` / `timeline` 中
+每条 `summary` 各自成为一个 ES 文档和一个向量。仅跳过空文本、去除同素材内完全重复文本，
+不做 tokenize、长度切分或截断。名称、标签、topics、OCR 不进入检索文档；标签仍用于展示和结构化过滤。
+
+- `SEARCH_VECTOR_TOP_K` / `SEARCH_KEYWORD_TOP_K`：每路候选分块数，默认各 100。
+- `SEARCH_SEMANTIC_THRESHOLD`：原始余弦相似度下限，两个业务接口共用，默认 `0.5`，范围 `[-1,1]`；设为 `-1` 不限制。v2 使用策略文件中的 `semanticThreshold`，当前同为 `0.5`。
+- `SEARCH_KEYWORD_THRESHOLD`：BM25 原始分数下限，默认 `22.25`；设为 `0` 不限制。
+- `SEARCH_NUM_CANDIDATES`：向量近邻候选数，默认 200，不小于向量 Top-K。
+- `SEARCH_RRF_K`：RRF 常数，默认 60；两路等权。
+- `SEARCH_RERANK_ENABLED`：默认 false；开启调用预留函数，当前原样返回。
+- `SEARCH_TIMEOUT_MS`：ES 与 embedding 单次请求超时，默认 30000 毫秒。
+
+两路在分块 RRF 前分别过滤，等于阈值的分块也保留；任一路过线即可参与融合，不要求同时过线。
+两个阈值都不是接口返回的 `semantic_score` / `keyword_score`（这两个字段仍是 RRF 贡献）。
+修改阈值后重启 Web/worker 即可生效，无需重建索引；旧请求字段 `semantic_threshold` 仍仅兼容接收。
+
+默认值来自 `bge-m3` + `standard` 的纯合成 benchmark，不能保证适合其他模型或业务语料。
+复现命令 `pnpm benchmark:search`：生成独立 ES 测试索引，调用真实 embedding，按主题分开调参与测试，
+最后清理测试索引。整个流程不导入数据库模块，也不读取/修改业务数据库和业务索引。
+数据集、脚本和指标定义见 [benchmark 说明](benchmarks/search/README.md)，
+本次结果见 [评测报告](benchmarks/search/results/report.md)。
+
+素材分析完成和人工编辑后自动提交索引任务。索引失败保留素材和分析结果，后台最多执行
+3 次，可从 `search_index_state` 查看状态和错误。新素材在 ES 索引成功前不能被内容搜索召回；
+编辑后的索引异步更新，接口始终读取当前素材内容与权限。
+发布状态和所有权过滤以 MySQL 为准，不依赖异步 ES 状态。
+
+存量素材无需重新分析，执行：
+
+```bash
+# 开发环境
+APP_MODE=dev pnpm search:reindex
+APP_MODE=dev pnpm start:worker # 已运行同环境 worker 时不必重复启动
+
+# 生产环境（在生产服务环境执行）
+APP_MODE=prd pnpm search:reindex
+APP_MODE=prd pnpm start:worker
+```
+
+重建命令按批将未删除、分析完成的公私素材提交到现有任务队列，并不等待索引完成。
+命令会打印当前环境、源数据库和目标索引；worker 须使用相同的 `APP_MODE` 与索引配置。
+按素材 ID 删除旧文档后批量写入所有新分块，可重复执行；也会清理旧版单文档记录。
+替换不是原子操作，期间可能短暂查不到该素材；不要并发重建同一素材。
+更换 embedding 模型、向量维度或分析器时，使用新的独立索引名并全量重建；旧索引由运维在验证后清理。
+
+检索不降级：embedding 或 ES 失败返回明确错误；异步分段匹配通过任务失败状态和回调报告。
+普通浏览不访问 ES。当前复用 MySQL 候选 ID 过滤，单次候选范围受 ES terms 默认 65536 项上限约束。
+
+实现参考：[Elasticsearch kNN 过滤与召回](https://www.elastic.co/docs/solutions/search/vector/knn)。

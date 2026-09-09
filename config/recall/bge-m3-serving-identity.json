@@ -1,0 +1,31 @@
+{
+  "observedAt": "2026-09-09T06:50:08.044887+00:00",
+  "revision": "sha256:14d557fa950287efadb5c32a23532656a11917701749c1191f25b8cfdfedeb7e",
+  "identity": {
+    "model": "bge-m3",
+    "files": [
+      { "name": "1_Pooling/config.json", "bytes": 191, "sha256": "e54c164a07274f2eb45bb724f54a79d1efcc90c41573887cd9a29aeee0597352" },
+      { "name": "colbert_linear.pt", "bytes": 2100674, "sha256": "19bfbae397c2b7524158c919d0e9b19393c5639d098f0a66932c91ed8f5f9abb" },
+      { "name": "config.json", "bytes": 687, "sha256": "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa" },
+      { "name": "config_sentence_transformers.json", "bytes": 123, "sha256": "1eef72430e7194a1e59680e635aed81ffa083f05668dbc5bb1c56c04c0999c38" },
+      { "name": "configuration.json", "bytes": 77, "sha256": "007c616ed9187f4f3d6096ed2d55cece33c3f48866dbd7bc6afefcb9645a37c1" },
+      { "name": "modules.json", "bytes": 349, "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf" },
+      { "name": "onnx/config.json", "bytes": 698, "sha256": "f24afd5de914fba8c668426c43d208a1a54022500c63b2c160be20891686fce8" },
+      { "name": "onnx/sentencepiece.bpe.model", "bytes": 5069051, "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865" },
+      { "name": "onnx/special_tokens_map.json", "bytes": 964, "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835" },
+      { "name": "onnx/tokenizer.json", "bytes": 17082821, "sha256": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790" },
+      { "name": "onnx/tokenizer_config.json", "bytes": 1173, "sha256": "7e4c1cc848840aeccdd763458c18dd525eb0f795c992e00ebe9c28554e7db2d4" },
+      { "name": "pytorch_model.bin", "bytes": 2271145830, "sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38" },
+      { "name": "sentence_bert_config.json", "bytes": 54, "sha256": "eb9b44b13c0f52a3b3685c3b1cbdea1ba8b04bea123b98f61610048940776eb1" },
+      { "name": "sentencepiece.bpe.model", "bytes": 5069051, "sha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865" },
+      { "name": "sparse_linear.pt", "bytes": 3516, "sha256": "45c93804d2142b8f6d7ec6914ae23a1eee9c6a1d27d83d908a20d2afb3595ad9" },
+      { "name": "special_tokens_map.json", "bytes": 964, "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835" },
+      { "name": "tokenizer.json", "bytes": 17098108, "sha256": "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08" },
+      { "name": "tokenizer_config.json", "bytes": 444, "sha256": "a62b2b6784f990259fddef5f16388693a8043be4f69179e6a5257eeb3f9abac4" }
+    ],
+    "serving": { "vllmVersion": "0.11.2", "task": "embed", "dtype": "float16", "maxModelLen": 8192 }
+  },
+  "processStartedAt": "2026-07-23T03:44:18.810000+00:00",
+  "allArtifactsPredateProcess": true,
+  "method": "SHA-256 of canonical JSON identity (sorted object keys, preserved file-array order). Files read on the serving host; size and mtime unchanged during hashing. Only whitelisted process options were inspected. Re-verify after deployment or model configuration changes."
+}

@@ -11,6 +11,9 @@ export const integrationApplicationTables = [
   "outbox_events",
   "private_assets",
   "public_assets",
+  "recall_build_state",
+  "recall_builds",
+  "recall_sources",
   "search_index_state",
   "tags",
   "task_item_segments",
@@ -90,18 +93,15 @@ export function bindIntegrationDatabaseEnvironment(
   testDatabaseUrl: string,
   env: DatabaseEnvironment = process.env,
 ) {
-  const appMode = env.APP_MODE?.trim() === "prd" ? "prd" : "dev";
+  if (env.APP_MODE?.trim() === "prd") {
+    throw new Error("生产模式禁止运行数据库集成测试；请使用 dev 模式和独立测试库。");
+  }
   const testTarget = assertDedicatedIntegrationDatabase(testDatabaseUrl, {
     databaseName: configuredWebUiDatabaseName(env),
   });
 
   env.DATABASE_URL = testDatabaseUrl;
-  if (appMode === "prd") {
-    env.PRD_DATABASE_NAME = testTarget.database;
-    env.PRD_INTERNAL_SERVICE_HOST = testTarget.hostname;
-  } else {
-    env.DEV_DATABASE_NAME = testTarget.database;
-  }
+  env.DEV_DATABASE_NAME = testTarget.database;
   return testTarget;
 }
 

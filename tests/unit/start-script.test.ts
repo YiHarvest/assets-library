@@ -27,7 +27,7 @@ function start({ cached = false, old = true, port }: { cached?: boolean; old?: b
   // Stop at the first preflight: never start services or access a database.
   executable("pnpm", 'printf "PREFLIGHT:%s:%s:%s\\n" "$PORT" "$APP_MODE" "$API_INTERNAL_ORIGIN"; exit 77');
   return spawnSync("/bin/bash", [join(root, "scripts/start.sh")], {
-    env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, ...(port ? { PORT: port } : {}) },
+    env: { NODE_ENV: "test", PATH: `${join(root, "bin")}:/usr/bin:/bin`, ...(port ? { PORT: port } : {}) },
     encoding: "utf8", timeout: 5000,
   });
 }

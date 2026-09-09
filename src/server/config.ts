@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isIP } from "node:net";
 import { z } from "zod";
 import { readWebUiLockConfig } from "@/server/auth/webui-lock";
 
@@ -286,7 +287,10 @@ function internalServiceUrl(
   const normalizedValue = optionalValue(value);
   if (!normalizedValue) return undefined;
   const url = new URL(normalizedValue);
-  if (appMode === "prd") url.hostname = productionHost;
+  // 外部模型域名必须保留；只有本地/IP 服务地址随生产部署切换主机。
+  if (appMode === "prd" && (url.hostname === "localhost" || isIP(url.hostname.replace(/^\[|\]$/g, "")))) {
+    url.hostname = productionHost;
+  }
   return url.toString().replace(/\/$/, "");
 }
 

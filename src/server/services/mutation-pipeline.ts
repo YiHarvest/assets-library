@@ -22,7 +22,7 @@ import {
   type AssetScope,
   type ClaimedJob,
 } from "@/server/repositories/assets";
-import { deleteAnalysis } from "@/server/search/chroma";
+import { deleteAssetIndex } from "@/server/search/elasticsearch";
 import {
   failMutationTask,
   finishMutationTask,
@@ -505,7 +505,7 @@ async function hardDeleteAsset(
   const bestEffort = loadConfig().ZOS_DELETE_BEST_EFFORT === "true";
 
   // 外部对象先幂等删除；若进程中断，隐藏的 deleted 行可由同一任务重试收尾。
-  await deleteAnalysis(ref.id);
+  await deleteAssetIndex(ref.id);
   await deleteObjectBestEffort(storage, record.object?.objectKey, bestEffort);
   await deleteObjectBestEffort(
     storage,

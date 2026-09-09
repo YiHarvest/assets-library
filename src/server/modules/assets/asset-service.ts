@@ -185,7 +185,7 @@ export class AssetService {
     if (input.query && input.cursor) {
       throw new ApiV1Error(
         "invalid_request",
-        "语义检索返回单页 top-k 结果，不支持 cursor。",
+        "query 检索返回单页 top-k 结果，不支持 cursor。",
         400,
       );
     }

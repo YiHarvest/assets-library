@@ -21,17 +21,7 @@ services:
     command: pnpm start:worker
     restart: unless-stopped
 
-  chroma:
-    image: chromadb/chroma:latest
-    network_mode: host
-    environment:
-      IS_PERSISTENT: "TRUE"
-      PERSIST_DIRECTORY: /data
-    volumes:
-      - assets-library-chroma:/data
-    restart: unless-stopped
 
 volumes:
   assets-library-data:
   assets-library-media:
-  assets-library-chroma:

@@ -164,7 +164,7 @@ paths:
       description: >-
         兼容两种旧剪辑业务格式：存在 ASR transcripts 时，Worker 按顺序生成
         start_time、end_time 和 group_id；ASR 为空时，直接复用 LLM segments 已有的
-        时间轴字段。两种格式都复用现有描述语义匹配函数为每段选择至多一个素材。
+        时间轴字段。两种格式都复用ES 双路召回和 RRF 融合函数为每段选择至多一个素材。
         请求中的未知顶层字段会原样透传到终态回调。
       requestBody:
         required: true
@@ -199,9 +199,9 @@ paths:
     post:
       tags: [Assets]
       operationId: queryAssets
-      summary: 浏览或语义搜索素材
+      summary: 浏览或混合搜索素材
       description: >-
-        统一游标分页、语义搜索、受控 filter 和标签统计。public 与 exclude_user
+        统一游标分页、ES 双路分块搜索、受控 filter 和标签统计；分块 RRF 融合后按素材保留最高分块。public 与 exclude_user
         始终只查询公共表，不会把私人素材扩展进公共结果。
       requestBody:
         required: true
@@ -753,15 +753,15 @@ components:
           type: boolean
           default: true
           description: >-
-            true 时从当前语义召回且超过 semantic_threshold 的不同素材中等概率随机选择；
-            false 时选择语义分最高的素材。
+            true 时从当前融合候选中的不同素材中等概率随机选择；
+            false 时选择融合排名最高的素材。
             两种模式均按分段顺序在召回前排除本任务已用的素材，剩余候选不足时返回未匹配。
         semantic_threshold:
           type: number
           minimum: 0
           maximum: 1
           default: 0.3
-          description: 语义召回阈值；只有分数严格大于该值的素材可以命中。
+          description: 兼容保留，暂不参与过滤；实际使用服务端 SEARCH_SEMANTIC_THRESHOLD 和 SEARCH_KEYWORD_THRESHOLD 分别过滤两路分块。
         callback_url:
           type: string
           format: uri
@@ -1159,13 +1159,13 @@ components:
     AssetQuery:
       type: object
       additionalProperties: false
-      description: 同时覆盖无 query 的浏览和有 query 的语义检索。
+      description: 无搜索文本时浏览；query 与 keywords 合并执行 ES 双路召回。
       properties:
         query:
           type: string
           minLength: 1
           maxLength: 1000
-          description: 可选自然语言语义查询。
+          description: 与 keywords 合并检索；提供 query 时保留单页 Top-K，不接受 cursor。
         keywords:
           type: array
           maxItems: 10
@@ -1227,17 +1227,17 @@ components:
           type: number
           minimum: 0
           maximum: 1
-          description: 最终排序分；仅检索结果出现，且仅超过 search.threshold 的素材会返回。
+          description: 素材最高分块的归一化 RRF 排名分数，不代表相似度或概率；不应用旧分数阈值。
         keyword_score:
           type: number
           minimum: 0
           maximum: 1
-          description: 关键词匹配分；语义-only 结果可以省略。
+          description: 最高分块在关键词路的归一化 RRF 贡献，最高 0.5；未命中时省略。
         semantic_score:
           type: number
           minimum: 0
           maximum: 1
-          description: 语义相似度；关键词-only 结果可以省略。
+          description: 最高分块在向量路的归一化 RRF 贡献，最高 0.5；未命中时省略。
         match_type:
           type: string
           enum: [exact, alias, prefix, contains, typo, semantic, hybrid]
@@ -1245,11 +1245,11 @@ components:
         matched_terms:
           type: array
           items: { type: string }
-          description: 实际命中的规范化查询词。
+          description: 兼容保留，新检索暂返回空数组。
         matched_categories:
           type: array
           items: { type: string }
-          description: 命中标签所属分类，例如 scene、style 或 form。
+          description: 兼容保留，新检索暂返回空数组。
     AssetSearchMeta:
       type: object
       additionalProperties: false
@@ -1263,9 +1263,9 @@ components:
           type: number
           minimum: 0
           maximum: 1
-          description: 本次最终展示阈值；结果必须严格大于该值。
+          description: 兼容保留，新检索为 0，融合分数不另设阈值；两路原始分块分数仍受服务端环境变量阈值约束。
         max_score:
-          description: 阈值过滤前的最高候选分；没有候选或语义服务不可用时为 null。
+          description: 融合候选的最高 RRF 分数；没有候选时为 null。
           oneOf:
             - { type: number, minimum: 0, maximum: 1 }
             - { type: "null" }
@@ -1278,7 +1278,7 @@ components:
             - semantic_unavailable
             - fallback_exhausted
         message:
-          description: matched 时为 null；空结果或服务不可用时提供可直接展示的说明。
+          description: matched 时为 null；空结果时提供可直接展示的说明；服务失败返回错误响应。
           oneOf:
             - { type: string }
             - { type: "null" }
@@ -1321,7 +1321,7 @@ components:
     AssetQueryResponse:
       type: object
       additionalProperties: false
-      description: 游标分页或语义 top-k 结果；无下一页时 next_cursor 为 null。
+      description: 游标分页或混合 top-k 结果；无下一页时 next_cursor 为 null。
       required: [items, next_cursor, has_more, tag_statistics, search]
       properties:
         items:

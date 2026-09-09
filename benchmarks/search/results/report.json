@@ -1,0 +1,354 @@
+{
+  "generatedAt": "2026-09-08T17:12:29.317Z",
+  "corpusVersion": 1,
+  "source": "synthetic-only; no database access",
+  "model": "bge-m3",
+  "dimensions": 1024,
+  "elasticsearch": "8.11.3",
+  "analyzer": "standard",
+  "assetCount": 96,
+  "chunkCount": 144,
+  "queryCount": 96,
+  "tuneTopics": [
+    "coast",
+    "subway",
+    "robot",
+    "rice",
+    "classroom",
+    "cycling",
+    "pottery",
+    "parcel",
+    "lighthouse",
+    "drone",
+    "concert",
+    "bread",
+    "fire",
+    "dog",
+    "wok",
+    "charging"
+  ],
+  "testTopics": [
+    "coffee",
+    "ultrasound",
+    "ski",
+    "camp",
+    "diving",
+    "calligraphy",
+    "stars",
+    "welding"
+  ],
+  "vectorTopK": 100,
+  "keywordTopK": 100,
+  "numCandidates": 200,
+  "rrfK": 60,
+  "evaluationTopK": 8,
+  "objective": "macro F1@8; empty/empty = 1, no-match false recall = 0",
+  "tieBreak": "lower no-match false positive rate, then lower semantic and keyword thresholds",
+  "selected": {
+    "semantic": 0.705,
+    "keyword": 22.25
+  },
+  "trials": 1653,
+  "scores": {
+    "no-threshold": {
+      "tune": {
+        "queries": 64,
+        "tp": 96,
+        "fp": 416,
+        "fn": 0,
+        "precision": 0.1875,
+        "recall": 1,
+        "microF1": 0.3157894736842105,
+        "macroF1": 0.29999999999999993,
+        "top1Accuracy": 1,
+        "noMatchQueries": 16,
+        "noMatchFalsePositiveRate": 1
+      },
+      "test": {
+        "queries": 32,
+        "tp": 48,
+        "fp": 208,
+        "fn": 0,
+        "precision": 0.1875,
+        "recall": 1,
+        "microF1": 0.3157894736842105,
+        "macroF1": 0.3000000000000001,
+        "top1Accuracy": 1,
+        "noMatchQueries": 8,
+        "noMatchFalsePositiveRate": 1
+      }
+    },
+    "selected": {
+      "tune": {
+        "queries": 64,
+        "tp": 89,
+        "fp": 4,
+        "fn": 7,
+        "precision": 0.956989247311828,
+        "recall": 0.9270833333333334,
+        "microF1": 0.9417989417989417,
+        "macroF1": 0.9385416666666666,
+        "top1Accuracy": 1,
+        "noMatchQueries": 16,
+        "noMatchFalsePositiveRate": 0.0625
+      },
+      "test": {
+        "queries": 32,
+        "tp": 41,
+        "fp": 3,
+        "fn": 7,
+        "precision": 0.9318181818181818,
+        "recall": 0.8541666666666666,
+        "microF1": 0.8913043478260869,
+        "macroF1": 0.8625,
+        "top1Accuracy": 0.9166666666666666,
+        "noMatchQueries": 8,
+        "noMatchFalsePositiveRate": 0.125
+      }
+    },
+    "selected-semantic-only": {
+      "tune": {
+        "queries": 64,
+        "tp": 88,
+        "fp": 4,
+        "fn": 8,
+        "precision": 0.9565217391304348,
+        "recall": 0.9166666666666666,
+        "microF1": 0.9361702127659574,
+        "macroF1": 0.9333333333333332,
+        "top1Accuracy": 1,
+        "noMatchQueries": 16,
+        "noMatchFalsePositiveRate": 0.0625
+      },
+      "test": {
+        "queries": 32,
+        "tp": 41,
+        "fp": 3,
+        "fn": 7,
+        "precision": 0.9318181818181818,
+        "recall": 0.8541666666666666,
+        "microF1": 0.8913043478260869,
+        "macroF1": 0.8625,
+        "top1Accuracy": 0.9166666666666666,
+        "noMatchQueries": 8,
+        "noMatchFalsePositiveRate": 0.125
+      }
+    },
+    "selected-keyword-only": {
+      "tune": {
+        "queries": 64,
+        "tp": 29,
+        "fp": 0,
+        "fn": 67,
+        "precision": 1,
+        "recall": 0.3020833333333333,
+        "microF1": 0.464,
+        "macroF1": 0.5208333333333334,
+        "top1Accuracy": 0.4791666666666667,
+        "noMatchQueries": 16,
+        "noMatchFalsePositiveRate": 0
+      },
+      "test": {
+        "queries": 32,
+        "tp": 21,
+        "fp": 0,
+        "fn": 27,
+        "precision": 1,
+        "recall": 0.4375,
+        "microF1": 0.6086956521739131,
+        "macroF1": 0.6458333333333334,
+        "top1Accuracy": 0.7083333333333334,
+        "noMatchQueries": 8,
+        "noMatchFalsePositiveRate": 0
+      }
+    }
+  },
+  "testByKind": {
+    "keyword": {
+      "queries": 8,
+      "tp": 13,
+      "fp": 0,
+      "fn": 3,
+      "precision": 1,
+      "recall": 0.8125,
+      "microF1": 0.896551724137931,
+      "macroF1": 0.8333333333333333,
+      "top1Accuracy": 0.875,
+      "noMatchQueries": 0,
+      "noMatchFalsePositiveRate": 0
+    },
+    "description": {
+      "queries": 16,
+      "tp": 28,
+      "fp": 2,
+      "fn": 4,
+      "precision": 0.9333333333333333,
+      "recall": 0.875,
+      "microF1": 0.9032258064516129,
+      "macroF1": 0.8708333333333335,
+      "top1Accuracy": 0.9375,
+      "noMatchQueries": 0,
+      "noMatchFalsePositiveRate": 0
+    },
+    "no_match": {
+      "queries": 8,
+      "tp": 0,
+      "fp": 1,
+      "fn": 0,
+      "precision": 0,
+      "recall": 0,
+      "microF1": 0,
+      "macroF1": 0.875,
+      "top1Accuracy": 0,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    }
+  },
+  "testByLimit": {
+    "1": {
+      "queries": 32,
+      "tp": 22,
+      "fp": 1,
+      "fn": 26,
+      "precision": 0.9565217391304348,
+      "recall": 0.4583333333333333,
+      "microF1": 0.619718309859155,
+      "macroF1": 0.6770833333333334,
+      "top1Accuracy": 0.9166666666666666,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    },
+    "5": {
+      "queries": 32,
+      "tp": 41,
+      "fp": 3,
+      "fn": 7,
+      "precision": 0.9318181818181818,
+      "recall": 0.8541666666666666,
+      "microF1": 0.8913043478260869,
+      "macroF1": 0.8625,
+      "top1Accuracy": 0.9166666666666666,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    },
+    "8": {
+      "queries": 32,
+      "tp": 41,
+      "fp": 3,
+      "fn": 7,
+      "precision": 0.9318181818181818,
+      "recall": 0.8541666666666666,
+      "microF1": 0.8913043478260869,
+      "macroF1": 0.8625,
+      "top1Accuracy": 0.9166666666666666,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    },
+    "20": {
+      "queries": 32,
+      "tp": 41,
+      "fp": 3,
+      "fn": 7,
+      "precision": 0.9318181818181818,
+      "recall": 0.8541666666666666,
+      "microF1": 0.8913043478260869,
+      "macroF1": 0.8625,
+      "top1Accuracy": 0.9166666666666666,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    },
+    "200": {
+      "queries": 32,
+      "tp": 41,
+      "fp": 3,
+      "fn": 7,
+      "precision": 0.9318181818181818,
+      "recall": 0.8541666666666666,
+      "microF1": 0.8913043478260869,
+      "macroF1": 0.8625,
+      "top1Accuracy": 0.9166666666666666,
+      "noMatchQueries": 8,
+      "noMatchFalsePositiveRate": 0.125
+    }
+  },
+  "liveReplayQueries": 96,
+  "errors": [
+    {
+      "query": "拿铁 心形 拉花",
+      "expected": [
+        "coffee-0",
+        "coffee-1"
+      ],
+      "returned": []
+    },
+    {
+      "query": "孕妇 B超 产检",
+      "expected": [
+        "ultrasound-0",
+        "ultrasound-1"
+      ],
+      "returned": [
+        "ultrasound-1"
+      ]
+    },
+    {
+      "query": "单板滑雪选手在跳台完成空中翻转",
+      "expected": [],
+      "returned": [
+        "ski-1"
+      ]
+    },
+    {
+      "query": "夜间营地里人们靠着火堆取暖",
+      "expected": [
+        "camp-0",
+        "camp-1"
+      ],
+      "returned": [
+        "camp-0"
+      ]
+    },
+    {
+      "query": "背氧气瓶的人在珊瑚和鱼群旁游动",
+      "expected": [
+        "diving-0",
+        "diving-1"
+      ],
+      "returned": [
+        "diving-0"
+      ]
+    },
+    {
+      "query": "练习传统中国书法的近景",
+      "expected": [
+        "calligraphy-0",
+        "calligraphy-1"
+      ],
+      "returned": []
+    },
+    {
+      "query": "有人在户外用望远镜观察夜空",
+      "expected": [
+        "stars-0",
+        "stars-1"
+      ],
+      "returned": [
+        "stars-0",
+        "stars-1",
+        "stars-2"
+      ]
+    },
+    {
+      "query": "戴面罩的工人在桥上焊钢结构",
+      "expected": [
+        "welding-0",
+        "welding-1"
+      ],
+      "returned": [
+        "welding-0",
+        "welding-1",
+        "welding-2"
+      ]
+    }
+  ]
+}

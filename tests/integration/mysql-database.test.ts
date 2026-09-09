@@ -38,13 +38,12 @@ import {
   truncateIntegrationTables,
 } from "../helpers/integration-database";
 
-const searchAnalysisMock = vi.hoisted(() => vi.fn());
-const deleteAnalysisMock = vi.hoisted(() => vi.fn(async () => undefined));
-const semanticSearchEnabledMock = vi.hoisted(() => vi.fn(() => true));
-vi.mock("@/server/search/chroma", () => ({
-  searchAnalysis: searchAnalysisMock,
-  deleteAnalysis: deleteAnalysisMock,
-  semanticSearchEnabled: semanticSearchEnabledMock,
+const searchAssetsMock = vi.hoisted(() => vi.fn());
+const deleteAssetIndexMock = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("@/server/search/elasticsearch", () => ({
+  searchAssets: searchAssetsMock,
+  deleteAssetIndex: deleteAssetIndexMock,
+  indexAsset: vi.fn(async () => undefined),
 }));
 
 try {
@@ -80,7 +79,7 @@ mysqlTest("MySQL 数据层", () => {
   }, 30_000);
 
   beforeEach(async () => {
-    semanticSearchEnabledMock.mockReset().mockReturnValue(true);
+    searchAssetsMock.mockReset().mockResolvedValue([]);
     await truncateIntegrationTables(migrationConnection.pool);
   });
 
@@ -1488,7 +1487,7 @@ mysqlTest("MySQL 数据层", () => {
       void key;
     });
     const storage = { deleteObject } as unknown as ObjectStorage;
-    deleteAnalysisMock.mockClear();
+    deleteAssetIndexMock.mockClear();
     const { processMutationJob } = await import(
       "@/server/services/mutation-pipeline"
     );
@@ -1528,7 +1527,7 @@ mysqlTest("MySQL 数据层", () => {
         `tests/${secondObjectId}.mp4`,
       ]),
     );
-    expect(deleteAnalysisMock).toHaveBeenCalledTimes(2);
+    expect(deleteAssetIndexMock).toHaveBeenCalledTimes(2);
 
     const taskRows = await migrationConnection.db
       .select({ result: tasks.result })
@@ -1627,7 +1626,7 @@ mysqlTest("MySQL 数据层", () => {
       if (storageAttempt === 1) throw new Error("temporary ZOS failure");
     });
     const storage = { deleteObject } as unknown as ObjectStorage;
-    deleteAnalysisMock.mockClear();
+    deleteAssetIndexMock.mockClear();
     const { processMutationJob } = await import(
       "@/server/services/mutation-pipeline"
     );
@@ -1643,7 +1642,7 @@ mysqlTest("MySQL 数据层", () => {
 
     await processMutationJob(job, storage);
     expect(deleteObject).toHaveBeenCalledTimes(2);
-    expect(deleteAnalysisMock).toHaveBeenCalledTimes(2);
+    expect(deleteAssetIndexMock).toHaveBeenCalledTimes(2);
     expect(
       await migrationConnection.db
         .select()
@@ -1794,7 +1793,7 @@ mysqlTest("MySQL 数据层", () => {
     });
   });
 
-  test("统一查询在 count 和分页前应用多值过滤及标签、关键词 AND 语义", async () => {
+  test("混合召回保留结构化过滤、权限、分页与标签统计", async () => {
     async function seedAsset(input: {
       name: string;
       userId?: string;
@@ -1823,7 +1822,7 @@ mysqlTest("MySQL 数据层", () => {
       if (input.userId) {
         await migrationConnection.db
           .update(privateAssets)
-          .set({ processingStatus: input.processingStatus ?? "completed" })
+          .set({ processingStatus: input.processingStatus ?? "completed", reviewStatus: input.reviewStatus ?? "published" })
           .where(eq(privateAssets.id, id));
       } else {
         await migrationConnection.db
@@ -1837,336 +1836,57 @@ mysqlTest("MySQL 数据层", () => {
       return id;
     }
 
-    const commonTags = [
-      { category: "scene", value: "海边" },
-      { category: "object", value: "小船" },
-      { category: "color", value: "Blue" },
-    ];
+    const commonTags = [{ category: "scene", value: "海边" }, { category: "color", value: "Blue" }];
     const first = await seedAsset({ name: "first", tags: commonTags });
     const second = await seedAsset({ name: "second", tags: commonTags });
-    await seedAsset({
-      name: "missing-keyword",
-      tags: commonTags.filter((tag) => tag.category !== "object"),
-    });
-    await seedAsset({ name: "private", userId: "user-a", tags: commonTags });
+    const privateId = await seedAsset({ name: "private", userId: "user-a", tags: commonTags });
     await seedAsset({ name: "video", mediaType: "video", tags: commonTags });
-    await seedAsset({
-      name: "failed",
-      processingStatus: "failed",
-      tags: commonTags,
-    });
-    await seedAsset({
-      name: "pending",
-      reviewStatus: "pending_review",
-      tags: commonTags,
-    });
-    await seedAsset({
-      name: "wrong-exact-tag",
-      tags: commonTags.map((tag) =>
-        tag.category === "color" ? { ...tag, value: "Red" } : tag,
-      ),
-    });
-
+    await seedAsset({ name: "pending", reviewStatus: "pending_review", tags: commonTags });
+    await seedAsset({ name: "failed", processingStatus: "failed", tags: commonTags });
+    await seedAsset({ name: "wrong-tag", tags: [{ category: "scene", value: "海边" }] });
+    searchAssetsMock.mockImplementation(async (_query: string, ids: string[]) =>
+      ids.sort().map((assetId, index) => ({ assetId, searchScore: 1 / (index + 1) })));
     const options = {
-      limit: 1,
-      includeTagStatistics: true,
-      mediaTypes: ["image" as const],
-      processingStatuses: ["completed" as const],
-      reviewStatuses: ["published" as const],
-      tags: [
-        { category: "color", value: "blue" },
-        { category: "scene", value: "海边" },
-      ],
-      keywords: ["海边", "小船"],
+      limit: 1, includeTagStatistics: true,
+      mediaTypes: ["image" as const], processingStatuses: ["completed" as const],
+      tags: [{ category: "color", value: "blue" }, { category: "scene", value: "海边" }],
+      keywords: ["不要求标签中出现的查询词"],
     };
     const firstPage = await repository.queryAssetsPage(options);
     const secondPage = await repository.queryAssetsPage({ ...options, page: 2 });
-
-    expect(firstPage.total).toBe(2);
-    expect(firstPage.totalPages).toBe(2);
-    expect(secondPage.total).toBe(2);
-    expect(new Set([...firstPage.items, ...secondPage.items].map((item) => item.id))).toEqual(
-      new Set([first, second]),
-    );
-    const expectedStatistics = {
-      total_assets: 2,
-      assets_with_tags: 2,
-      assets_without_tags: 0,
-      average_tags_per_asset: 3,
-      maximum_tags_per_asset: 3,
-    };
-    expect(firstPage.tagStatistics).toMatchObject(expectedStatistics);
-    expect(secondPage.tagStatistics).toMatchObject(expectedStatistics);
-    expect(firstPage.tagStatistics?.top_tags).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          category: "object",
-          value: "小船",
-          asset_count: 2,
-          asset_share: 1,
-        }),
-      ]),
-    );
+    expect(firstPage).toMatchObject({ total: 2, totalPages: 2, search: { mode: "hybrid", threshold: 0 } });
+    expect(new Set([...firstPage.items, ...secondPage.items].map((item) => item.id))).toEqual(new Set([first, second]));
+    expect(firstPage.tagStatistics).toMatchObject({ total_assets: 2, average_tags_per_asset: 2 });
     expect(secondPage.tagStatistics).toEqual(firstPage.tagStatistics);
-
-    const withoutStatistics = await repository.queryAssetsPage({
-      ...options,
-      includeTagStatistics: false,
-    });
-    expect(withoutStatistics).not.toHaveProperty("tagStatistics");
-
-    const allFiltered = await repository.queryAssetsPage({
-      includeAllUsers: true,
-      limit: 100,
-      mediaTypes: ["image", "video"],
-      processingStatuses: ["completed", "failed"],
-      reviewStatuses: ["published", "pending_review"],
-      tags: options.tags,
-      keywords: options.keywords,
-    });
-    expect(allFiltered.total).toBe(6);
-    expect(
-      (await repository.queryAssetsPage({
-        ...options,
-        userId: "user-a",
-        limit: 100,
-      })).total,
-    ).toBe(1);
-    const scopedEmptySearch = await repository.queryAssetsPage({
-      ...options,
-      userId: "user-without-assets",
-      limit: 100,
-    });
-    expect(scopedEmptySearch).toMatchObject({
-      items: [],
-      total: 0,
-      search: {
-        mode: "keyword",
-        reason: "no_candidates",
-        max_score: null,
-      },
-    });
-    expect(scopedEmptySearch.search?.message).toBeTruthy();
-    expect(
-      (await repository.queryAssetsPage({
-        excludeUserId: "user-a",
-        limit: 100,
-        mediaTypes: ["image", "video"],
-        processingStatuses: ["completed", "failed"],
-        reviewStatuses: ["published", "pending_review"],
-        tags: options.tags,
-        keywords: options.keywords,
-      })).total,
-    ).toBe(5);
-    const beyondLastPage = await repository.queryAssetsPage({
-      ...options,
-      page: 999,
-    });
-    expect(beyondLastPage.items).toEqual([]);
-    expect(beyondLastPage.page).toBe(999);
-
-    const relevantAiAsset = await seedAsset({
-      name: "ai-relevant",
-      tags: [{ category: "object", value: "AI" }],
-    });
-    const irrelevantAiAsset = await seedAsset({
-      name: "ai-irrelevant",
-      tags: [{ category: "object", value: "AI" }],
-    });
-    const thirdAiAsset = await seedAsset({
-      name: "ai-third",
-      tags: [{ category: "object", value: "AI" }],
-    });
-    const suppressedAiAsset = await seedAsset({
-      name: "ai-suppressed",
-      tags: [{ category: "object", value: "AI" }],
-    });
-    searchAnalysisMock.mockImplementation(
-      async (_query: string, _limit: number, candidateIds?: string[]) =>
-        new Map(
-          (candidateIds ?? []).map((assetId) => [
-            assetId,
-            assetId === relevantAiAsset ? 0.9 : 0.1,
-          ]),
-        ),
+    expect(new Set(searchAssetsMock.mock.lastCall?.[1])).toEqual(new Set([first, second]));
+    expect((await repository.queryAssetsPage({ ...options, page: 999 })).items).toEqual([]);
+    const single = await repository.queryAssetsPage({ ...options, semanticQuery: "海边小船" });
+    expect(single.totalPages).toBe(1);
+    expect(searchAssetsMock).toHaveBeenLastCalledWith("海边小船 不要求标签中出现的查询词", expect.any(Array));
+    const personal = await repository.queryAssetsPage({ ...options, userId: "user-a" });
+    expect(personal.items.map((item) => item.id)).toEqual([privateId]);
+    expect(searchAssetsMock.mock.lastCall?.[1]).toEqual([privateId]);
+    const empty = await repository.queryAssetsPage({ ...options, userId: "missing-user" });
+    expect(empty).toMatchObject({ items: [], search: { reason: "no_candidates" } });
+    const calls = searchAssetsMock.mock.calls.length;
+    const browsing = await repository.queryAssetsPage({ ...options, keywords: [] });
+    expect(browsing).toMatchObject({ total: 2, search: null });
+    expect(searchAssetsMock).toHaveBeenCalledTimes(calls);
+    // 编辑已完成素材会创建新索引任务；不重新分析媒体。
+    await repository.updateAssetMetadata(first, { name: "edited", description: "新的描述", tags: [] });
+    const indexJobs = await migrationConnection.db.select().from(jobs).where(and(eq(jobs.publicAssetId, first), eq(jobs.type, "embed")));
+    expect(indexJobs).toHaveLength(1);
+    // 分段匹配忽略旧语义阈值，并在召回前排除已用素材。
+    searchAssetsMock.mockResolvedValue([{ assetId: second, searchScore: 0.1 }]);
+    const match = await repository.searchAssetsByDescriptionDetailed(
+      { description: "海边", keywords: ["小船"], limit: 1 }, {},
+      { candidateAssetIds: [first, second], excludedAssetIds: [first], semanticThreshold: 0.99 },
     );
-    const broadAiSearch = await repository.queryAssetsPage({
-      keywords: ["AI"],
-      limit: 100,
-      includeTagStatistics: true,
-    });
-    expect(broadAiSearch.items.map((item) => item.id)).toEqual([
-      relevantAiAsset,
-    ]);
-    expect(broadAiSearch).toMatchObject({
-      total: 1,
-      totalPages: 1,
-      search: {
-        mode: "hybrid",
-        threshold: 0.65,
-        max_score: 0.94,
-        reason: "matched",
-        message: null,
-      },
-    });
-    expect(broadAiSearch.items[0]).toMatchObject({
-      searchScore: 0.94,
-      keywordScore: 1,
-      semanticScore: 0.9,
-      matchType: "hybrid",
-      matchedTerms: ["ai"],
-      matchedCategories: ["object"],
-    });
-    expect(broadAiSearch.tagStatistics?.total_assets).toBe(1);
-    expect(broadAiSearch.items.some((item) => item.id === irrelevantAiAsset)).toBe(
-      false,
-    );
-
-    searchAnalysisMock.mockImplementation(
-      async (_query: string, _limit: number, candidateIds?: string[]) =>
-        new Map(
-          (candidateIds ?? []).map((assetId) => [
-            assetId,
-            assetId === relevantAiAsset
-              ? 0.4
-              : assetId === irrelevantAiAsset
-                ? 0.3
-                : assetId === thirdAiAsset
-                  ? 0.2
-                  : 0.1,
-          ]),
-        ),
-    );
-    const lowSemanticAiSearch = await repository.queryAssetsPage({
-      keywords: ["ai"],
-      limit: 100,
-    });
-    expect(lowSemanticAiSearch.items.map((item) => item.id)).toEqual([
-      relevantAiAsset,
-      irrelevantAiAsset,
-      thirdAiAsset,
-      suppressedAiAsset,
-    ]);
-    expect(lowSemanticAiSearch).toMatchObject({
-      total: 4,
-      search: {
-        mode: "keyword",
-        threshold: 0.6,
-        max_score: 1,
-        reason: "matched",
-        message: null,
-      },
-    });
-    expect(
-      lowSemanticAiSearch.items.every(
-        (item) => item.searchScore === 1 && item.matchType === "exact",
-      ),
-    ).toBe(true);
-    expect(
-      lowSemanticAiSearch.items.some((item) => item.id === suppressedAiAsset),
-    ).toBe(true);
-
-    const semanticCallsBeforeFallback = searchAnalysisMock.mock.calls.length;
-    semanticSearchEnabledMock.mockReturnValueOnce(false);
-    const unavailableSemanticAiSearch = await repository.queryAssetsPage({
-      keywords: ["AI"],
-      limit: 100,
-    });
-    expect(searchAnalysisMock).toHaveBeenCalledTimes(semanticCallsBeforeFallback);
-    expect(unavailableSemanticAiSearch.items).toHaveLength(4);
-    expect(unavailableSemanticAiSearch.search).toMatchObject({
-      mode: "keyword",
-      threshold: 0.6,
-      max_score: 1,
-      reason: "matched",
-      message: null,
-    });
-
-    const exactCityAsset = await seedAsset({
-      name: "exact-city",
-      userId: "city-scope",
-      tags: [{ category: "scene", value: "城市" }],
-    });
-    const containsCityAsset = await seedAsset({
-      name: "contains-city",
-      userId: "city-scope",
-      tags: [{ category: "style", value: "古城市风光" }],
-    });
-    const citySearch = await repository.queryAssetsPage({
-      userId: "city-scope",
-      keywords: ["城市"],
-      limit: 100,
-    });
-    expect(new Set(citySearch.items.map((item) => item.id))).toEqual(
-      new Set([exactCityAsset, containsCityAsset]),
-    );
-    expect(citySearch.items.find((item) => item.id === containsCityAsset)).toMatchObject({
-      searchScore: 0.648,
-      matchType: "contains",
-    });
-
-    const wholeTypoAsset = await seedAsset({
-      name: "whole-query-typo",
-      userId: "typo-scope",
-      tags: [{ category: "style", value: "古城巿风光" }],
-    });
-    const wholeTypoSearch = await repository.queryAssetsPage({
-      userId: "typo-scope",
-      keywords: ["古城市风光"],
-      limit: 100,
-    });
-    expect(wholeTypoSearch.items.map((item) => item.id)).toEqual([
-      wholeTypoAsset,
-    ]);
-    expect(wholeTypoSearch.items[0]).toMatchObject({
-      searchScore: 0.495,
-      keywordScore: 0.495,
-      matchType: "typo",
-      matchedTerms: ["古城市风光"],
-    });
-
-    const tokenAsset = await seedAsset({
-      name: "one-exact-token",
-      userId: "token-scope",
-      tags: [{ category: "object", value: "小船" }],
-    });
-    for (const query of ["blue 小船", "小船 dsfj"]) {
-      const tokenSearch = await repository.queryAssetsPage({
-        userId: "token-scope",
-        keywords: [query],
-        limit: 100,
-      });
-      expect(tokenSearch.items.map((item) => item.id)).toEqual([tokenAsset]);
-      expect(tokenSearch.items[0]).toMatchObject({
-        searchScore: 0.85,
-        matchType: "exact",
-        matchedTerms: ["小船"],
-      });
-    }
-
-    searchAnalysisMock.mockImplementation(
-      async (_query: string, _limit: number, candidateIds?: string[]) =>
-        new Map((candidateIds ?? []).map((assetId) => [assetId, 0.9])),
-    );
-    const semantic = await repository.queryAssetsPage({
-      ...options,
-      limit: 100,
-      semanticQuery: "海边的小船",
-      includeTagStatistics: true,
-    });
-    expect(new Set(semantic.items.map((item) => item.id))).toEqual(
-      new Set([first, second]),
-    );
-    expect(semantic).toMatchObject({ page: 1, total: 2, totalPages: 1 });
-    expect(semantic.tagStatistics).toMatchObject(expectedStatistics);
-    expect(searchAnalysisMock).toHaveBeenLastCalledWith(
-      "海边的小船",
-      800,
-      expect.arrayContaining([first, second]),
-      { minimumSimilarity: 0 },
-    );
-    const semanticCandidateIds = searchAnalysisMock.mock.lastCall?.[2] as string[];
-    expect(new Set(semanticCandidateIds)).toEqual(new Set([first, second]));
+    expect(searchAssetsMock).toHaveBeenLastCalledWith("海边 小船", [second]);
+    expect(match.items[0]).toMatchObject({ id: second, searchScore: 0.1 });
+    expect(match.threshold).toBe(0);
+    searchAssetsMock.mockRejectedValue(new Error("Embedding 服务不可用"));
+    await expect(repository.queryAssetsPage(options)).rejects.toThrow("Embedding 服务不可用");
   }, 30_000);
 
   test.each(["published", "pending_review"] as const)("兼容匹配 %s 素材、持久化任务并投递 camelCase 回调", async (reviewStatus) => {
@@ -2195,7 +1915,7 @@ mysqlTest("MySQL 数据层", () => {
       .update(privateAssets)
       .set({ processingStatus: "completed", reviewStatus })
       .where(eq(privateAssets.id, assetId));
-    searchAnalysisMock.mockResolvedValue(new Map([[assetId, 0.91]]));
+    searchAssetsMock.mockResolvedValue([{ assetId, searchScore: 0.91 }]);
 
     const { compatibilityMatchRequestSchema } = await import("@/shared/contracts");
     const { processCompatibilityMatchJob } = await import(
@@ -2307,11 +2027,9 @@ mysqlTest("MySQL 数据层", () => {
         ],
       },
     });
-    expect(searchAnalysisMock).toHaveBeenCalledWith(
+    expect(searchAssetsMock).toHaveBeenCalledWith(
       "如果能回到二十岁",
-      5,
       [assetId],
-      { minimumSimilarity: 0 },
     );
 
     const [generatedCallback] = await migrationConnection.db

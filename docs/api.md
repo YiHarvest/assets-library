@@ -245,7 +245,7 @@ curl -X PUT \
 
 ### `POST /api/v1/assets/query`
 
-该接口统一素材浏览、游标分页、标签统计和语义搜索。
+该接口统一素材浏览、游标分页、标签统计和混合搜索。
 请求 `{}` 即按默认公共作用域浏览第一页。
 
 ```json
@@ -267,8 +267,8 @@ curl -X PUT \
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `query` | `string?` | 1–1,000 字符；存在时执行描述语义搜索。 |
-| `keywords` | `string[]?` | 最多 10 项，每项 1–64 字符；用于标签候选粗筛。 |
+| `query` | `string?` | 1–1,000 字符；与 keywords 合并执行 ES 双路召回；存在时仍返回单页 Top-K。 |
+| `keywords` | `string[]?` | 最多 10 项，每项 1–64 字符；与 query 合并为检索文本，不作为标签硬过滤。 |
 | `filter.user_scope` | `UserScope` | 默认 `{ "mode": "public" }`。 |
 | `filter.media_types` | `("image"\|"video")[]?` | 最多 2 项。 |
 | `filter.statuses` | `TaskStatus[]?` | 最多 4 项。 |
@@ -289,22 +289,21 @@ curl -X PUT \
 `tag_statistics`，以及可为 `null` 的 `search`。素材摘要字段全部为
 `snake_case`；视频切片会返回 `parent_video_id` 和 `segment_index`。
 
-关键词搜索会保留完整查询文本并同时分词，再依次执行精确/别名、前缀、包含
-匹配；只有强匹配没有合格结果时才启用错别字兜底。完整文本证据可避免短句被
-分词后丢失整句错别字匹配。多词查询中，任一精确/别名命中可进入结果，未命中词
-会降低排序分但不会直接清空结果。场景、图片风格和视频形式会按标签分类参与
-权重计算。自然语言应放入 `query`，使用完整文本执行语义搜索，不使用关键词
-分词结果代替原句。
+`query` 和 `keywords` 合并为完整查询文本，同时执行 ES 向量检索与关键词检索，
+按分块 ID 用等权 RRF 融合，再按素材 ID 去重，保留最高分块。用户范围、审核状态、媒体类型和 `filter.tags` 仍在召回前严格过滤。
+无搜索文本时维持普通列表；带 `query` 时不接受非空 cursor；仅带 `keywords` 时，
+在 `.env` 配置的双路分块候选融合、素材去重后分页，翻完返回 `has_more=false`。
+同素材不同分块不提前合并分数，素材分数及分项贡献取自最高 RRF 分块。
+Top-K 配置按分块计数，去重后素材数可能少于请求数量，不额外补召回。
 
-所有检索分数统一在 `[0,1]` 范围内。系统先为候选计算最终分数，再过滤未超过
-阈值的素材，之后才统计、排序和分页。因此 `total`、标签统计和实际返回项均不
-包含低于阈值的候选。`AI`、`AIGC`、`人工智能` 等宽泛别名会优先用语义门槛
-去噪并融合排序，但不会改变查询作用域。语义不可用或全部低于门槛时，回退
-全部强词法候选，避免精确标签被误过滤或被固定数量截断，结果仍按 `limit` 分页。
+RRF 前分别使用服务端 `.env` 阈值过滤分块：`SEARCH_SEMANTIC_THRESHOLD` 是原始余弦相似度下限
+（默认 `0.705`），`SEARCH_KEYWORD_THRESHOLD` 是 BM25 原始分数下限（默认 `22.25`）。
+等于阈值也保留；任一路通过即可融合，不要求同时通过。两路均无结果时返回 `no_candidates`。
 
-当前默认展示阈值为：强关键词 `0.60`、仅在强匹配为空时启用的错别字兜底
-`0.40`、自然语言语义搜索 `0.55`、宽泛 AI 词的关键词/语义融合 `0.65`；比较规则
-均为严格大于（`score > threshold`）。
+`search_score = Σ 1/(k+rank) × (k+1)/2`，范围 `[0,1]`，表示融合排名强度，
+不代表语义相似度或匹配概率；每路未命中贡献为零。`keyword_score` 和 `semantic_score`
+返回对应路的归一化 RRF 贡献（每路最高 0.5）。融合分数不另设阈值，兼容字段 `search.threshold=0`，不代表两路原始分数未过滤。
+embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪装为空结果。
 
 | 素材摘要字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -320,10 +319,10 @@ curl -X PUT \
 | `media_url` | `string` | 已附带必要用户作用域的媒体相对 URL。 |
 | `created_at` / `updated_at` | `string(date-time)` | 上海时区 ISO 8601 时间。 |
 | `search_score` | `number?` | `[0,1]` 最终排序分；检索命中时返回。 |
-| `keyword_score` / `semantic_score` | `number?` | `[0,1]` 关键词分和语义分；未参与计算的分项省略。 |
-| `match_type` | `string?` | `exact`、`alias`、`prefix`、`contains`、`typo`、`semantic` 或 `hybrid`。 |
-| `matched_terms` | `string[]?` | 实际命中的规范化查询词。 |
-| `matched_categories` | `string[]?` | 命中标签所属分类，如 `scene`、`style`、`form`。 |
+| `keyword_score` / `semantic_score` | `number?` | 对应路的归一化 RRF 贡献；未命中的分项省略。 |
+| `match_type` | `string?` | 保留原枚举，新检索返回 `hybrid`。 |
+| `matched_terms` | `string[]?` | 保留字段，新检索暂返回空数组。 |
+| `matched_categories` | `string[]?` | 保留字段，新检索暂返回空数组。 |
 
 有合格结果时，`search.message` 为 `null`：
 
@@ -332,12 +331,12 @@ curl -X PUT \
   "items": [
     {
       "asset_id": "00000000-0000-4000-8000-000000000001",
-      "search_score": 0.86,
-      "keyword_score": 1,
-      "semantic_score": 0.767,
+      "search_score": 1,
+      "keyword_score": 0.5,
+      "semantic_score": 0.5,
       "match_type": "hybrid",
-      "matched_terms": ["ai"],
-      "matched_categories": ["style"]
+      "matched_terms": [],
+      "matched_categories": []
     }
   ],
   "next_cursor": null,
@@ -345,8 +344,8 @@ curl -X PUT \
   "tag_statistics": null,
   "search": {
     "mode": "hybrid",
-    "threshold": 0.65,
-    "max_score": 0.86,
+    "threshold": 0,
+    "max_score": 1,
     "reason": "matched",
     "message": null
   }
@@ -364,22 +363,17 @@ curl -X PUT \
   "has_more": false,
   "tag_statistics": null,
   "search": {
-    "mode": "semantic",
-    "threshold": 0.55,
-    "max_score": 0.49,
-    "reason": "below_threshold",
-    "message": "找到候选素材，但最高匹配分为 0.490，未超过展示阈值 0.550。"
+    "mode": "hybrid",
+    "threshold": 0,
+    "max_score": null,
+    "reason": "no_candidates",
+    "message": "没有召回任何候选素材。"
   }
 }
 ```
 
-`search.reason` 的取值如下：
-
-- `matched`：存在超过阈值的结果，此时 `message` 为 `null`。
-- `no_candidates`：召回阶段没有候选，`max_score` 为 `null`。
-- `below_threshold`：存在候选，但最高分未超过阈值。
-- `semantic_unavailable`：语义服务暂不可用，`max_score` 为 `null`。
-- `fallback_exhausted`：强匹配和错别字兜底均无合格结果。
+`search.reason` 新检索返回 `matched` 或 `no_candidates`；保留旧枚举以兼容接口结构。
+服务错误走统一错误响应，不再返回 `semantic_unavailable` 空成功结果。
 
 ### `GET /api/v1/assets/{asset_id}`
 
@@ -417,8 +411,8 @@ curl -X PUT \
 | `llm` | object 或 JSON string | 是 | 无 | 包含 `segments` 的分段结果；支持直接传对象，也支持该对象序列化后的 JSON 字符串。接口使用已有分段，不负责调用 LLM 生成分段。 |
 | `text` | string | 否 | 无 | 兼容旧调用方的全文字段，最长 1,000,000 字符。当前不参与对齐或素材搜索，也不回传。搜索使用每段的 `text`。 |
 | `asset_url_list` | array | 否 | `[]` | 最多 10,000 项。空数组表示从所有待审核或已发布、未删除的公共及个人素材中召回；非空时限定素材范围，详见下文。 |
-| `semantic_threshold` | number | 否 | `0.3` | 语义相似度阈值，范围 `[0,1]`。只接受分数**严格大于**该值的素材；等于阈值也不命中。传 `0` 接受正分候选，传 `1` 不会命中。 |
-| `is_random` | boolean | 否 | `true` | `true`：从本次达标候选中等概率随机选一个；`false`：选最高分。两种模式均按分段顺序排除本任务已使用的素材。 |
+| `semantic_threshold` | number | 否 | `0.3` | 兼容参数，仍校验范围 `[0,1]`，暂不参与过滤。 |
+| `is_random` | boolean | 否 | `true` | `true`：从本次融合候选中等概率随机选一个；`false`：选最高分。两种模式均按分段顺序排除本任务已使用的素材。 |
 | `callback_url` | string (URL) | 是 | 无 | 接收任务成功或失败结果的地址，仅支持 HTTP/HTTPS，最长 2,048 字符。 |
 | 其他顶层字段 | 任意 JSON 值 | 否 | 无 | 作为业务自定义字段透传到终态回调，例如 `business_id`。不参与匹配；顶层 `user_id` 也不会限制素材范围。避免使用回调保留字段 `taskId`、`status`、`result`、`error`、`completed_at`，同名值可能被系统覆盖。 |
 
@@ -462,7 +456,7 @@ curl -X PUT \
 | 字段 | 类型 | 必填 | 默认值／缺省行为 | 含义与约束 |
 | --- | --- | --- | --- | --- |
 | `segment_id` | integer | 是 | 无 | 正整数分段编号，原样返回。处理和返回顺序由数组顺序决定，不按此编号排序。 |
-| `text` | string | 是 | 无 | 分段文本，去除首尾空白后为 1–10,000 字符；同时用于 ASR 对齐和语义搜索。 |
+| `text` | string | 是 | 无 | 分段文本，去除首尾空白后为 1–10,000 字符；同时用于 ASR 对齐和混合搜索。 |
 | `high_light_word` | string | 否 | 回退到 `keyword` | 旧格式的高亮词，最长 1,000 字符；优先转换为输出的 `keyword`，不再输出 `high_light_word`。显式空字符串也优先。 |
 | `keyword` | string | 否 | 输出时回退到 `""` | 关键词，最长 1,000 字符。仅在未提供 `high_light_word` 时使用；不参与关键词检索或筛选。 |
 | `level` | integer | 是 | 无 | 非负整数业务等级，原样返回，当前不影响搜索、排序或随机概率。 |
@@ -543,19 +537,13 @@ curl -X PUT \
 
 #### 匹配与选择规则
 
-1. 按输入分段顺序，在上述素材范围中先排除本任务已使用的素材，再仅用每段 `text` 进行语义搜索。每段最终最多一个结果，
-   内部 `limit=1`，沿用 `limit * 5` 的召回逻辑，向 Chroma 请求前 **5 条向量记录**。
-   同一素材可能占据多条向量记录，因此这不保证有 5 个不同素材。
-2. 以 `1 / (1 + distance)` 计算相似度并限制在 `[0,1]`，同一素材 ID 的多个
-   passage 取最高分，再过滤出分数严格大于 `semantic_threshold` 的不同素材。
-3. `is_random=true` 时，从这次召回的达标素材中等概率选择一个，不按分数加权；
-   随机池受上述召回数量限制，不是全库所有达标素材。同一素材 ID 在本任务中最多使用一次。
-4. `is_random=false` 时，每段选剩余达标素材中的最高分。两种模式都在向量召回前
-   排除已用素材，让后续分段继续匹配其他候选；剩余候选为空或未达阈值时返回未匹配，不重复使用已有素材。
-5. 生成结果前再次检查所选素材是否可用，审核状态须为 `pending_review` 或 `published`。失效时返回未匹配，不补选；
-   个人素材 URL 自动追加 `user_id` 查询参数。
+1. 按分段顺序，以每段 `text` 执行 ES 双路召回，使用 RRF 融合；每段最多一个结果。
+2. 召回前应用指定素材范围并排除本任务已用素材。每个描述和视频摘要各一个文档、一个向量，分块候选数由 `.env` 配置，RRF 后按素材去重。
+3. 请求中的 `semantic_threshold` 保留校验与接收，暂不参与过滤；使用服务端 `.env` 的双路阈值。`matched_candidate_score` 返回归一化 RRF 分数。
+4. `is_random=true` 从融合候选中等概率选择一个；`false` 选择融合排序第一项。同一素材不重复使用。
+5. 返回前再次校验素材可用状态，个人素材 URL 追加 `user_id`。embedding 或 ES 错误导致任务失败并走原有重试、回调流程。
 
-本接口没有可配置的 `limit` 请求字段。上述规则只描述兼容分段匹配接口。
+本接口没有可配置的 `limit` 请求字段。
 
 #### 同步响应：任务已受理
 
@@ -633,7 +621,7 @@ HTTP `202 Accepted`，JSON 格式如下：
 | `matched_candidate_url` | string (URL) 或 null | 命中素材的绝对媒体 URL；个人素材带 `user_id`。未命中为 `null`。 |
 | `matched_candidate_type` | `image`、`video` 或 null | 命中素材的实际媒体类型，未命中为 `null`。 |
 | `matched_candidate_desc` | string 或 null | 命中素材的描述，未命中为 `null`。 |
-| `matched_candidate_score` | number 或 null | `[0,1]` 相似度。命中时为所选素材分数；全部候选未达阈值时为过滤前最高分；因去重或最终检查失效而未命中时可能保留候选分数；没有可用分数时为 `null`。不能只凭分数判断是否命中。 |
+| `matched_candidate_score` | number 或 null | `[0,1]` 归一化 RRF 排名分数。命中时为所选素材分数；因去重或最终检查失效而未命中时可能保留候选分数；没有可用分数时为 `null`。不能只凭分数判断是否命中。 |
 | `matched_candidate_reason` | string 或 null | 命中为 `null`；未命中时为下表中的机器可读原因。 |
 | `matched_candidate_message` | string 或 null | 命中为 `null`；未命中时为说明文本。文本可能变化，业务判断应使用 `reason`。 |
 | 其他分段字段 | 与请求一致 | 保留输入分段的自定义字段，系统生成字段除外。 |
@@ -641,19 +629,18 @@ HTTP `202 Accepted`，JSON 格式如下：
 | `matched_candidate_reason` | 含义 |
 | --- | --- |
 | `no_candidates` | 没有可用候选，包括指定 URL 无法识别、范围内没有待审核或已发布素材、没有召回结果、所选素材失效或可用素材已被前面的分段用完等；具体情况见 `message`。 |
-| `below_threshold` | 已召回带分数的候选，但没有分数严格大于阈值的素材。 |
-| `semantic_unavailable` | 语义服务未启用或调用失败。当前作为分段未匹配结果返回，不直接令整个任务失败。 |
+| `below_threshold` / `semantic_unavailable` | 保留旧枚举，新检索不再产生；服务错误通过任务失败报告。 |
 
-例如，默认阈值 `0.3` 下最高候选仅为 `0.28`，该分段的六个匹配字段为：
+没有候选时，六个匹配字段示例：
 
 ```json
 {
   "matched_candidate_url": null,
   "matched_candidate_type": null,
   "matched_candidate_desc": null,
-  "matched_candidate_score": 0.28,
-  "matched_candidate_reason": "below_threshold",
-  "matched_candidate_message": "找到候选素材，但最高匹配分为 0.280，未超过展示阈值 0.300。"
+  "matched_candidate_score": null,
+  "matched_candidate_reason": "no_candidates",
+  "matched_candidate_message": "没有召回任何候选素材。"
 }
 ```
 
@@ -757,7 +744,7 @@ HTTP `202 Accepted`，JSON 格式如下：
 - 传入非空 `user_id`：只删除该用户的私人记录、分析数据、搜索索引和私人 ZOS
   对象，不影响配对的公共副本。
 - 不传 `user_id`、传空字符串或 `null`：只允许删除公共素材。worker 会删除
-  Chroma 向量、ZOS 对象和 MySQL 素材记录。
+  ES 索引、ZOS 对象和 MySQL 素材记录。
 - 视频切片独立删除；删除某一侧最后一个切片时只回收该侧父视频对象。公私两侧
   都清空后才回收共享的逻辑父视频记录。
 

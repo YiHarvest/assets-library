@@ -27,6 +27,7 @@ import {
   mediaObjects,
   privateAssets,
   publicAssets,
+  searchIndexState,
   tags,
   taskItems,
   tasks,
@@ -37,21 +38,7 @@ import {
   canClaimAnalyzeTask,
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
-import { searchAnalysis, semanticSearchEnabled } from "@/server/search/chroma";
-import {
-  DEFAULT_BUSINESS_ALIASES,
-  DEFAULT_RELEVANCE_THRESHOLDS,
-  hybridRelevanceScore,
-  isBroadAiQuery,
-  normalizeSearchText,
-  normalizeSemanticText,
-  scoreKeywordRelevance,
-  selectBroadQueryRecallTier,
-  tokenizeKeywordQuery,
-  type KeywordRelevance,
-  type LexicalMatchType,
-  type SearchableTag,
-} from "@/server/search/relevance";
+import { searchAssets, type SearchCandidate } from "@/server/search/elasticsearch";
 import { apiV1Path } from "@/lib/paths";
 import {
   analysisResultSchema,
@@ -754,7 +741,7 @@ export interface ExactTagFilter {
 /**
  * API v1 素材查询的数据库参数。
  *
- * 所有字段都会在 count 与分页之前生效；tags 和 keywords 都采用 AND 语义。
+ * 结构化过滤在召回与分页之前生效；keywords 与 semanticQuery 合并为双路查询。
  */
 export interface QueryAssetsOptions extends AssetScope {
   page?: number;
@@ -1193,665 +1180,83 @@ async function tagStatisticsForAssetIds(assetIds: string[]): Promise<TagStatisti
   };
 }
 
-interface RankedAssetMatch {
-  finalScore: number;
-  keywordScore?: number;
-  semanticScore?: number;
-  matchType: LexicalMatchType | "semantic" | "hybrid";
-  matchedTerms: string[];
-  matchedCategories: string[];
-}
-
-interface KeywordMatches {
-  assetIds?: Set<string>;
-  scores?: Map<string, RankedAssetMatch>;
-  threshold?: number;
-  maxScore?: number | null;
-  reason?: "matched" | "no_candidates" | "fallback_exhausted";
-  broadQuery?: boolean;
-  semanticText?: string;
-}
-
-function searchMetadata(
-  mode: AssetSearchMeta["mode"],
-  threshold: number,
-  maxScore: number | null,
-  reason: AssetSearchMeta["reason"],
-): AssetSearchMeta {
-  const formattedMaximum = maxScore === null ? null : maxScore.toFixed(3);
-  const message =
-    reason === "matched"
-      ? null
-      : reason === "semantic_unavailable"
-        ? "语义搜索暂不可用，请稍后重试。"
-        : reason === "below_threshold"
-          ? `找到候选素材，但最高匹配分为 ${formattedMaximum ?? "0.000"}，未超过展示阈值 ${threshold.toFixed(3)}。`
-          : reason === "fallback_exhausted"
-            ? "强匹配和错别字兜底都没有找到超过展示阈值的素材。"
-            : "没有召回任何候选素材。";
-  return { mode, threshold, max_score: maxScore, reason, message };
-}
-
-function emptyAssetQueryPage(
-  pageSize: number,
-  includeTagStatistics: boolean,
-  search: AssetSearchMeta | null,
-) {
+function searchMetadata(candidates: SearchCandidate[]): AssetSearchMeta {
   return {
-    items: [],
-    page: 1,
-    pageSize,
-    total: 0,
-    totalPages: 1,
-    ...(includeTagStatistics ? { tagStatistics: emptyTagStatistics() } : {}),
-    search,
-  } satisfies AssetQueryPage;
+    mode: "hybrid", threshold: 0,
+    max_score: candidates.length ? Math.max(...candidates.map((item) => item.searchScore)) : null,
+    reason: candidates.length ? "matched" : "no_candidates",
+    message: candidates.length ? null : "没有召回任何候选素材。",
+  };
 }
 
-function rankedKeywordMatch(
-  relevance: KeywordRelevance,
-): RankedAssetMatch {
-  const evidence = [...relevance.evidence].sort(
-    (left, right) => right.score - left.score,
-  );
+function candidateScores(candidate: SearchCandidate) {
   return {
-    finalScore: relevance.score,
-    keywordScore: relevance.score,
-    matchType: evidence.some((item) => item.matchType === "typo")
-      ? "typo"
-      : (evidence[0]?.matchType ?? "exact"),
-    matchedTerms: relevance.matchedTokens,
-    matchedCategories: [
-      ...new Set(evidence.map((item) => item.category)),
-    ],
+    searchScore: candidate.searchScore,
+    keywordScore: candidate.keywordScore,
+    semanticScore: candidate.semanticScore,
+    matchType: "hybrid" as const,
+    matchedTerms: [],
+    matchedCategories: [],
   };
 }
 
-function qualifiedMatches(
-  scores: Map<string, RankedAssetMatch>,
-  threshold: number,
-) {
-  return new Map(
-    [...scores].filter(([, match]) => match.finalScore > threshold),
-  );
-}
-
-async function assetIdsMatchingKeywords(
-  keywords: string[],
-  baseConditions: readonly SQL[] = [],
-): Promise<KeywordMatches> {
-  /*
-  根据baseConditions 来初步筛选素材，
-  */
-  // 对关键字进行分词和去重
-  const tokens = [
-    ...new Set(keywords.flatMap((keyword) => tokenizeKeywordQuery(keyword))),
-  ];
-  if (!tokens.length) {
-    return { assetIds: undefined, scores: undefined };
-  }
-  // 从数据库读取候选的素材标签
-  /*
-  - assetId：标签所属的素材 ID；
-  - category：标签类别，如场景、风格、对象等；
-  - normalizedValue：标准化后的标签值，用于匹配。
-  */
-  const tagRows = await db
-    .select({
-      assetId: assetTags.assetId,
-      category: tags.category,
-      normalizedValue: tags.normalizedValue,
-    })
-    .from(assetTags)
-    .innerJoin(tags, eq(assetTags.tagId, tags.id))
-    .innerJoin(assets, eq(assetTags.assetId, assets.id))
-    // 必须先限定用户/状态等基础范围，再判断是否启用 typo 兜底；其他作用域的
-    // exact 命中不能阻止当前作用域中的错别字候选被召回。
-    .where(and(...baseConditions));
-
-    // 素材id -> 标签列表,当前素材收集的标签
-  const tagsByAsset = new Map<string, SearchableTag[]>();
-  for (const row of tagRows) {
-    const current = tagsByAsset.get(row.assetId) ?? [];
-    current.push({ category: row.category, value: row.normalizedValue });
-    tagsByAsset.set(row.assetId, current);
-  }
-
-  const scoringQuery = keywords.length === 1 ? keywords[0]! : tokens;
-  //根据关键字计算所有候选素材的匹配分数
-  const scoreAll = (allowTypo: boolean) => {
-    // 素材id -> 匹配分数
-    const scores = new Map<string, RankedAssetMatch>();
-    for (const [assetId, assetTagsForSearch] of tagsByAsset) {
-      // 计算当前素材与关键词的相关性。
-      /*
-      完全匹配 exact	1.00
-      业务别名 alias	0.95
-      前缀匹配 prefix	0.85
-      包含匹配 contains	0.72
-      错别字匹配 typo	0.55
-      */
-      const relevance = scoreKeywordRelevance(scoringQuery, assetTagsForSearch, {
-        // 控制是否允许错别字匹配
-        allowTypo,
-      });
-      if (relevance.score > 0) {
-        scores.set(assetId, rankedKeywordMatch(relevance));
-      }
-    }
-    return scores;
-  };
-  // 强关键词匹配
-  const strongScores = scoreAll(false);
-  // 根据阈值筛选
-  const strongMatches = qualifiedMatches(
-    strongScores,
-    DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
-  );
-  const queryText = keywords.join(" ");
-  const shared = {
-    // 是不是 ["ai", "aigc", "人工智能", "生成式人工智能", "智能科技"]中的一个
-    broadQuery: isBroadAiQuery(tokens),
-    semanticText: isBroadAiQuery(tokens)
-      ? DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
-      : normalizeSemanticText(queryText),
-  };
-  // 如果有强匹配，直接返回
-  if (strongMatches.size) {
-    return {
-      assetIds: new Set(strongMatches.keys()),
-      scores: strongMatches,
-      threshold: DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
-      maxScore: Math.max(...[...strongScores.values()].map((item) => item.finalScore)),
-      reason: "matched",
-      ...shared,
-    };
-  }
-  // 如果没有强匹配，尝试错别字匹配
-  const fallbackScores = scoreAll(true);
-  const typoScores = new Map(
-    [...fallbackScores].filter(([, match]) => match.matchType === "typo"),
-  );
-  // 根据阈值筛选
-  const fallbackMatches = qualifiedMatches(
-    typoScores,
-    DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
-  );
-  const allFallbackScores = [...typoScores.values()].map(
-    (item) => item.finalScore,
-  );
-  return {
-    assetIds: new Set(fallbackMatches.keys()),
-    scores: fallbackMatches,
-    threshold: DEFAULT_RELEVANCE_THRESHOLDS.typoFallback,
-    maxScore: allFallbackScores.length ? Math.max(...allFallbackScores) : null,
-    reason: fallbackMatches.size
-      ? "matched"
-      : tagRows.length
-        ? "fallback_exhausted"
-        : "no_candidates",
-    ...shared,
-  };
-}
-
-/**
- * API v1 统一素材查询。
- *
- * 普通浏览先在 MySQL 完成全部过滤和 count，再执行分页。语义检索也先用同一组
- * MySQL 条件生成候选 ID，确保 Chroma 不会召回越权或不符合筛选条件的素材。
- * 语义检索当前定义为单页 top-k，因此不在这里伪造后续页。
- */
+/** MySQL 先限定权限和结构化过滤，两路 ES 召回使用完全相同的候选范围。 */
 export async function queryAssetsPage({
-  page = 1,
-  limit = 20,
-  mediaTypes = [],
-  processingStatuses = [],
-  reviewStatuses = ["published"],
-  tags: exactTags = [],
-  keywords = [],
-  semanticQuery,
-  includeTagStatistics = false,
-  ...scope
+  page = 1, limit = 20, mediaTypes = [], processingStatuses = [],
+  reviewStatuses = ["published"], tags: exactTags = [], keywords = [],
+  semanticQuery, includeTagStatistics = false, ...scope
 }: QueryAssetsOptions = {}): Promise<AssetQueryPage> {
   const safeLimit = Math.min(Math.max(limit, 1), 100);
-  // 分页,第几页
-  const requestedPage = Number.isInteger(page) && page > 0 ? page : 1;
-  // 是否删除
-  const conditions: SQL[] = [isNull(assets.deletedAt)];
-  // 素材归属条件：公开素材/私有素材/排除某用户素材
+  const requestedPage = semanticQuery?.trim() ? 1 : Math.max(1, Math.floor(page));
+  const query = [semanticQuery, ...keywords].filter(Boolean).join(" ").trim();
+  const conditions: SQL[] = [isNull(assets.deletedAt), ne(assets.reviewStatus, "deleted")];
   const ownership = scopeCondition(scope);
   if (ownership) conditions.push(ownership);
-  // 检索的素材的媒体类型
   if (mediaTypes.length) conditions.push(inArray(assets.mediaType, mediaTypes));
   const processing = processingCondition(processingStatuses);
   if (processing) conditions.push(processing);
-  // 筛选指定状态的素材: published、deleted、pending_review
-  if (reviewStatuses.length) {
-    conditions.push(inArray(assets.reviewStatus, reviewStatuses));
-  }
-  // 关键词精确匹配和标签
-  // initialKeywordMatches 初始关键词匹配结果
-  // exactTagIds 选中的素材id
-  const [exactTagIds, initialKeywordMatches] = await Promise.all([
-    // 筛选指定标签的素材
-    assetIdsMatchingExactTags(exactTags),
-    //  关键字匹配
-    assetIdsMatchingKeywords(keywords, conditions),
-  ]);
-  let keywordMatches = initialKeywordMatches;
-  const candidateSets = [exactTagIds, keywordMatches.assetIds].filter(
-    (value): value is Set<string> => value !== undefined,
-  );
-  //  候选的素材集合
-  let candidateIds = intersectAssetIdSets(candidateSets);
-  // 如果没有候选素材：用户没有勾选素材 and 关键字也没匹配到
-  if (candidateIds && candidateIds.size === 0) {
-    const mode = semanticQuery?.trim() ? "semantic" : "keyword";
-    // 语义检索/关键字检索的阈值
-    const threshold = semanticQuery?.trim()
-      ? DEFAULT_RELEVANCE_THRESHOLDS.semantic
-      : (keywordMatches.threshold ??
-        DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword);
-        // 返回空结果
-    return emptyAssetQueryPage(
-      safeLimit,
-      includeTagStatistics,
-      searchMetadata(
-        mode,
-        threshold,
-        keywordMatches.maxScore ?? null,
-        mode === "keyword"
-          ? (keywordMatches.reason ?? "no_candidates")
-          : "no_candidates",
-      ),
-    );
-  }
+  if (reviewStatuses.length) conditions.push(inArray(assets.reviewStatus, reviewStatuses));
+  const exactIds = await assetIdsMatchingExactTags(exactTags);
+  if (exactIds) conditions.push(exactIds.size ? inArray(assets.id, [...exactIds]) : sql`false`);
+  const where = and(...conditions);
+  const offset = (requestedPage - 1) * safeLimit;
 
-  let keywordSearchMeta = keywordMatches.threshold
-    ? searchMetadata(
-        "keyword",
-        keywordMatches.threshold,
-        keywordMatches.maxScore ?? null,
-        keywordMatches.reason ?? "matched",
-      )
-    : null;
-  
-    // 宽泛查询，例如用户输入AI这类词的时候
-  if (
-    !semanticQuery?.trim() &&
-    keywordMatches.broadQuery &&
-    keywordMatches.scores &&
-    candidateIds
-  ) {
-    // 筛选候选素材
-    const broadWhere = and(...conditions, inArray(assets.id, [...candidateIds]));
-    const eligibleRows = await db
-      .select({ id: assets.id })
-      .from(assets)
-      .where(broadWhere)
-      .orderBy(desc(assets.createdAt), desc(assets.id));
-      // 已经通过所有硬性过滤条件的候选素材 ID。
-    const eligibleIds = eligibleRows.map((row) => row.id);
-    if (!eligibleIds.length) {
-      return emptyAssetQueryPage(
-        safeLimit,
-        includeTagStatistics,
-        searchMetadata(
-          "hybrid",
-          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
-          null,
-          "no_candidates",
-        ),
-      );
-    }
-
-    let semanticScores: Map<string, number> | undefined;
-    if (semanticSearchEnabled()) {
-      try {
-        // 使用这些宽泛词进行语义搜索
-        semanticScores = await searchAnalysis(
-          // DEFAULT_BUSINESS_ALIASES[0]?.join(" ")
-          // ai aigc 人工智能 生成式人工智能 智能科技
-          keywordMatches.semanticText ?? keywords.join(" "),
-          Math.min(800, Math.max(safeLimit * 8, eligibleIds.length * 5)),
-          eligibleIds,
-          { minimumSimilarity: 0 },
-        );
-      } catch (error) {
-        console.error(
-          "Broad keyword semantic rerank unavailable; using lexical fallback.",
-          error,
-        );
-      }
-    }
-    // 素材的语义相似度得分和关键字的匹配得分
-    const broadCandidates = eligibleIds.flatMap((assetId) => {
-      const lexical = keywordMatches.scores?.get(assetId);
-      return lexical
-        ? [{
-            assetId,
-            lexicalScore: lexical.keywordScore ?? lexical.finalScore,
-            semanticScore: semanticScores?.get(assetId),
-          }]
-        : [];
-    });
-    // 
-    const tier = selectBroadQueryRecallTier(
-      broadCandidates,
-      DEFAULT_RELEVANCE_THRESHOLDS.semantic,
-      broadCandidates.length,
-    );
-    const lexicalFallbackIds = selectBroadQueryRecallTier(
-      broadCandidates,
-      1,
-      broadCandidates.length,
-    ).assetIds;
-
-    const applyLexicalFallback = () => {
-      const fallbackScores = new Map<string, RankedAssetMatch>();
-      for (const assetId of lexicalFallbackIds) {
-        const lexical = keywordMatches.scores?.get(assetId);
-        if (!lexical) continue;
-        fallbackScores.set(assetId, {
-          ...lexical,
-          ...(semanticScores?.has(assetId)
-            ? { semanticScore: semanticScores.get(assetId) }
-            : {}),
-        });
-      }
-      candidateIds = new Set(fallbackScores.keys());
-      const lexicalScores = [...fallbackScores.values()].map(
-        (match) => match.finalScore,
-      );
-      const maxScore = lexicalScores.length
-        ? Math.max(...lexicalScores)
-        : null;
-      keywordMatches = {
-        ...keywordMatches,
-        assetIds: candidateIds,
-        scores: fallbackScores,
-        threshold: DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
-        maxScore,
-        reason: fallbackScores.size ? "matched" : "fallback_exhausted",
-      };
-      keywordSearchMeta = searchMetadata(
-        "keyword",
-        DEFAULT_RELEVANCE_THRESHOLDS.strongKeyword,
-        maxScore,
-        fallbackScores.size ? "matched" : "fallback_exhausted",
-      );
-    };
-
-    if (!tier.useSemanticRerank) {
-      // exact/alias 是强证据：语义缺失或整体偏低时返回全部强命中，
-      // 不能把 AI=1 惩罚成 0.4，也不能再人为截断为前三项。
-      applyLexicalFallback();
-    } else {
-      const hybridScores = new Map<string, RankedAssetMatch>();
-      for (const assetId of tier.assetIds) {
-        const lexical = keywordMatches.scores.get(assetId);
-        const semanticScore = semanticScores?.get(assetId);
-        if (!lexical || semanticScore === undefined) continue;
-        hybridScores.set(assetId, {
-          ...lexical,
-          // 合并语义相似度得分和关键字的匹配得分
-          finalScore: hybridRelevanceScore(
-            lexical.keywordScore,
-            semanticScore,
-          ),
-          semanticScore,
-          matchType: "hybrid",
-        });
-      }
-      const qualified = qualifiedMatches(
-        hybridScores,
-        DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
-      );
-      if (!qualified.size) {
-        applyLexicalFallback();
-      } else {
-        const allHybridScores = [...hybridScores.values()].map(
-          (match) => match.finalScore,
-        );
-        const maxScore = Math.max(...allHybridScores);
-        candidateIds = new Set(qualified.keys());
-        // 合并语义相似度得分和关键字的匹配得分的结果
-        keywordMatches = {
-          ...keywordMatches,
-          assetIds: candidateIds,
-          scores: qualified,
-          threshold: DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
-          maxScore,
-          reason: "matched",
-        };
-        keywordSearchMeta = searchMetadata(
-          "hybrid",
-          DEFAULT_RELEVANCE_THRESHOLDS.hybrid,
-          maxScore,
-          "matched",
-        );
-      }
-    }
-  }
-
-  if (candidateIds) conditions.push(inArray(assets.id, [...candidateIds]));
-  const where = conditions.length ? and(...conditions) : undefined;
-  // 语义召回
-  if (semanticQuery?.trim()) {
-    const semanticThreshold = DEFAULT_RELEVANCE_THRESHOLDS.semantic;
-    if (!semanticSearchEnabled()) {
-      return emptyAssetQueryPage(
-        safeLimit,
-        includeTagStatistics,
-        searchMetadata(
-          "semantic",
-          semanticThreshold,
-          null,
-          "semantic_unavailable",
-        ),
-      );
-    }
-    const rows = await db
-      .select()
-      .from(assets)
-      .where(where)
-      .orderBy(desc(assets.createdAt), desc(assets.id));
-    const filteredIds = rows.map((row) => row.id);
-    // 为空
-    if (!filteredIds.length) {
-      return emptyAssetQueryPage(
-        safeLimit,
-        includeTagStatistics,
-        searchMetadata(
-          "semantic",
-          semanticThreshold,
-          null,
-          "no_candidates",
-        ),
-      );
-    }
-    let semanticScores: Map<string, number>;
-    try {
-      semanticScores = await searchAnalysis(
-        // 对query进行切分
-        normalizeSemanticText(semanticQuery),
-        // 每个素材可能包含多个向量分块，适度过采样后再按 asset_id 去重。
-        Math.max(safeLimit * 8, safeLimit),
-        filteredIds,
-        { minimumSimilarity: 0 },
-      );
-    } catch {
-      return emptyAssetQueryPage(
-        safeLimit,
-        includeTagStatistics,
-        searchMetadata(
-          "semantic",
-          semanticThreshold,
-          null,
-          "semantic_unavailable",
-        ),
-      );
-    }
-    const rawScores = [...semanticScores.values()];
-    const maxScore = rawScores.length ? Math.max(...rawScores) : null;
-    // 筛选分数大于semanticThreshold的素材
-    const qualifiedScores = new Map(
-      [...semanticScores].filter(([, score]) => score > semanticThreshold),
-    );
-    if (!qualifiedScores.size) {
-      return emptyAssetQueryPage(
-        safeLimit,
-        includeTagStatistics,
-        searchMetadata(
-          "semantic",
-          semanticThreshold,
-          maxScore,
-          semanticScores.size ? "below_threshold" : "no_candidates",
-        ),
-      );
-    }
-    // 按分数排序
-    const rankedIds = [...qualifiedScores.entries()]
-      .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
-      .slice(0, safeLimit)
-      .map(([assetId]) => assetId);
+  if (query) {
+    // ponytail: 沿用 MySQL 候选 ID 过滤；超过 ES terms 上限时改为在 ES 镜像过滤字段。
+    const eligible = await db.select({ id: assets.id }).from(assets).where(where);
+    const candidates = await searchAssets(query, eligible.map((row) => row.id));
+    const ids = candidates.map((item) => item.assetId);
+    const pageCandidates = candidates.slice(offset, offset + safeLimit);
+    const pageIds = pageCandidates.map((item) => item.assetId);
+    const rows = pageIds.length ? await db.select().from(assets)
+      .where(and(where, inArray(assets.id, pageIds))) : [];
     const rowsById = new Map(rows.map((row) => [row.id, row]));
-    const tagMap = await getTagsForAssets(rankedIds);
-    const items = rankedIds.flatMap((assetId) => {
-      const row = rowsById.get(assetId);
-      if (!row) return [];
-      const semanticScore = qualifiedScores.get(assetId) ?? 0;
-      return [
-        {
-          ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-          searchScore: semanticScore,
-          semanticScore,
-          matchType: "semantic" as const,
-          matchedTerms: [],
-          matchedCategories: [],
-        },
-      ];
-    });
+    const tagMap = await getTagsForAssets(pageIds);
     return {
-      items,
-      page: 1,
-      pageSize: safeLimit,
-      total: items.length,
-      totalPages: 1,
-      ...(includeTagStatistics
-        ? { tagStatistics: await tagStatisticsForAssetIds(rankedIds) }
-        : {}),
-      search: searchMetadata(
-        "semantic",
-        semanticThreshold,
-        maxScore,
-        "matched",
-      ),
+      items: pageCandidates.flatMap((candidate) => {
+        const row = rowsById.get(candidate.assetId);
+        return row ? [{ ...summaryFromRow(row, tagMap.get(row.id) ?? []), ...candidateScores(candidate) }] : [];
+      }),
+      page: requestedPage, pageSize: safeLimit, total: ids.length,
+      totalPages: semanticQuery?.trim() ? 1 : Math.max(1, Math.ceil(ids.length / safeLimit)),
+      ...(includeTagStatistics ? { tagStatistics: await tagStatisticsForAssetIds(ids) } : {}),
+      search: searchMetadata(candidates),
     };
   }
 
-  const [countRow] = await db
-    .select({ value: sql<number>`count(*)`.mapWith(Number) })
-    .from(assets)
-    .where(where);
+  const [countRow] = await db.select({ value: sql<number>`count(*)`.mapWith(Number) }).from(assets).where(where);
   const total = countRow?.value ?? 0;
-  if (total === 0 && keywordSearchMeta) {
-    return emptyAssetQueryPage(
-      safeLimit,
-      includeTagStatistics,
-      searchMetadata(
-        keywordSearchMeta.mode,
-        keywordSearchMeta.threshold,
-        null,
-        "no_candidates",
-      ),
-    );
-  }
-  const totalPages = Math.max(1, Math.ceil(total / safeLimit));
-  const statisticsPromise = includeTagStatistics
-    ? db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(where)
-        .then((allRows) =>
-          tagStatisticsForAssetIds(allRows.map((row) => row.id)),
-        )
-    : undefined;
-  // cursor 指向已不存在的页时返回空页，不能回退并重复最后一页的数据。
-  if (total > 0 && requestedPage > totalPages) {
-    return {
-      items: [],
-      page: requestedPage,
-      pageSize: safeLimit,
-      total,
-      totalPages,
-      ...(statisticsPromise
-        ? { tagStatistics: await statisticsPromise }
-        : {}),
-      search: keywordSearchMeta,
-    };
-  }
-  const safePage = requestedPage;
-  const offset = (safePage - 1) * safeLimit;
-
-  let rows: Array<typeof assets.$inferSelect>;
-  if (keywordMatches.scores) {
-    const matchingRows = await db
-      .select()
-      .from(assets)
-      .where(where)
-      .orderBy(desc(assets.createdAt), desc(assets.id));
-    rows = matchingRows
-      .sort((left, right) => {
-        const scoreDifference =
-          (keywordMatches.scores?.get(right.id)?.finalScore ?? 0) -
-          (keywordMatches.scores?.get(left.id)?.finalScore ?? 0);
-        if (scoreDifference !== 0) return scoreDifference;
-        const semanticDifference =
-          (keywordMatches.scores?.get(right.id)?.semanticScore ?? -1) -
-          (keywordMatches.scores?.get(left.id)?.semanticScore ?? -1);
-        if (semanticDifference !== 0) return semanticDifference;
-        const createdDifference =
-          right.createdAt.getTime() - left.createdAt.getTime();
-        if (createdDifference !== 0) return createdDifference;
-        return right.id.localeCompare(left.id);
-      })
-      .slice(offset, offset + safeLimit);
-  } else {
-    rows = await db
-      .select()
-      .from(assets)
-      .where(where)
-      .orderBy(desc(assets.createdAt), desc(assets.id))
-      .limit(safeLimit)
-      .offset(offset);
-  }
+  const rows = await db.select().from(assets).where(where)
+    .orderBy(desc(assets.createdAt), desc(assets.id)).limit(safeLimit).offset(offset);
   const tagMap = await getTagsForAssets(rows.map((row) => row.id));
+  const statisticIds = includeTagStatistics
+    ? await db.select({ id: assets.id }).from(assets).where(where) : [];
   return {
-    items: rows.map((row) => {
-      const match = keywordMatches.scores?.get(row.id);
-      return {
-        ...summaryFromRow(row, tagMap.get(row.id) ?? []),
-        ...(match
-          ? {
-              searchScore: match.finalScore,
-              keywordScore: match.keywordScore,
-              semanticScore: match.semanticScore,
-              matchType: match.matchType,
-              matchedTerms: match.matchedTerms,
-              matchedCategories: match.matchedCategories,
-            }
-          : {}),
-      };
-    }),
-    page: safePage,
-    pageSize: safeLimit,
-    total,
-    totalPages,
-    ...(statisticsPromise
-      ? { tagStatistics: await statisticsPromise }
-      : {}),
-    search: keywordSearchMeta,
+    items: rows.map((row) => summaryFromRow(row, tagMap.get(row.id) ?? [])),
+    page: requestedPage, pageSize: safeLimit, total,
+    totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+    ...(includeTagStatistics ? { tagStatistics: await tagStatisticsForAssetIds(statisticIds.map((row) => row.id)) } : {}),
+    search: null,
   };
 }
 
@@ -1885,50 +1290,6 @@ export async function listAssets({
   };
 }
 
-async function searchableAssetIdsMatchingKeywords(
-  keywords: string[],
-  scope: AssetScope,
-  candidateAssetIds?: readonly string[],
-) {
-  const constrainedIds = candidateAssetIds === undefined
-    ? undefined
-    : [...new Set(candidateAssetIds)];
-  if (constrainedIds?.length === 0) return [];
-  const ownership = scopeCondition(scope);
-  // keywords=[] 时，返回所有勾选的待审核或已发布素材
-  if (!keywords.length) {
-    const conditions: SQL[] = [
-      inArray(assets.reviewStatus, ["pending_review", "published"]),
-      isNull(assets.deletedAt),
-    ];
-    if (ownership) conditions.push(ownership);
-    if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
-    return (
-      await db
-        .select({ id: assets.id })
-        .from(assets)
-        .where(and(...conditions))
-    ).map((row) => row.id);
-  }
-  // 关键词匹配的结果
-  const keywordMatches = await assetIdsMatchingKeywords(keywords);
-  const matchedAssetIds = [...(keywordMatches.assetIds ?? [])];
-  if (!matchedAssetIds.length) return [];
-  const conditions: SQL[] = [
-    inArray(assets.reviewStatus, ["pending_review", "published"]),
-    isNull(assets.deletedAt),
-    inArray(assets.id, matchedAssetIds),
-  ];
-  if (ownership) conditions.push(ownership);
-  if (constrainedIds) conditions.push(inArray(assets.id, constrainedIds));
-  return (
-    await db
-      .select({ id: assets.id })
-      .from(assets)
-      .where(and(...conditions))
-  ).map((row) => row.id);
-}
-
 export interface DescriptionSearchResult {
   items: AssetSummary[];
   threshold: number;
@@ -1942,7 +1303,7 @@ export interface DescriptionSearchOptions {
   candidateAssetIds?: readonly string[];
   /** Exclude already used assets before vector recall. */
   excludedAssetIds?: readonly string[];
-  /** Override the default semantic threshold for compatibility callers. */
+  /** 兼容旧调用方，暂不参与候选过滤。 */
   semanticThreshold?: number;
   /** Randomize qualified recall before applying input.limit. */
   isRandom?: boolean;
@@ -1966,97 +1327,35 @@ export async function searchAssetsByDescriptionDetailed(
   scope: AssetScope = {},
   options: DescriptionSearchOptions = {},
 ): Promise<DescriptionSearchResult> {
-  // 语义搜索
-  const threshold =
-    options.semanticThreshold ?? DEFAULT_RELEVANCE_THRESHOLDS.semantic;
-  const result = (
-    items: AssetSummary[],
-    maxScore: number | null,
-    reason: AssetSearchMeta["reason"],
-  ): DescriptionSearchResult => {
-    const metadata = searchMetadata("semantic", threshold, maxScore, reason);
-    return {
-      items,
-      threshold,
-      maxScore,
-      reason,
-      message: metadata.message,
-    };
-  };
-
-  const normalizedKeywords = [
-    ...new Set(keywords.map(normalizeSearchText).filter(Boolean)),
+  const conditions: SQL[] = [
+    inArray(assets.reviewStatus, ["pending_review", "published"]),
+    isNull(assets.deletedAt),
   ];
-  // 根据scope和candidateAssetIds过滤出候选素材id
-  const excludedIds = new Set(options.excludedAssetIds);
-  const candidateIds = (await searchableAssetIdsMatchingKeywords(
-    normalizedKeywords,
-    scope,
-    options.candidateAssetIds,
-  )).filter((id) => !excludedIds.has(id));
-  if (!candidateIds.length) return result([], null, "no_candidates");
-  if (!semanticSearchEnabled()) {
-    return result([], null, "semantic_unavailable");
+  const ownership = scopeCondition(scope);
+  if (ownership) conditions.push(ownership);
+  if (options.candidateAssetIds) {
+    conditions.push(options.candidateAssetIds.length
+      ? inArray(assets.id, [...options.candidateAssetIds]) : sql`false`);
   }
-  let scores: Map<string, number>;
-  try {
-    // 根据语义搜索
-    scores = await searchAnalysis(
-      normalizeSemanticText(description),
-      Math.max(limit * 5, limit),
-      candidateIds,
-      { minimumSimilarity: 0 },
-    );
-  } catch {
-    return result([], null, "semantic_unavailable");
-  }
-  const rawScores = [...scores.values()];
-  const maxScore = rawScores.length ? Math.max(...rawScores) : null;
-  // 筛选大于阈值的素材
-  const qualifiedScores = new Map(
-    [...scores].filter(([, score]) => score > threshold),
-  );
-  const allRankedIds = [...qualifiedScores.entries()]
-    .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
-    .map(([assetId]) => assetId);
-  const rankedIds = options.isRandom
-    ? sampleAssetIds(allRankedIds, limit)
-    : allRankedIds.slice(0, limit);
-  if (!rankedIds.length) {
-    return result(
-      [],
-      maxScore,
-      scores.size ? "below_threshold" : "no_candidates",
-    );
-  }
-  const rows = await db
-    .select()
-    .from(assets)
-    .where(
-      and(
-        inArray(assets.reviewStatus, ["pending_review", "published"]),
-        isNull(assets.deletedAt),
-        inArray(assets.id, rankedIds),
-      ),
-    );
+  if (options.excludedAssetIds?.length) conditions.push(notInArray(assets.id, [...options.excludedAssetIds]));
+  const where = and(...conditions);
+  const eligible = await db.select({ id: assets.id }).from(assets).where(where);
+  const candidates = await searchAssets([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id));
+  const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
+  const ids = candidates.map((item) => item.assetId);
+  const rankedIds = options.isRandom ? sampleAssetIds(ids, limit) : ids.slice(0, limit);
+  const rows = rankedIds.length ? await db.select().from(assets)
+    .where(and(where, inArray(assets.id, rankedIds))) : [];
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const tagMap = await getTagsForAssets(rankedIds);
-  const items = rankedIds.flatMap((assetId) => {
-    const row = rowsById.get(assetId);
-    if (!row) return [];
-    const semanticScore = qualifiedScores.get(assetId) ?? 0;
-    return [
-      {
-        ...summaryFromRow(row, tagMap.get(assetId) ?? []),
-        searchScore: semanticScore,
-        semanticScore,
-        matchType: "semantic" as const,
-        matchedTerms: [],
-        matchedCategories: [],
-      },
-    ];
-  });
-  return result(items, maxScore, "matched");
+  const metadata = searchMetadata(candidates);
+  return {
+    items: rankedIds.flatMap((id) => {
+      const row = rowsById.get(id);
+      return row ? [{ ...summaryFromRow(row, tagMap.get(id) ?? []), ...candidateScores(candidateMap.get(id)!) }] : [];
+    }),
+    threshold: 0, maxScore: metadata.max_score, reason: metadata.reason, message: metadata.message,
+  };
 }
 
 export async function searchAssetsByDescription(
@@ -2110,6 +1409,19 @@ export async function getAssetRecord(assetId: string) {
 }
 
 type AssetTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** 与业务更新共用事务；索引失败由现有 embed worker 重试。 */
+export async function enqueueSearchIndex(tx: AssetTransaction, ref: AssetRef, taskId?: string | null) {
+  const now = new Date();
+  await tx.insert(jobs).values({
+    id: crypto.randomUUID(), ...jobTarget(ref), taskId,
+    type: "embed", status: "queued", phase: "analyzing",
+    availableAt: now, createdAt: now, updatedAt: now,
+  });
+  await tx.insert(searchIndexState).values({
+    id: crypto.randomUUID(), ...associationTarget(ref), status: "queued", updatedAt: now,
+  }).onDuplicateKeyUpdate({ set: { status: "queued", errorMessage: null, updatedAt: now } });
+}
 
 async function resolveAssetRef(assetId: string, scope: AssetScope): Promise<AssetRef> {
   if (scope.userId?.trim()) return { kind: "private", id: assetId };
@@ -2261,6 +1573,7 @@ export async function updateAssetMetadata(
           confidence: null,
         });
     }
+    if (asset.processingStatus === "completed") await enqueueSearchIndex(tx, ref);
   });
   return getAssetDetail(assetId, { includeAllUsers: true });
 }

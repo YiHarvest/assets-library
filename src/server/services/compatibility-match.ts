@@ -295,7 +295,7 @@ export async function matchCompatibilitySegments(
   const usedAssetIds = new Set<string>();
   // ponytail: 顺序检索避免并发选中同一素材；吞吐成为瓶颈时再拆分召回与分配。
   for (const segment of segments) {
-    // keywords=[] 只有语义搜索
+    // 分段文本进入 ES 双路召回。
     const searchInput = { description: segment.text, keywords: [], limit: 1 };
     const searchOptions = {
       ...(candidateAssetIds ? { candidateAssetIds } : {}),
@@ -323,7 +323,7 @@ export async function matchCompatibilitySegments(
     }
     const record = await dependencies.getAsset(candidate.id);
     const rawCandidateScore =
-      candidate.semanticScore ?? candidate.searchScore ?? search.maxScore ?? 0;
+      candidate.searchScore ?? search.maxScore ?? 0;
     const candidateScore = Math.min(1, Math.max(0, rawCandidateScore));
     if (!record || !["pending_review", "published"].includes(record.reviewStatus)) {
       matched.push(unmatchedSegment(segment, {
@@ -515,7 +515,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
   try {
     // 把 LLM 文本顺序对齐到 ASR 逐词时间，计算时间范围和 group_id，小程序那边传过来的格式已经做了对齐
     const aligned = alignCompatibilitySegments(payload.request);
-    // 对每个segment 进行素材匹配，语义检索
+    // 每个分段复用 ES 双路召回和 RRF 排序。
     const matched = await matchCompatibilitySegments(
       aligned,
       payload.publicOrigin,

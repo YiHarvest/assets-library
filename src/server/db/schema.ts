@@ -655,7 +655,7 @@ export const callbackDeliveries = mysqlTable(
   ],
 );
 
-/** Chroma 最终一致性水位；每个素材只保留一行状态。 */
+/** ES 搜索索引最终一致性水位；每个素材只保留一行状态。 */
 export const searchIndexState = mysqlTable(
   "search_index_state",
   {

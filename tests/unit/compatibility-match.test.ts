@@ -10,7 +10,7 @@ import {
   type AssetSummary,
 } from "@/shared/contracts";
 import { searchAssetsByDescriptionDetailed } from "@/server/repositories/assets";
-import * as chroma from "@/server/search/chroma";
+import * as elasticsearch from "@/server/search/elasticsearch";
 
 const databaseRows = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db", () => ({
@@ -316,23 +316,22 @@ describe("compatibility segment matching", () => {
   });
 
   it("excludes used assets before vector recall and stops when none remain", async () => {
-    databaseRows.mockResolvedValue([{ id: "asset-a" }, { id: "asset-b" }]);
-    vi.spyOn(chroma, "semanticSearchEnabled").mockReturnValue(true);
-    const search = vi.spyOn(chroma, "searchAnalysis").mockResolvedValue(new Map());
+    databaseRows.mockResolvedValueOnce([{ id: "asset-b" }]).mockResolvedValue([]);
+    const search = vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
     try {
       await searchAssetsByDescriptionDetailed(
         { description: "夕阳", keywords: [], limit: 1 },
         { includeAllUsers: true },
         { excludedAssetIds: ["asset-a"] },
       );
-      expect(search).toHaveBeenCalledWith("夕阳", 5, ["asset-b"], { minimumSimilarity: 0 });
+      expect(search).toHaveBeenCalledWith("夕阳", ["asset-b"]);
       const exhausted = await searchAssetsByDescriptionDetailed(
         { description: "夕阳", keywords: [], limit: 1 },
         { includeAllUsers: true },
         { excludedAssetIds: ["asset-a", "asset-b"] },
       );
       expect(exhausted).toMatchObject({ items: [], reason: "no_candidates" });
-      expect(search).toHaveBeenCalledTimes(1);
+      expect(search).toHaveBeenLastCalledWith("夕阳", []);
     } finally {
       vi.restoreAllMocks();
     }

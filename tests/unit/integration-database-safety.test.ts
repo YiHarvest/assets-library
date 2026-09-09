@@ -10,6 +10,27 @@ import {
 } from "../helpers/integration-database";
 
 describe("integration database safety", () => {
+  it("rejects production mode before a development database can be opened or cleaned", () => {
+    const env = {
+      APP_MODE: "prd",
+      DATABASE_URL: "mysql://app:secret@localhost/assets_library",
+      PRD_DATABASE_NAME: "assets_library",
+      DEV_DATABASE_NAME: "assets_library_dev_test",
+    };
+    const original = { ...env };
+    const openDatabase = vi.fn();
+
+    expect(() => {
+      bindIntegrationDatabaseEnvironment(
+        "mysql://tester:secret@localhost/assets_library_dev_test",
+        env,
+      );
+      openDatabase();
+    }).toThrow("生产模式禁止运行数据库集成测试");
+    expect(openDatabase).not.toHaveBeenCalled();
+    expect(env).toEqual(original);
+  });
+
   it("accepts a dedicated integration database", () => {
     expect(
       assertDedicatedIntegrationDatabase(

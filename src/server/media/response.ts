@@ -245,19 +245,24 @@ export async function mediaResponse(assetId: string, request: Request) {
   if (!object) {
     throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
   }
-  const clipMs = new URL(request.url).searchParams.get("clip_ms");
-  if (clipMs !== null && asset.mediaType === "video") {
+  const params = new URL(request.url).searchParams;
+  const clipMs = params.get("clip_ms");
+  const stillImage = asset.mediaType === "image" && params.has("still_ms");
+  if (stillImage && params.get("still_ms") !== "3000") {
+    throw new AppError("invalid_request", "静态图片视频时长固定为 3000 毫秒。", 400);
+  }
+  if (stillImage || (clipMs !== null && asset.mediaType === "video")) {
     if (object.status !== "persisted") {
       throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
     }
-    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, Number(clipMs), async destination => {
+    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, stillImage ? 3000 : Number(clipMs), async destination => {
       if (object.provider === "local") {
         if (!object.localPath) throw new AppError("storage_error", "本地媒体对象缺少存储路径。", 500);
         await fs.promises.copyFile(resolveMediaPath(object.localPath), destination);
       } else {
         await zosStorage().downloadToFile(object.objectKey, destination);
       }
-    });
+    }, stillImage);
     if (clipped) {
       return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-clip.mp4` }, clipped, request);
     }

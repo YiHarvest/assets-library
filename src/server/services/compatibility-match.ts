@@ -308,6 +308,7 @@ export async function matchCompatibilitySegments(
     searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
       { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
       { includeAllUsers: true }, {
+        minDurationMs: 3000,
         ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
         ...(candidateAssetIds ? { candidateAssetIds } : {}),
         excludedAssetIds: [], semanticThreshold, isRandom: false,
@@ -346,7 +347,9 @@ export async function matchCompatibilitySegments(
     usedAssetIds.add(candidate.id);
     const mediaUrl = new URL(withUserScope(candidate.mediaUrl, record.userId), publicOrigin);
     const durationMs = Math.round((segment.end_time - segment.start_time) * 1000);
-    if (clipEnabled && candidate.mediaType === "video" && durationMs > 0 &&
+    if (candidate.mediaType === "image") {
+      mediaUrl.searchParams.set("still_ms", "3000");
+    } else if (clipEnabled && durationMs > 0 &&
       record.segmentStartMs != null && record.segmentEndMs != null &&
       record.segmentEndMs - record.segmentStartMs > durationMs) {
       mediaUrl.searchParams.set("clip_ms", String(durationMs));
@@ -354,7 +357,7 @@ export async function matchCompatibilitySegments(
     matched.push({
       ...segment,
       matched_candidate_url: mediaUrl.toString(),
-      matched_candidate_type: candidate.mediaType,
+      matched_candidate_type: "video",
       matched_candidate_desc: candidate.description,
       matched_candidate_score: candidateScore,
       matched_candidate_reason: null,

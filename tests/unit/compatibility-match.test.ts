@@ -108,14 +108,16 @@ describe("compatibility segment matching", () => {
   });
 
   it.each([
-    { enabled: "true", mediaType: "video" as const, sourceMs: 8500, clip: "1480" },
-    { enabled: "false", mediaType: "video" as const, sourceMs: 8500, clip: null },
-    { enabled: "true", mediaType: "video" as const, sourceMs: 1000, clip: null },
-    { enabled: "true", mediaType: "video" as const, sourceMs: 1480, clip: null },
-    { enabled: "true", mediaType: "image" as const, sourceMs: 8500, clip: null },
-  ])("returns a playable URL without changing the timeline: $enabled / $mediaType / $sourceMs", async ({ enabled, mediaType, sourceMs, clip }) => {
+    { enabled: "true", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: "1480" },
+    { enabled: "false", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 1480, clip: "1480" },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 5000, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 3000, clip: null },
+    { enabled: "true", mediaType: "image" as const, sourceMs: 0, slotMs: 1480, clip: null },
+    { enabled: "false", mediaType: "image" as const, sourceMs: 0, slotMs: 5000, clip: null },
+  ])("returns a playable URL without changing the timeline: $enabled / $mediaType / $sourceMs / $slotMs", async ({ enabled, mediaType, sourceMs, slotMs, clip }) => {
     vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", enabled);
-    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 7.6 };
+    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 6.12 + slotMs / 1000 };
     const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({
       items: [{ ...candidate(), mediaType }], threshold: 0, maxScore: 0.5,
       reason: "matched" as const, message: null,
@@ -132,7 +134,10 @@ describe("compatibility segment matching", () => {
     expect(url.searchParams.get("user_id")).toBe("759");
     expect(url.searchParams.get("v")).toBe("1");
     expect(url.searchParams.get("clip_ms")).toBe(clip);
-    expect(search.mock.calls[0][2]).not.toHaveProperty("minDurationMs");
+    expect(url.searchParams.get("still_ms")).toBe(mediaType === "image" ? "3000" : null);
+    expect(matched.matched_candidate_type).toBe("video");
+    // 原视频 3 秒门槛在 ES 召回和全局分配前应用，与文本时段长度、裁剪开关无关。
+    expect(search.mock.calls[0][2]).toMatchObject({ minDurationMs: 3000 });
   });
 
   it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
@@ -303,6 +308,7 @@ describe("compatibility segment matching", () => {
         semanticThreshold: 0.55,
         isRandom: false,
         excludedAssetIds: [],
+        minDurationMs: 3000,
       },
     );
     if (reviewStatus === "deleted") {
@@ -522,6 +528,7 @@ describe("compatibility segment matching", () => {
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
+        minDurationMs: 3000,
       },
     );
     expect(matched.matched_candidate_url).toContain(

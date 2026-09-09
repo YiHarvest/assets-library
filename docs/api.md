@@ -542,9 +542,10 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
 3. 请求中的 `semantic_threshold` 已废弃但保留原校验、默认值与接收行为，不参与过滤。v1 使用服务端 `.env` 的双路阈值，v2 使用版本化策略文件。`matched_candidate_score` 始终返回归一化 RRF 排名分，不表示相似概率。
 4. 全局分配优先保证可命中的段数，再使素材沿文本时间轴均匀分布；`is_random` 控制同等候选的选择顺序。同一素材不重复使用。
 5. 返回前再次校验素材可用状态，个人素材 URL 追加 `user_id`。embedding 或 ES 错误导致任务失败并走原有重试、回调流程。
-6. `SEGMENT_MATCH_CLIP_ENABLED=true`（默认）时，长于文本时段的视频 URL 会附带 `clip_ms`，按 `end_time-start_time` 从当前素材开头裁剪；这是素材自身的起点，不是成片的 `start_time`。图片、等长和较短视频直接使用，不因时长短而被排除，也不循环、补帧或拼接。关闭开关后，新匹配结果返回原素材 URL。
+6. 原视频时长不足 3 秒（或缺少时长）时在召回前排除，恰好 3 秒的可以参与匹配。`SEGMENT_MATCH_CLIP_ENABLED=true`（默认）时，长于文本时段的视频 URL 会附带 `clip_ms`，仅截取当前素材的前 N 秒，N 为 `end_time-start_time`；不是从成片的 `start_time` 开始裁剪。达到 3 秒但等于或短于文本时段的视频直接使用，不循环或拼接。关闭开关后，新的视频匹配返回原素材 URL，3 秒候选门槛仍生效。
+7. 图片命中后固定生成 3 秒静态 MP4，URL 附带 `still_ms=3000`，`matched_candidate_type` 返回 `video`；不再根据文本时段裁短这份静态视频，也不修改原文本时间轴。这条规则不受长视频裁剪开关影响，素材库里的原图仍可正常访问。
 
-下游应原样下载 `matched_candidate_url`，无需新增请求参数。裁剪在首次下载时执行，输出保留原视频音轨（如有），视频按帧边界截断，时长可能与目标相差一帧。片段缓存复用 `STAGING_RETENTION_HOURS` 清理，过期后自动重新生成；媒体权限和 Range 下载沿用原接口。已有裁剪 URL 在关闭开关后仍可使用，库内原素材不会被覆盖。
+下游应原样下载 `matched_candidate_url`，无需新增请求参数。视频裁剪和图片转视频在首次下载时执行。裁剪保留原视频音轨（如有），按帧边界截断，时长可能与目标相差一帧；图片视频为无声 H.264 MP4。片段缓存复用 `STAGING_RETENTION_HOURS` 清理，过期后自动重新生成；媒体权限和 Range 下载沿用原接口。已有裁剪 URL 在关闭开关后仍可使用，库内原素材不会被覆盖。
 
 本接口没有可配置的 `limit` 请求字段。
 
@@ -621,8 +622,8 @@ HTTP `202 Accepted`，JSON 格式如下：
 | `group_id` | `[number, number]` | `[句内序号, 句内总数]`；来自 ASR 对齐计算或调用方已有时间轴。 |
 | `start_time` | number | 分段开始时间，单位秒，来自 ASR 计算或输入。不是所选素材内的裁剪起点。 |
 | `end_time` | number | 分段结束时间，单位秒，来自 ASR 计算或输入。不是所选素材内的裁剪终点。 |
-| `matched_candidate_url` | string (URL) 或 null | 命中素材的绝对媒体 URL；个人素材带 `user_id`，需裁剪的视频带 `clip_ms`。应保留完整 URL 及其查询参数。未命中为 `null`。 |
-| `matched_candidate_type` | `image`、`video` 或 null | 命中素材的实际媒体类型，未命中为 `null`。 |
+| `matched_candidate_url` | string (URL) 或 null | 命中素材的绝对媒体 URL；个人素材带 `user_id`，需裁剪的视频带 `clip_ms`，图片转视频带 `still_ms=3000`。应保留完整 URL 及其查询参数。未命中为 `null`。 |
+| `matched_candidate_type` | `image`、`video` 或 null | URL 实际返回的媒体类型；图片转成静态视频后也为 `video`，未命中为 `null`。字段枚举保持兼容。 |
 | `matched_candidate_desc` | string 或 null | 命中素材的描述，未命中为 `null`。 |
 | `matched_candidate_score` | number 或 null | `[0,1]` 归一化 RRF 排名分数。命中时为所选素材分数；因去重或最终检查失效而未命中时可能保留候选分数；没有可用分数时为 `null`。不能只凭分数判断是否命中。 |
 | `matched_candidate_reason` | string 或 null | 命中为 `null`；未命中时为下表中的机器可读原因。 |

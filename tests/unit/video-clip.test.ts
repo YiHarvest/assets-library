@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mediaResponse } from "@/server/media/response";
 
@@ -39,8 +40,11 @@ describe("matched video clipping through the media response", () => {
   beforeAll(async () => {
     fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "recall-clip-fixture-"));
     const file = path.join(fixtureRoot, "source.mp4");
-    await exec("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x160:rate=30",
-      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "8.5",
+    await exec("ffmpeg", ["-nostdin", "-v", "error",
+      "-f", "lavfi", "-i", "color=c=red:size=96x160:rate=30:duration=2",
+      "-f", "lavfi", "-i", "color=c=blue:size=96x160:rate=30:duration=6.5",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+      "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a", "-t", "8.5",
       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", file]);
     source = await fs.readFile(file);
   }, 20_000);
@@ -79,12 +83,56 @@ describe("matched video clipping through the media response", () => {
       expect.objectContaining({ codec_name: "aac", codec_type: "audio" }),
     ]));
     await exec("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-i", clip, "-f", "null", "-"]);
+    // 输入前 2 秒为红色，其后为蓝色：应截取素材开头，而不是文本的 6.12 秒位置。
+    const frame = path.join(root, "last-frame.png");
+    await exec("ffmpeg", ["-nostdin", "-v", "error", "-ss", "1.4", "-i", clip, "-frames:v", "1", frame]);
+    const colors = await sharp(frame).stats();
+    expect(colors.channels[0].mean).toBeGreaterThan(240);
+    expect(colors.channels[2].mean).toBeLessThan(15);
     const range = await mediaResponse(assetId, new Request(url, { headers: { range: "bytes=10-99" } }));
     expect(range.status).toBe(206);
     expect(range.headers.get("content-range")).toBe(`bytes 10-99/${bytes.length}`);
     expect(Buffer.from(await range.arrayBuffer())).toEqual(bytes.subarray(10, 100));
     expect(await fs.readFile(path.join(root, "original.mp4"))).toEqual(source);
     expect((await fs.readdir(path.join(root, ".staging"))).filter(name => name.startsWith("recall-work-"))).toEqual([]);
+  });
+
+  it.each(["png", "jpeg", "webp"] as const)("returns a three-second static video for a recalled %s image", async format => {
+    const image = await sharp({ create: { width: 97, height: 161, channels: 3, background: "#ff0000" } }).toFormat(format).toBuffer();
+    object.localPath = `original.${format}`;
+    object.sizeBytes = image.length;
+    await fs.writeFile(path.join(root, object.localPath), image);
+    fakes.getAsset.mockResolvedValue({ ...(await fakes.getAsset()), mediaType: "image", mimeType: `image/${format}`, originalFilename: object.localPath });
+    if (format === "webp") {
+      object.provider = "zos";
+      fakes.download.mockImplementation(async (_key: string, destination: string) => fs.writeFile(destination, image));
+    }
+    // 即使文本只有 1.48 秒，静态图片视频仍固定为 3 秒，不再套用视频裁剪时长。
+    const imageUrl = `${url}&still_ms=3000`;
+    const response = await mediaResponse(assetId, new Request(imageUrl));
+    expect(response.headers.get("content-type")).toBe("video/mp4");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const output = path.join(root, "still-video.mp4");
+    await fs.writeFile(output, bytes);
+    const info = await probe(output);
+    expect(Number(info.format.duration)).toBe(3);
+    expect(info.streams).toEqual([expect.objectContaining({ codec_name: "h264", codec_type: "video", width: 98, height: 162 })]);
+    for (const time of [0, 2.9]) {
+      const frame = path.join(root, `frame-${time}.png`);
+      await exec("ffmpeg", ["-nostdin", "-v", "error", "-ss", String(time), "-i", output, "-frames:v", "1", frame]);
+      const colors = await sharp(frame).stats();
+      expect(colors.channels[0].mean).toBeGreaterThan(240);
+      expect(colors.channels[2].mean).toBeLessThan(15);
+    }
+    const range = await mediaResponse(assetId, new Request(imageUrl, { headers: { range: "bytes=10-99" } }));
+    expect(range.status).toBe(206);
+    expect(Buffer.from(await range.arrayBuffer())).toEqual(bytes.subarray(10, 100));
+    expect(await fs.readFile(path.join(root, object.localPath))).toEqual(image);
+    if (format !== "webp") {
+      const original = await mediaResponse(assetId, new Request(url.replace("&clip_ms=1480", "")));
+      expect(original.headers.get("content-type")).toBe(`image/${format}`);
+      expect(Buffer.from(await original.arrayBuffer())).toEqual(image);
+    }
   });
 
   it.each([8500, 9000])("returns identical source bytes for an equal or longer target of %i ms", async duration => {

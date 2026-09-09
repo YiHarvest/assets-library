@@ -7,6 +7,18 @@ set -m
 
 cd "$(dirname "$0")/.."
 
+# .env 解析也依赖 Node.js 22+，必须先选择运行时，不能等到读出 APP_MODE 后。
+NODE22_PATH="/tmp/node-v22.20.0-linux-x64/bin"
+if [ "$(uname -s)" = "Linux" ] && [ -x "$NODE22_PATH/node" ]; then
+  export PATH="$NODE22_PATH:$PATH"
+fi
+if ! node_major="$(node -p 'parseInt(process.versions.node, 10)' 2>/dev/null)" \
+  || ! [[ "$node_major" =~ ^[0-9]+$ ]] \
+  || [ "$node_major" -lt 22 ]; then
+  printf '启动需要 Node.js 22+，当前：%s\n' "$(node --version 2>/dev/null || printf '未安装')" >&2
+  exit 1
+fi
+
 # 读取 .env（APP_MODE 等变量在此定义）；命令行环境变量优先于 .env
 if [ -f .env ]; then
   # 只导入 .env 中尚未在环境中设置的变量，避免覆盖 ./scripts/start.sh APP_MODE=dev 这类显式覆盖
@@ -53,18 +65,7 @@ case "$APP_MODE" in
     ;;
 esac
 
-# 生产模式优先使用 Linux 部署机缓存的 Node.js，否则使用 PATH 中的 Node.js 22+。
 if [ "$APP_MODE" = "prd" ]; then
-  NODE22_PATH="/tmp/node-v22.20.0-linux-x64/bin"
-  if [ "$(uname -s)" = "Linux" ] && [ -x "$NODE22_PATH/node" ]; then
-    export PATH="$NODE22_PATH:$PATH"
-  fi
-  if ! node_major="$(node -p 'parseInt(process.versions.node, 10)' 2>/dev/null)" \
-    || ! [[ "$node_major" =~ ^[0-9]+$ ]] \
-    || [ "$node_major" -lt 22 ]; then
-    c_err "生产模式需要 Node.js 22+，当前：$(node --version 2>/dev/null || printf '未安装')"
-    exit 1
-  fi
   c_info "生产模式：使用 Node.js $(node --version)"
 fi
 

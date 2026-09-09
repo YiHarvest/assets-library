@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  analysisResultSchema,
   apiV1AssetSummarySchema,
   assetEditSchema,
   assetQueryResponseSchema,
@@ -13,6 +14,21 @@ import {
 } from "@/shared/contracts";
 
 describe("shared contracts", () => {
+  it.each(["image", "video"])("preserves more than five tags per category in stored %s analysis", (kind) => {
+    const categories = kind === "image"
+      ? ["scene", "object", "person", "style", "color_composition"]
+      : ["scene", "person", "form"];
+    const tags = Object.fromEntries(categories.map((category) => [
+      category, Array.from({ length: 6 }, (_, index) => `标签${index}`),
+    ]));
+    const result = analysisResultSchema.parse({
+      kind, description: "测试素材", tags, topics: [],
+      visualSegments: [], timeline: [], keyMoments: [],
+      ocr: { text: null, unavailableReason: "没有文字" },
+    });
+    expect(result.tags).toEqual(tags);
+  });
+
   it("preserves more than three key moments in stored video analysis", () => {
     const keyMoments = Array.from({ length: 4 }, (_, seconds) => ({ seconds, summary: "摘要" }));
     const result = videoAnalysisSchema.parse({

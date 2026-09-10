@@ -38,7 +38,8 @@ import {
   canClaimAnalyzeTask,
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
-import { searchAssets, type SearchCandidate } from "@/server/search/elasticsearch";
+import { searchAssets, type SearchCandidate, type RecallOptions } from "@/server/search/elasticsearch";
+import type { PlaybackEvidence } from "@/server/search/asset-evidence";
 import { loadConfig } from "@/server/config";
 import { enqueueRecallSource } from "@/server/search/v2/repository";
 import { apiV1Path } from "@/lib/paths";
@@ -1203,8 +1204,8 @@ function candidateScores(candidate: SearchCandidate) {
 }
 
 /** MySQL 先限定权限和结构化过滤，两路 ES 召回使用完全相同的候选范围。 */
-async function recallWithinDatabaseScope(query: string, eligibleIds: string[], where: SQL | undefined, exactTags: ExactTagFilter[] = [], context?: string) {
-  if (loadConfig().SEARCH_RECALL_ENGINE !== "v2") return searchAssets(query, eligibleIds, undefined, context);
+async function recallWithinDatabaseScope(query: string, eligibleIds: string[], where: SQL | undefined, exactTags: ExactTagFilter[] = [], context?: string, options?: RecallOptions) {
+  if (loadConfig().SEARCH_RECALL_ENGINE !== "v2") return options ? searchAssets(query, eligibleIds, undefined, context, options) : searchAssets(query, eligibleIds, undefined, context);
   return searchAssets(query, eligibleIds, async (candidateIds) => {
     if (!candidateIds.length) return [];
     // Re-read exact tag membership as well as mutable scope/review/deletion fields.
@@ -1212,7 +1213,7 @@ async function recallWithinDatabaseScope(query: string, eligibleIds: string[], w
     const rows = await db.select({ id: assets.id }).from(assets).where(and(where, inArray(assets.id, candidateIds),
       currentTagIds ? currentTagIds.size ? inArray(assets.id, [...currentTagIds]) : sql`false` : undefined));
     return rows.map((row) => row.id);
-  }, context);
+  }, context, options);
 }
 
 export async function queryAssetsPage({
@@ -1306,6 +1307,10 @@ export async function listAssets({
 
 export interface DescriptionSearchResult {
   items: AssetSummary[];
+  /** 原始语义质量仅供分配使用，不能进入素材或业务接口响应。 */
+  matchQualities?: Record<string, number>;
+  mediaIdentities?: Record<string, string>;
+  playbackEvidence?: Record<string, PlaybackEvidence[]>;
   /** 内部组合素材使用，不进入业务响应。 */
   shortVideoDurations?: Record<string, number>;
   threshold: number;
@@ -1314,8 +1319,8 @@ export interface DescriptionSearchResult {
   message: string | null;
 }
 
-export interface DescriptionSearchOptions {
-  /** 仅召回不足 3 秒且单句原始语义分数大于 0.5 的视频。 */
+export interface DescriptionSearchOptions extends RecallOptions {
+  /** 仅召回不足 2 秒且单句原始语义分数大于 0.5 的视频。 */
   shortVideosOnly?: boolean;
   /** Internal target slot duration; images can fill a slot without this limit. */
   minDurationMs?: number;
@@ -1344,6 +1349,16 @@ function sampleAssetIds(
   return sampled;
 }
 
+/** 公私库复制品共用来源身份；不同分镜仍是不同素材，不比较名称或描述。 */
+export function assetMediaIdentity(asset: { id: string; mediaObjectId?: string | null; originalPath?: string;
+  videoSourceId?: string | null; segmentStartMs?: number | null; segmentEndMs?: number | null }) {
+  if (asset.videoSourceId && asset.segmentStartMs != null && asset.segmentEndMs != null)
+    return `segment:${asset.videoSourceId}:${asset.segmentStartMs}:${asset.segmentEndMs}`;
+  const copiedFrom = asset.originalPath?.match(/^assets\/migrated\/public\/([0-9a-f-]{36})$/i)?.[1];
+  return copiedFrom || asset.mediaObjectId ? `object:${copiedFrom ?? asset.mediaObjectId}`
+    : asset.originalPath ? `path:${asset.originalPath}` : `asset:${asset.id}`;
+}
+
 export async function searchAssetsByDescriptionDetailed(
   { description, keywords = [], limit }: DescriptionSearch,
   scope: AssetScope = {},
@@ -1363,11 +1378,14 @@ export async function searchAssetsByDescriptionDetailed(
   if (options.minDurationMs !== undefined) conditions.push(or(eq(assets.mediaType, "image"),
     sql`${assets.segmentEndMs} >= ${assets.segmentStartMs} + ${options.minDurationMs}`)!);
   if (options.shortVideosOnly) conditions.push(eq(assets.mediaType, "video"),
-    sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + 3000`);
+    sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + 2000`);
   const where = and(...conditions);
   const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-  const candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context))
-    .filter(candidate => !options.shortVideosOnly || (candidate.semanticSimilarity ?? -1) > 0.5);
+  const recallOptions = options.playbackDurationMs !== undefined || options.contextRequired
+    ? { playbackDurationMs: options.playbackDurationMs, contextRequired: options.contextRequired } : undefined;
+  const candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context, recallOptions))
+    .filter(candidate => !options.shortVideosOnly || (((options.contextRequired ? candidate.contextSimilarity : candidate.semanticSimilarity) ?? -1) > 0.5 &&
+      (candidate.matchQuality ?? -1) > 0.5));
   const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
   const ids = candidates.map((item) => item.assetId);
   const rankedIds = options.isRandom ? sampleAssetIds(ids, limit) : ids.slice(0, limit);
@@ -1377,6 +1395,11 @@ export async function searchAssetsByDescriptionDetailed(
   const tagMap = await getTagsForAssets(rankedIds);
   const metadata = searchMetadata(candidates);
   return {
+    mediaIdentities: Object.fromEntries(rows.map(row => [row.id, assetMediaIdentity(row)])),
+    matchQualities: Object.fromEntries(candidates.filter(candidate => candidate.matchQuality !== undefined)
+      .map(candidate => [candidate.assetId, candidate.matchQuality!])),
+    playbackEvidence: Object.fromEntries(candidates.filter(candidate => candidate.playbackEvidence !== undefined)
+      .map(candidate => [candidate.assetId, candidate.playbackEvidence!])),
     ...(options.shortVideosOnly ? { shortVideoDurations: Object.fromEntries(rows.map(row =>
       [row.id, row.segmentEndMs! - row.segmentStartMs!])) } : {}),
     items: rankedIds.flatMap((id) => {

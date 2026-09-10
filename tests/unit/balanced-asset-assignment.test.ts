@@ -7,6 +7,43 @@ const segments = Array.from({ length: 9 }, (_, i) => ({ start_time: i, end_time:
 const a = { id: "a" }, b = { id: "b" }, c = { id: "c" };
 
 describe("balanced material placement", () => {
+  it("reserves public/private copies as one source and reallocates the alternate material", () => {
+    const pools = [
+      [{ id: "public", mediaIdentity: "same-file", matchQuality: 0.6 }, { id: "other", matchQuality: 0.59 }],
+      [{ id: "private", mediaIdentity: "same-file", matchQuality: 0.7 }],
+    ];
+    const selected = balancedAssetAssignment(segments.slice(0, 2), pools);
+    expect([...selected].map(([index, item]) => [index, item.id])).toEqual([[0, "other"], [1, "private"]]);
+  });
+
+  it("keeps a strong people match instead of filling another slot with an empty factory", () => {
+    const pools = segments.map(() => [] as { id: string; matchQuality: number }[]);
+    pools[0] = [{ id: "people", matchQuality: 0.535 }];
+    pools[4] = [{ id: "people", matchQuality: 0.605 }, { id: "factory", matchQuality: 0.518 }];
+    expect([...balancedAssetAssignment(segments, pools).entries()].map(([index, asset]) => [index, asset.id]))
+      .toEqual([[4, "people"]]);
+  });
+
+  it("prefers a stronger supported placement over the most evenly spaced one", () => {
+    const pools = segments.map(() => [] as { id: string; matchQuality: number }[]);
+    pools[0] = [{ id: "asset", matchQuality: 0.61 }];
+    pools[4] = [{ id: "asset", matchQuality: 0.58 }];
+    expect([...balancedAssetAssignment(segments, pools).keys()]).toEqual([0]);
+  });
+
+  it("does not trade the best people match for two weaker matches to increase coverage", () => {
+    const pools = segments.map(() => [] as { id: string; matchQuality: number }[]);
+    pools[0] = [{ id: "people", matchQuality: 0.512 }];
+    pools[4] = [{ id: "people", matchQuality: 0.544 }, { id: "phone", matchQuality: 0.513 }];
+    expect([...balancedAssetAssignment(segments, pools)].map(([index, asset]) => [index, asset.id]))
+      .toEqual([[4, "people"]]);
+  });
+
+  it("uses the configured semantic threshold as the gain baseline", () => {
+    expect(balancedAssetAssignment(segments.slice(0, 1), [[{ id: "asset", matchQuality: 0.45 }]]).size).toBe(0);
+    expect(balancedAssetAssignment(segments.slice(0, 1), [[{ id: "asset", matchQuality: 0.45 }]], false, 0.4).size).toBe(1);
+  });
+
   it("preserves recall scores when random selection is enabled", () => {
     const strong = { id: "strong", searchScore: 0.6 }, weak = { id: "weak", searchScore: 0.4 };
     expect(balancedAssetAssignment(segments.slice(0, 1), [[strong, weak]], true).get(0)).toBe(strong);

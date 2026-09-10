@@ -164,6 +164,8 @@ function promptFor(mediaType: MediaType, durationSeconds: number | null) {
       : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。ocr.text 只摘录关键可见文字，最多 600 字；表格或密集文本不要逐行完整转写，超出时截断。";
   return [
     "你是素材库分析器。描述、topics 和所有标签值必须以简体中文为主。",
+    "分析结果用于短视频文案逐段匹配画面。保留可复用的视觉事实与关键技术名称；topics 优先提炼画面直接支持的主题、活动和功能，人物标签保留可见的人数与大致年龄段。不针对某篇文案编造用途，不为凑数补标签。",
+    "description 首句概括画面的具体主题：什么场景、谁在做什么、软件或产品的用途；后续再补充细节。对画面明确支持的技术和功能写出常用中文名称并保留关键专有名词，不要只描述屏幕、界面和操作步骤。只描述可见事实，不推断亲属关系、商业效果或抽象寓意。",
     "每个标签值必须至少包含一个中文汉字；禁止英文标签、拼音和 snake_case。JSON 字段名与标签分类键保持结构中规定的英文。",
     `必须先单独输出 primaryCategory 字段，取值为以下五个一级分类词之一，逐字一致、一字不能多也不能少：${PRIMARY_TAG_CATEGORIES.join("、")}。系统会自动把 primaryCategory 作为该素材的首标签（tags.scene 的第一个值）。`,
     "除 primaryCategory 外，其余任何标签值与 topics 不得再出现这五个一级分类词（互斥，不重复）。",
@@ -174,6 +176,12 @@ function promptFor(mediaType: MediaType, durationSeconds: number | null) {
       : "",
     mediaType === "video"
       ? "输入只有稀疏关键帧，无法判断慢镜头、长镜头、快镜头、延时摄影、升格、降格或运镜速度；禁止输出这些结论。"
+      : "",
+    mediaType === "video"
+      ? "每条 timeline 和 keyMoments 的 summary 都会独立用于检索，必须写清具体场景、主体及动作或对象，脱离其他字段也能理解。保留可见的人物年龄段和场景；不要只写‘继续操作’‘接近尾声’等进度或用代词省略主体。同一场景没有明显变化时合并 timeline，并减少重复的 keyMoments，不要为了每帧都写一条而重复描述。"
+      : "",
+    mediaType === "video"
+      ? "keyMoments 必须保留最早提供的关键帧及其标注时间，只写该帧可见事实；不可把后续出现的状态、文字或动作提前写入。timeline 的每条摘要只描述对应区间的事实，无法确定人物关系或动作含义时不要补充推测。"
       : "",
     scope,
     "只输出一个 JSON 对象，不要 Markdown、代码围栏或解释。",
@@ -512,13 +520,28 @@ function deduplicateTagCategories(result: AnalysisResult): AnalysisResult {
   };
 }
 
+const missingAnalysisPattern =
+  /^(?:未提供待修复输出|待修复输出(?:为空|缺失)|(?:视频总时长[\d.]+秒[，,])?现有待修复内容不完整)/;
+const genericAnalysisPattern =
+  /^(?:视频总时长\s*[\d.]+\s*秒|视频素材内容概览|视频展示了一个普通的社会场景片段)[。.!！\s]*$/;
+
 function parseAnalysisText(text: string, durationSeconds: number | null) {
+  const payload = JSON.parse(stripCodeFence(text));
+  // 没有具体画面描述时，纯文本修复无法补出视觉事实，必须重新看图。
+  if (typeof payload?.description !== "string" || !payload.description.trim() ||
+      genericAnalysisPattern.test(payload.description.trim()) ||
+      missingAnalysisPattern.test(payload.description.trim())) {
+    throw new AppError("model_response_invalid");
+  }
   const parsed = analysisResultSchema.parse(
     normalizeAnalysisPayload(
-      JSON.parse(stripCodeFence(text)),
+      payload,
       durationSeconds,
     ),
   );
+  if (narrativeTexts(parsed).some(value => missingAnalysisPattern.test(value.trim()))) {
+    throw new AppError("model_response_invalid");
+  }
   return requireFrameSupportedClaims(
     requireChineseText(
       deduplicateTagCategories(requirePrimaryTag(parsed)),
@@ -781,7 +804,9 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
             },
             "warn",
           );
-          if (correctionUsed) throw new AppError("model_response_invalid");
+          if (correctionUsed || error instanceof SyntaxError || error instanceof AppError) {
+            throw new AppError("model_response_invalid");
+          }
           correctionUsed = true;
           invalidText = text;
           correction =
@@ -795,10 +820,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
           error instanceof AppError &&
           error.code === "model_response_invalid"
         ) {
-          if (correctionUsed) throw error;
-          correctionUsed = true;
-          correction = error.message.slice(0, 500);
-          continue;
+          throw error;
         }
         const requestError = this.normalizeRequestError(error);
         if (!requestError) throw error;

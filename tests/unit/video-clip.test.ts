@@ -49,8 +49,8 @@ describe("matched video clipping through the media response", () => {
       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", file]);
     source = await fs.readFile(file);
     for (const [name, color, size, rate, audio] of [["short-a", "red", "96x160", "30", true], ["short-b", "blue", "160x90", "20", false]] as const) {
-      await exec("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", `color=c=${color}:size=${size}:rate=${rate}:duration=1.6`,
-        ...(audio ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100"] : []), "-t", "1.6",
+      await exec("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", `color=c=${color}:size=${size}:rate=${rate}:duration=1`,
+        ...(audio ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100"] : []), "-t", "1",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", ...(audio ? ["-c:a", "aac"] : []), path.join(fixtureRoot, `${name}.mp4`)]);
     }
   }, 20_000);
@@ -84,7 +84,7 @@ describe("matched video clipping through the media response", () => {
     });
     fakes.getAsset.mockImplementation(async id => ({ id, mediaObjectId: id === assetId ? object.id : "second-object", mediaType: "video",
       mimeType: "video/mp4", processingStatus: "completed", reviewStatus: "published", deletedAt: null }));
-    fakes.getDetail.mockImplementation(async () => ({ mediaType: "video", segmentStartMs: 5000, segmentEndMs: 6600 }));
+    fakes.getDetail.mockImplementation(async () => ({ mediaType: "video", segmentStartMs: 5000, segmentEndMs: 6000 }));
     fakes.download.mockImplementation(async (_key: string, destination: string) => fs.copyFile(path.join(fixtureRoot, "short-b.mp4"), destination));
     const combined = new URL(url);
     combined.searchParams.set("concat", Buffer.from(JSON.stringify([{ assetId, userId: "759" }, { assetId: secondId, userId: null }])).toString("base64url"));
@@ -100,7 +100,7 @@ describe("matched video clipping through the media response", () => {
     const output = path.join(root, "joined.mp4");
     await fs.writeFile(output, bytes);
     const info = await probe(output);
-    const expected = Math.min(target ?? 3200, 3200) / 1000;
+    const expected = Math.min(target ?? 2000, 2000) / 1000;
     expect(Number(info.format.duration)).toBeLessThanOrEqual(expected + 0.001);
     expect(Number(info.format.duration)).toBeGreaterThanOrEqual(expected - 0.04);
     expect(info.streams).toEqual(expect.arrayContaining([
@@ -108,7 +108,7 @@ describe("matched video clipping through the media response", () => {
       expect.objectContaining({ codec_type: "audio", codec_name: "aac" }),
     ]));
     await exec("ffmpeg", ["-nostdin", "-v", "error", "-xerror", "-i", output, "-f", "null", "-"]);
-    for (const [time, channel] of (expected > 2.2 ? [[0.4, 0], [2.2, 2]] : [[0.4, 0]])) {
+    for (const [time, channel] of (expected > 1.8 ? [[0.4, 0], [1.8, 2]] : [[0.4, 0]])) {
       const frame = path.join(root, `joined-${time}.png`);
       await exec("ffmpeg", ["-nostdin", "-v", "error", "-ss", String(time), "-i", output, "-frames:v", "1", frame]);
       const center = await sharp(frame).extract({ left: 40, top: 70, width: 16, height: 16 }).toBuffer();
@@ -141,7 +141,7 @@ describe("matched video clipping through the media response", () => {
 
   it("rejects insufficient totals and repeated components before downloading", async () => {
     const { combined } = await shortVideoUrl();
-    fakes.getDetail.mockResolvedValue({ mediaType: "video", segmentStartMs: 0, segmentEndMs: 1400 });
+    fakes.getDetail.mockResolvedValue({ mediaType: "video", segmentStartMs: 0, segmentEndMs: 999 });
     await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400 });
     combined.searchParams.set("concat", Buffer.from(JSON.stringify([{ assetId, userId: "759" }, { assetId, userId: "759" }])).toString("base64url"));
     await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400 });

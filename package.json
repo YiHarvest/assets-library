@@ -32,7 +32,9 @@
     "metabase:verify-reader": "node --env-file=ops/metabase/.reader.env ops/metabase/scripts/verify-reader.mjs",
     "metabase:sync-reporting-metadata": "node --env-file=ops/metabase/.admin.env ops/metabase/scripts/sync-reporting-metadata.mjs",
     "search:reindex": "tsx --env-file=.env scripts/reindex-search.ts",
-    "benchmark:search": "node --env-file=.env --import tsx benchmarks/search/run.ts"
+    "search:rebuild:staging": "tsx --env-file=.env scripts/rebuild-search-staging.ts",
+    "benchmark:search": "node --env-file=.env --import tsx benchmarks/search/run.ts",
+    "benchmark:matching": "node --env-file=.env --import tsx benchmarks/material-matching/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.883.0",

@@ -39,7 +39,7 @@ export async function searchWithV2(query: string, assetIds: string[], revalidate
   // Evidence and raw scores stay internal; the existing business serializers see
   // exactly the legacy candidate shape and normalized RRF contributions.
   return result.candidates.map((candidate) => ({ assetId: candidate.assetId, searchScore: candidate.searchScore,
-    ...(candidate.evidence.vector ? { semanticSimilarity: candidate.evidence.vector.rawScore } : {}),
+    ...(candidate.evidence.vector ? { semanticSimilarity: candidate.evidence.vector.rawScore, matchQuality: candidate.evidence.vector.rawScore } : {}),
     ...(candidate.semanticScore === undefined ? {} : { semanticScore: candidate.semanticScore }),
     ...(candidate.keywordScore === undefined ? {} : { keywordScore: candidate.keywordScore }) }));
 }

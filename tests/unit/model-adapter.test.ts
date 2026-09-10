@@ -1076,7 +1076,97 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("corrects one invalid response before falling back", async () => {
+  it.each([
+    ["empty content", () => chatContentResponse("")],
+    ["whitespace", () => chatContentResponse(" \n ")],
+    ["non-JSON content", () => chatContentResponse("not-json")],
+    ["missing content", () => Response.json({ choices: [{ message: {} }] })],
+    ["invalid response body", () => new Response("not-json")],
+    ["missing description", () => chatContentResponse("{}")],
+    ["null analysis", () => chatContentResponse("null")],
+  ])("sends original frames to fallback after %s, without text repair", async (_, response) => {
+    const { root, input } = await createVideoFixture("asset-empty-analysis-", 3);
+    try {
+      const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl,
+        VLM_NAME: "primary-model", VLM_FALLBACK_NAMES: "fallback-model" });
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(response())
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify(videoAnalysis)));
+      const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+      expect(outcome.model.name).toBe("fallback-model");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const bodies = fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)));
+      expect(bodies[1].messages).toEqual(bodies[0].messages);
+      expect(bodies[1].messages[0].content).toContainEqual(expect.objectContaining({ type: "image_url" }));
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    "视频总时长3.8秒，现有待修复内容不完整，仅保留可确认的时间信息。",
+    "视频素材内容概览。",
+    "视频总时长2.2秒。",
+    "未提供待修复输出，无法修复具体内容。",
+    "视频展示了一个普通的社会场景片段。",
+    "未提供待修复输出，无法生成有效描述。",
+    "待修复输出缺失，无法还原具体画面内容，仅按指定结构生成合规结果。",
+    "待修复输出为空，未包含可分析的素材内容。",
+  ])("rejects stored placeholder analysis: %s", async description => {
+    const { root, input } = await createVideoFixture("asset-placeholder-analysis-", 3);
+    try {
+      const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl,
+        VLM_NAME: "primary-model", VLM_FALLBACK_NAMES: "fallback-model" });
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify({ ...videoAnalysis, description })))
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify(videoAnalysis)));
+      const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+      expect(outcome.model.name).toBe("fallback-model");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const bodies = fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)));
+      expect(bodies[1].messages).toEqual(bodies[0].messages);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("fails when every candidate returns empty content", async () => {
+    const { root, input } = await createImageFixture("asset-all-empty-");
+    try {
+      const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl,
+        VLM_NAME: "primary-model", VLM_FALLBACK_NAMES: "fallback-model" });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => chatContentResponse(""));
+      await expect(new OpenAICompatibleAnalyzer(config).analyze(input))
+        .rejects.toMatchObject({ code: "model_response_invalid" });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("rejects failure placeholders in an otherwise concrete video's timeline", async () => {
+    const { root, input } = await createVideoFixture("asset-placeholder-timeline-", 3);
+    try {
+      const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl,
+        VLM_NAME: "primary-model", VLM_FALLBACK_NAMES: "fallback-model" });
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify({ ...videoAnalysis,
+          description: "办公室里四个人围桌查看文件。",
+          timeline: [{ startSeconds: 0, endSeconds: 3, summary: "未提供待修复输出，无法判断画面内容。" }],
+        })))
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify(videoAnalysis)));
+      expect((await new OpenAICompatibleAnalyzer(config).analyze(input)).model.name).toBe("fallback-model");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["画面全黑，没有人物或可见文字。", "灰色墙面前的空椅子，没有人物。"])(
+    "keeps simple but concrete visual descriptions: %s", async description => {
+      const { root, input } = await createImageFixture("asset-simple-scene-");
+      try {
+        const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl, VLM_NAME: "primary-model" });
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(chatResponse(description));
+        expect((await new OpenAICompatibleAnalyzer(config).analyze(input)).result.description).toBe(description);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
+    },
+  );
+
+  it("corrects a concrete description with invalid labels before falling back", async () => {
     const { root, input } = await createImageFixture("asset-failover-format-");
     const config = loadConfig({
       MEDIA_ROOT: root,
@@ -1088,8 +1178,8 @@ describe("model adapter", () => {
     });
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(chatContentResponse("not-json"))
-      .mockResolvedValueOnce(chatContentResponse("still-not-json"))
+      .mockResolvedValueOnce(chatContentResponse(JSON.stringify({ kind: "image", description: "办公室里的白色桌子" })))
+      .mockResolvedValueOnce(chatResponse("未提供待修复输出，无法生成有效描述。"))
       .mockResolvedValueOnce(chatResponse("备用模型修复结果"));
 
     const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
@@ -1108,7 +1198,7 @@ describe("model adapter", () => {
       "kimi-k2.5",
     ]);
     expect(bodies[1]?.messages[0]?.content[0]?.text).toContain(
-      "待修复输出：not-json",
+      "办公室里的白色桌子",
     );
     expect(
       bodies[1]?.messages[0]?.content.some(
@@ -1291,7 +1381,7 @@ describe("model adapter", () => {
         VLM_ENABLE_THINKING: "false",
       });
       const fetchMock = vi.spyOn(globalThis, "fetch")
-        .mockResolvedValueOnce(chatContentResponse("invalid JSON"))
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify({ ...videoAnalysis, topics: ["English"] })))
         .mockResolvedValueOnce(chatContentResponse("invalid JSON"))
         .mockResolvedValueOnce(chatContentResponse(JSON.stringify(videoAnalysis)));
 

@@ -274,6 +274,7 @@ export async function mediaResponse(assetId: string, request: Request) {
       const detail = await getAssetDetail(part.assetId, part.userId ? { userId: part.userId } : {});
       const durationMs = (detail.segmentEndMs ?? 0) - (detail.segmentStartMs ?? 0);
       const record = part.assetId === assetId ? asset : await getAssetRecord(part.assetId);
+      // 保留已下发组合 URL 对 2–3 秒成员的兼容；新匹配只组合不足 2 秒的素材。
       if (!record || record.deletedAt || record.reviewStatus === "deleted" || !mediaIsReady(record) ||
         detail.mediaType !== "video" || durationMs <= 0 || durationMs >= 3000) {
         throw new AppError("invalid_request", "短视频组合中的素材已不可用。", 404);
@@ -284,7 +285,7 @@ export async function mediaResponse(assetId: string, request: Request) {
       objects.push(stored);
       totalMs += durationMs;
     }
-    if (totalMs < 3000) throw new AppError("invalid_request", "短视频组合时长不足 3 秒。", 400);
+    if (totalMs < 2000) throw new AppError("invalid_request", "短视频组合时长不足 2 秒。", 400);
     const clipped = await prepareVideoClip(objects.map(item => `${item.id}:${item.updatedAt.getTime()}`).join(","),
       clipMs === null ? totalMs : Number(clipMs), destination => downloadMediaObject(objects[0], destination), false,
       objects.slice(1).map(item => destination => downloadMediaObject(item, destination)));

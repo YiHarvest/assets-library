@@ -9,7 +9,7 @@ import {
   compatibilityMatchRequestSchema,
   type AssetSummary,
 } from "@/shared/contracts";
-import { searchAssetsByDescriptionDetailed } from "@/server/repositories/assets";
+import { assetMediaIdentity, searchAssetsByDescriptionDetailed } from "@/server/repositories/assets";
 import * as elasticsearch from "@/server/search/elasticsearch";
 import { loadTestConfig } from "../helpers/config";
 
@@ -19,6 +19,17 @@ vi.mock("@/server/db", () => ({
     innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
   }) }) },
 }));
+
+it("identifies migrated copies and keeps different source intervals independent", () => {
+  const id = "2f3ad677-7e1b-4d15-9ca2-5357c20f4e92";
+  expect(assetMediaIdentity({ id: "public", originalPath: `assets/migrated/public/${id}` }))
+    .toBe(assetMediaIdentity({ id: "private", mediaObjectId: id }));
+  const source = { videoSourceId: "parent", segmentStartMs: 0, segmentEndMs: 2033 };
+  expect(assetMediaIdentity({ id: "public", ...source })).toBe(assetMediaIdentity({ id: "private", ...source }));
+  expect(assetMediaIdentity({ id: "other", ...source, segmentStartMs: 2033, segmentEndMs: 4066 }))
+    .not.toBe(assetMediaIdentity({ id: "public", ...source }));
+  expect(assetMediaIdentity({ id: "a" })).not.toBe(assetMediaIdentity({ id: "b" }));
+});
 
 function request() {
   return compatibilityMatchRequestSchema.parse({
@@ -112,9 +123,10 @@ describe("compatibility segment matching", () => {
   it.each([
     { enabled: "true", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: "1480" },
     { enabled: "false", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: null },
-    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 1480, clip: "1480" },
-    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 5000, clip: null },
-    { enabled: "true", mediaType: "video" as const, sourceMs: 3000, slotMs: 3000, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 2000, slotMs: 1480, clip: "1480" },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 2467, slotMs: 1160, clip: "1160" },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 2000, slotMs: 5000, clip: null },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 2000, slotMs: 2000, clip: null },
     { enabled: "true", mediaType: "image" as const, sourceMs: 0, slotMs: 1480, clip: null },
     { enabled: "false", mediaType: "image" as const, sourceMs: 0, slotMs: 5000, clip: null },
   ])("returns a playable URL without changing the timeline: $enabled / $mediaType / $sourceMs / $slotMs", async ({ enabled, mediaType, sourceMs, slotMs, clip }) => {
@@ -136,10 +148,11 @@ describe("compatibility segment matching", () => {
     expect(url.searchParams.get("user_id")).toBe("759");
     expect(url.searchParams.get("v")).toBe("1");
     expect(url.searchParams.get("clip_ms")).toBe(clip);
+    expect(url.searchParams.has("concat")).toBe(false);
     expect(url.searchParams.get("still_ms")).toBe(mediaType === "image" ? "3000" : null);
     expect(matched.matched_candidate_type).toBe("video");
-    // 原视频 3 秒门槛在 ES 召回和全局分配前应用，与文本时段长度、裁剪开关无关。
-    expect(search.mock.calls[0][2]).toMatchObject({ minDurationMs: 3000 });
+    // 原视频 2 秒门槛在 ES 召回和全局分配前应用，与文本时段长度、裁剪开关无关。
+    expect(search.mock.calls[0][2]).toMatchObject({ minDurationMs: 2000 });
   });
 
   it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
@@ -310,7 +323,8 @@ describe("compatibility segment matching", () => {
         semanticThreshold: 0.55,
         isRandom: false,
         excludedAssetIds: [],
-        minDurationMs: 3000,
+        minDurationMs: 2000,
+        playbackDurationMs: 880,
       },
     );
     if (reviewStatus === "deleted") {
@@ -401,7 +415,8 @@ describe("compatibility segment matching", () => {
 
   it("uses raw similarity strictly above 0.5 for short videos, not high RRF or BM25 scores", async () => {
     const candidates = [
-      { assetId: "pass", searchScore: 0.2, semanticSimilarity: 0.51 },
+      { assetId: "pass", searchScore: 0.2, semanticSimilarity: 0.51, matchQuality: 0.57 },
+      { assetId: "weak-scene", searchScore: 1, semanticSimilarity: 0.51, matchQuality: 0.49 },
       { assetId: "boundary", searchScore: 1, semanticSimilarity: 0.5 },
       { assetId: "low", searchScore: 1, semanticSimilarity: 0.49 },
       { assetId: "keyword", searchScore: 1 },
@@ -414,6 +429,8 @@ describe("compatibility segment matching", () => {
       expect(result.items.map(item => item.id)).toEqual(["pass"]);
       expect(result.shortVideoDurations).toEqual({ pass: 1600 });
       expect(result.items[0]).not.toHaveProperty("semanticSimilarity");
+      expect(result.items[0]).not.toHaveProperty("matchQuality");
+      expect(result.matchQualities).toEqual({ pass: 0.57 });
     } finally { vi.restoreAllMocks(); }
   });
 
@@ -421,11 +438,11 @@ describe("compatibility segment matching", () => {
     vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", enabled);
     const parts = [candidate(), { ...candidate(), id: "00000000-0000-4000-8000-000000000002" }];
     const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 7.6 };
-    const [result] = await matchCompatibilitySegments([segment], "https://focus.example.test", {}, {
+    const [result] = await matchCompatibilitySegments([segment], "https://focus.example.test", { isRandom: false }, {
       search: async (_input, _scope, options) => ({ items: options?.shortVideosOnly ? parts : [],
-        shortVideoDurations: Object.fromEntries(parts.map(part => [part.id, 1600])),
+        shortVideoDurations: Object.fromEntries(parts.map(part => [part.id, 1000])),
         threshold: 0, maxScore: 0.5, reason: "matched", message: null }),
-      getAsset: async () => ({ userId: "759", reviewStatus: "published", segmentStartMs: 5000, segmentEndMs: 6600 }),
+      getAsset: async () => ({ userId: "759", reviewStatus: "published", segmentStartMs: 5000, segmentEndMs: 6000 }),
     });
     expect(result).toMatchObject(segment);
     const url = new URL(result.matched_candidate_url!);
@@ -433,6 +450,27 @@ describe("compatibility segment matching", () => {
     expect(url.searchParams.get("clip_ms")).toBe(enabled === "true" ? "1480" : null);
     expect(result.matched_candidate_type).toBe("video");
     expect(result).not.toHaveProperty("parts");
+  });
+
+  it("lets a stronger short combination replace a regular match even when every segment is covered", async () => {
+    const regular = candidate();
+    const parts = [2, 3].map(i => {
+      const id = `00000000-0000-4000-8000-00000000000${i}`;
+      return { ...candidate(), id, mediaUrl: `/api/v1/media/${id}` };
+    });
+    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 0, end_time: 1.48 };
+    const [result] = await matchCompatibilitySegments([segment], "https://focus.example.test", { isRandom: false }, {
+      search: async (_input, _scope, options) => ({
+        items: options?.shortVideosOnly ? parts : [regular],
+        matchQualities: options?.shortVideosOnly ? Object.fromEntries(parts.map(part => [part.id, 0.7])) : { [regular.id]: 0.55 },
+        shortVideoDurations: Object.fromEntries(parts.map(part => [part.id, 1000])),
+        threshold: 0, maxScore: 0.5, reason: "matched", message: null,
+      }),
+      getAsset: async id => ({ userId: null, reviewStatus: "published", segmentStartMs: 0, segmentEndMs: id === regular.id ? 3000 : 1000 }),
+    });
+    const url = new URL(result.matched_candidate_url!);
+    expect(JSON.parse(Buffer.from(url.searchParams.get("concat")!, "base64url").toString()).map((part: { assetId: string }) => part.assetId))
+      .toEqual(parts.map(part => part.id));
   });
 
   it.each([true, false])("rejects repeated candidates even if search ignores exclusions with isRandom=%s", async (isRandom) => {
@@ -566,7 +604,8 @@ describe("compatibility segment matching", () => {
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
-        minDurationMs: 3000,
+        minDurationMs: 2000,
+        playbackDurationMs: 880,
       },
     );
     expect(matched.matched_candidate_url).toContain(

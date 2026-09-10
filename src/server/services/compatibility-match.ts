@@ -248,6 +248,7 @@ interface CompatibilityMatchOptions {
   assetUrls?: CompatibilityMatchRequest["asset_url_list"];
   isRandom?: boolean;
   semanticThreshold?: number;
+  sourceText?: string;
 }
 
 function unmatchedSegment(
@@ -303,19 +304,20 @@ export async function matchCompatibilitySegments(
   const usedAssetIds = new Set<string>();
   const config = loadConfig();
   const clipEnabled = config.SEGMENT_MATCH_CLIP_ENABLED;
-  const contexts = segmentRecallContexts(segments);
+  const contexts = segmentRecallContexts(segments, options.sourceText);
   const recall = async (shortVideosOnly = false) => {
     const searches: DescriptionSearchResult[] = [];
     // Collect complete pools before assigning assets; later segments retain their choices.
     for (let start = 0; start < segments.length; start += 4) {
       searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
-        { description: segment.text, keywords: [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
+        { description: segment.text, keywords: segment.keyword.trim() ? [segment.keyword.trim()] : [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
         { includeAllUsers: true }, {
           ...(shortVideosOnly ? { shortVideosOnly: true } : { minDurationMs: 2000 }),
           ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
           ...(contexts[start + offset] !== segment.text.trim() && requiresRecallContext(segment.text) ? { contextRequired: true } : {}),
           ...(clipEnabled && segment.end_time > segment.start_time ? { playbackDurationMs: Math.round((segment.end_time - segment.start_time) * 1000) } : {}),
           ...(candidateAssetIds ? { candidateAssetIds } : {}),
+          ...(restrictCandidates ? { allowThemeMatch: true } : {}),
           excludedAssetIds: [], semanticThreshold, isRandom: false,
         },
       ))));
@@ -561,6 +563,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
         assetUrls: payload.request.asset_url_list,
         isRandom: payload.request.is_random,
         semanticThreshold: payload.request.semantic_threshold,
+        sourceText: payload.request.text,
       },
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);

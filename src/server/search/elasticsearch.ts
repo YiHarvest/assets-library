@@ -4,7 +4,7 @@ import type { AssetDetail } from "@/shared/contracts";
 import { searchWithV2 } from "./v2/facade";
 import { assetEvidence, evidenceInWindow, permitsVisualMatch, type PlaybackEvidence } from "./asset-evidence";
 
-export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean }
+export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean; allowThemeMatch?: boolean }
 
 const isShortSearchTerm = (query: string) => query.trim().split(/\s+/).every(term => /^[\p{Script=Han}A-Za-z0-9]{2,8}$/u.test(term));
 
@@ -202,13 +202,22 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
     let matchQuality = options.contextRequired ? 0.9 * contextSimilarity! : semanticSimilarity === undefined ? contextSimilarity : contextSimilarity === undefined
       ? semanticSimilarity : 0.7 * semanticSimilarity + 0.3 * contextSimilarity;
     const sceneSimilarity = scenes.get(assetId)?.score;
+    if (options.allowThemeMatch && sceneSimilarity !== undefined && sceneSimilarity < threshold) continue;
     if (keywordSearch && !lexicalIds.has(assetId) && (sceneSimilarity ?? semanticSimilarity ?? -1) < semanticFloor) continue;
     // 整片描述只校验局部高分，不能把片尾事实变成片头的命中证据。
     if (sceneSimilarity !== undefined && matchQuality !== undefined) {
       matchQuality = Math.min(matchQuality, 0.75 * matchQuality + 0.25 * sceneSimilarity);
-      if (matchQuality < threshold) continue;
     }
-    const evidence = (options.contextRequired ? contextHits : vectorHits).filter(hit => hit.assetId === assetId && hit.evidence && hit.score !== undefined)
+    // 主题补充需 >= 0.55 的片头与整片支持；只计 1/4 阈值以上收益，保留直接匹配优势。
+    const themeSimilarity = Math.min(contextSimilarity ?? -1, sceneSimilarity ?? -1);
+    let themeMatch = false;
+    if (options.allowThemeMatch && themeSimilarity >= Math.max(threshold, 0.55)) {
+      const themeQuality = threshold + 0.25 * (themeSimilarity - threshold);
+      themeMatch = themeQuality > (matchQuality ?? -1);
+      matchQuality = Math.max(matchQuality ?? -1, themeQuality);
+    }
+    if (sceneSimilarity !== undefined && matchQuality !== undefined && matchQuality < threshold) continue;
+    const evidence = (options.contextRequired || themeMatch ? contextHits : vectorHits).filter(hit => hit.assetId === assetId && hit.evidence && hit.score !== undefined)
       .map(hit => ({ ...hit.evidence!, similarity: hit.score! }));
     candidates.set(assetId, { assetId, searchScore: 0, semanticSimilarity, contextSimilarity, sceneSimilarity, matchQuality,
       ...(evidence.length ? { playbackEvidence: evidence } : {}) });

@@ -156,7 +156,7 @@ describe("compatibility segment matching", () => {
   });
 
   it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
-    const base = alignCompatibilitySegments(request())[0];
+    const base = { ...alignCompatibilitySegments(request())[0], keyword: "" };
     const segments = [
       { ...base, segment_id: 1, text: "目前只有安卓手机", group_id: [1, 1] as [number, number] },
       { ...base, segment_id: 2, text: "店关着门它也在干活", group_id: [1, 1] as [number, number] },
@@ -171,6 +171,29 @@ describe("compatibility segment matching", () => {
     );
     result.forEach((segment, index) => expect(segment).toMatchObject(segments[index]));
     expect(result[1]).not.toHaveProperty("context");
+  });
+
+  it.each([true, false])("uses the original sentence and business keyword; thematic preference requires selection=%s", async selected => {
+    const base = alignCompatibilitySegments(request())[0];
+    const segments = [
+      { ...base, text: "第二大模型", keyword: " 大模型 ", group_id: [1, 2] as [number, number] },
+      { ...base, segment_id: 2, text: "第三提示词", keyword: "", group_id: [2, 2] as [number, number] },
+    ];
+    const sourceText = "第二，大模型，经过大量资料训练。第三，提示词，就是任务说明。";
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({ items: [], threshold: 0, maxScore: null, reason: "no_candidates" as const, message: null }));
+    const result = await matchCompatibilitySegments(segments, "https://focus.example.test", {
+      sourceText, assetUrls: selected ? [`https://focus.example.test${candidate().mediaUrl}`] : [], isRandom: false,
+    }, { search, getAsset: async () => null });
+    expect(search.mock.calls[0]).toEqual([
+      { description: "第二大模型", keywords: ["大模型"], limit: selected ? 1 : 100 }, { includeAllUsers: true },
+      expect.objectContaining({ context: "第二，大模型，经过大量资料训练。" }),
+    ]);
+    for (const call of search.mock.calls) {
+      expect(call[2]?.allowThemeMatch).toBe(selected ? true : undefined);
+      expect(call[2]?.excludedAssetIds).toEqual([]);
+    }
+    result.forEach((segment, index) => expect(segment).toMatchObject(segments[index]));
+    expect(result[0]).not.toHaveProperty("allowThemeMatch");
   });
 
   it("defaults and validates semantic selection controls", () => {
@@ -317,7 +340,7 @@ describe("compatibility segment matching", () => {
     );
 
     expect(search).toHaveBeenCalledWith(
-      { description: segment.text, keywords: [], limit: 100 },
+      { description: segment.text, keywords: [segment.keyword], limit: 100 },
       { includeAllUsers: true },
       {
         semanticThreshold: 0.55,
@@ -411,6 +434,17 @@ describe("compatibility segment matching", () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it.each([true, false])("never enables thematic recall outside an explicit candidate scope: selected=%s", async selected => {
+    databaseRows.mockResolvedValue([{ id: candidate().id }]);
+    const search = vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
+    try {
+      await searchAssetsByDescriptionDetailed({ description: "AI", limit: 10 }, {}, {
+        allowThemeMatch: true, ...(selected ? { candidateAssetIds: [candidate().id] } : {}),
+      });
+      expect(search.mock.calls[0][4]?.allowThemeMatch).toBe(selected ? true : undefined);
+    } finally { vi.restoreAllMocks(); }
   });
 
   it("uses raw similarity strictly above 0.5 for short videos, not high RRF or BM25 scores", async () => {
@@ -597,10 +631,11 @@ describe("compatibility segment matching", () => {
     );
 
     expect(search).toHaveBeenCalledWith(
-      { description: segment.text, keywords: [], limit: 1 },
+      { description: segment.text, keywords: [segment.keyword], limit: 1 },
       { includeAllUsers: true },
       {
         candidateAssetIds: ["00000000-0000-4000-8000-000000000001"],
+        allowThemeMatch: true,
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,

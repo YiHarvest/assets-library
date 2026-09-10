@@ -1320,7 +1320,7 @@ export interface DescriptionSearchResult {
 }
 
 export interface DescriptionSearchOptions extends RecallOptions {
-  /** 仅召回不足 2 秒且单句原始语义分数大于 0.5 的视频。 */
+  /** 仅召回不足 2 秒且有效播放语义分数大于 0.5 的视频。 */
   shortVideosOnly?: boolean;
   /** Internal target slot duration; images can fill a slot without this limit. */
   minDurationMs?: number;
@@ -1381,10 +1381,13 @@ export async function searchAssetsByDescriptionDetailed(
     sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + 2000`);
   const where = and(...conditions);
   const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-  const recallOptions = options.playbackDurationMs !== undefined || options.contextRequired
-    ? { playbackDurationMs: options.playbackDurationMs, contextRequired: options.contextRequired } : undefined;
+  const allowThemeMatch = options.allowThemeMatch && Boolean(options.candidateAssetIds?.length);
+  const recallOptions = options.playbackDurationMs !== undefined || options.contextRequired || options.allowThemeMatch
+    ? { playbackDurationMs: options.playbackDurationMs, contextRequired: options.contextRequired,
+      ...(allowThemeMatch ? { allowThemeMatch: true } : {}) } : undefined;
   const candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context, recallOptions))
-    .filter(candidate => !options.shortVideosOnly || (((options.contextRequired ? candidate.contextSimilarity : candidate.semanticSimilarity) ?? -1) > 0.5 &&
+    .filter(candidate => !options.shortVideosOnly || (((options.contextRequired ? candidate.contextSimilarity : allowThemeMatch
+      ? Math.max(candidate.semanticSimilarity ?? -1, candidate.contextSimilarity ?? -1) : candidate.semanticSimilarity) ?? -1) > 0.5 &&
       (candidate.matchQuality ?? -1) > 0.5));
   const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
   const ids = candidates.map((item) => item.assetId);

@@ -29,6 +29,40 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
+  it("allows a selected visual metaphor with confident local context and scene evidence while favoring direct matches", () => {
+    const focus = [{ ...chunk("digital-face:1"), score: 0.35 }, { ...chunk("AI-ui:1"), score: 0.72 }];
+    const context = [{ ...chunk("digital-face:1"), score: 0.65, evidence: { kind: "point" as const, startMs: 200 } },
+      { ...chunk("AI-ui:1"), score: 0.70 }];
+    const sceneHits = [{ ...chunk("digital-face:0"), score: 0.68 }, { ...chunk("AI-ui:0"), score: 0.75 }];
+    const options = { sceneHits, playbackDurationMs: 1000 };
+    expect(fuseResults(focus, [], 60, context, 0.5, options).map(item => item.assetId)).toEqual(["AI-ui"]);
+    const result = fuseResults(focus, [], 60, context, 0.5, { ...options, allowThemeMatch: true });
+    expect(result.map(item => item.assetId)).toEqual(["AI-ui", "digital-face"]);
+    expect(result[0].matchQuality).toBeCloseTo(0.714);
+    expect(result[1]).toMatchObject({ matchQuality: expect.closeTo(0.5375),
+      playbackEvidence: [{ kind: "point", startMs: 200, similarity: 0.65 }] });
+  });
+
+  it.each([
+    { context: 0.54, scene: 0.9 }, // Weak thematic similarity cannot be rescued by a strong summary.
+    { context: 0.8, scene: 0.54 }, // Weak whole-scene support.
+    { context: 0.8, scene: undefined }, // Missing scene evidence.
+  ])("rejects unsupported selected themes despite strong lexical votes: %j", ({ context, scene }) => {
+    expect(fuseResults([{ ...chunk("weak:1"), score: 0.2 }], [{ ...chunk("weak:metadata"), matchedFields: ["facets.topic"] }],
+      60, [{ ...chunk("weak:1"), score: context }], 0.5, { allowThemeMatch: true,
+        sceneHits: scene === undefined ? [] : [{ ...chunk("weak:0"), score: scene }] })
+      .filter(candidate => (candidate.matchQuality ?? 0) >= 0.5)).toEqual([]);
+  });
+
+  it("rejects a selected contacts screen for an AI request when only local wording matches", () => {
+    const result = fuseResults([{ ...chunk("contacts:1"), score: 0.5305 }],
+      [{ ...chunk("contacts:metadata"), matchedFields: ["facets.topic", "facets.scene"] }], 60,
+      [{ ...chunk("contacts:1"), score: 0.5182 }], 0.5, {
+        allowThemeMatch: true, sceneHits: [{ ...chunk("contacts:0"), score: 0.4517 }],
+      });
+    expect(result).toEqual([]);
+  });
+
   it("keeps sunset synonyms but rejects broad balcony and apartment matches in keyword search", () => {
     const scores = { sunset: [0.71, 0.65], dusk: [0.66, 0.64], balcony: [0.59, 0.525], apartment: [0.597, 0.407] };
     const focus = Object.entries(scores).map(([id, [score]]) => ({ ...chunk(`${id}:1`), score }));
@@ -97,7 +131,7 @@ describe("ES asset recall", () => {
     expect(result[0].matchQuality).toBeCloseTo(0.71);
   });
 
-  it("rejects late and whole-video evidence even when BM25 strongly matches it", async () => {
+  it.each([false, true])("rejects late and whole-video evidence even with BM25 and theme preference=%s", async allowThemeMatch => {
     vi.stubEnv("SEARCH_SEMANTIC_THRESHOLD", "0.5");
     const rows = [
       { assetId: "late", evidenceKind: "summary", score: 0.99 },
@@ -106,12 +140,12 @@ describe("ES asset recall", () => {
     ];
     const requests: Record<string, unknown>[] = [];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
-      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }] });
+      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] }] });
       const body = JSON.parse(String(init.body)); requests.push(body);
       return json({ hits: { hits: rows.map(({ score, ..._source }, i) => ({ _id: `${_source.assetId}:${i}`, _source,
         _score: body.knn || body.query?.script_score ? (score + 1) / 2 : 100, matched_queries: ["events"] })) } });
     }));
-    const result = await searchAssets("账号异常", ["late", "early"], undefined, undefined, { playbackDurationMs: 1480 });
+    const result = await searchAssets("账号异常", ["late", "early"], undefined, "手机显示账号无法使用", { playbackDurationMs: 1480, allowThemeMatch });
     expect(result.map(item => item.assetId)).toEqual(["early"]);
     expect(result[0].playbackEvidence).toEqual([{ kind: "point", startMs: 200, similarity: expect.closeTo(0.7) }]);
     expect(JSON.stringify(requests[0])).toContain('"lt":1480');

@@ -29,6 +29,34 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
+  it("keeps sunset synonyms but rejects broad balcony and apartment matches in keyword search", () => {
+    const scores = { sunset: [0.71, 0.65], dusk: [0.66, 0.64], balcony: [0.59, 0.525], apartment: [0.597, 0.407] };
+    const focus = Object.entries(scores).map(([id, [score]]) => ({ ...chunk(`${id}:1`), score }));
+    const sceneHits = Object.entries(scores).map(([id, [, score]]) => ({ ...chunk(`${id}:0`), score }));
+    const result = fuseResults(focus, [chunk("sunset:1")], 60, [], 0.5,
+      { query: "夕阳", keywordSearch: true, sceneHits, visualHits: [] });
+    expect(result.map(item => item.assetId)).toEqual(["sunset", "dusk"]);
+    // 短词搜索的整片准入不施加到按时间轴匹配的文案片段。
+    expect(fuseResults(focus, [], 60, [], 0.5, { query: "夕阳", sceneHits, playbackDurationMs: 1000 })
+      .map(item => item.assetId)).toContain("balcony");
+  });
+
+  it.each(["夕阳", "阳台", "手机", "海边", "AI", "海边 小船 夕阳"])("matches %s as a complete short phrase in every lexical direction", async query => {
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }] });
+      requests.push(JSON.parse(String(init.body)));
+      return json({ hits: { hits: [] } });
+    }));
+    await searchAssets(query, ["asset-a"], undefined, undefined, { keywordSearch: true });
+    const lexical = requests.filter(body => !body.knn);
+    expect(lexical).toHaveLength(2);
+    for (const body of lexical) {
+      expect(JSON.stringify(body)).toContain('"match_phrase"');
+      expect(JSON.stringify(body)).not.toContain('"match":');
+    }
+  });
+
   it("does not admit black footage for unrelated text even with a high embedding score", () => {
     const hits = [{ ...chunk("black:1"), score: 0.8 }];
     const sceneHits = [{ ...chunk("black:0"), score: 0.8, content: "视频全程为黑屏画面，无任何可见视觉内容。" }];
@@ -251,7 +279,9 @@ describe("ES asset recall", () => {
     expect(vector._source).toEqual(["assetId", "evidenceKind", "startMs", "endMs", "content"]);
     expect(keyword.query.bool.filter).toEqual([vector.knn.filter]);
     expect(keyword).not.toHaveProperty("knn");
-    expect(keyword.query.bool.should).toContainEqual({ match: { content: { query: "夕阳下的海边 小船", boost: 2 } } });
+    expect(keyword.query.bool.should).toContainEqual({ bool: { should: [
+      { match_phrase: { content: "夕阳下的海边" } }, { match_phrase: { content: "小船" } },
+    ], minimum_should_match: 1, boost: 2 } });
     expect(JSON.parse(fetchMock.mock.calls[3][1].body).query.bool.should).toHaveLength(2);
     expect(await rerank("query", result)).toBe(result);
   });

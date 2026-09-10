@@ -1239,7 +1239,7 @@ export async function queryAssetsPage({
   if (query) {
     // MySQL owns eligibility; the recall engine enforces an explicit terms capacity limit.
     const eligible = await db.select({ id: assets.id }).from(assets).where(where);
-    const candidates = await recallWithinDatabaseScope(query, eligible.map((row) => row.id), where, exactTags);
+    const candidates = await recallWithinDatabaseScope(query, eligible.map((row) => row.id), where, exactTags, undefined, { keywordSearch: true });
     const ids = candidates.map((item) => item.assetId);
     const pageCandidates = candidates.slice(offset, offset + safeLimit);
     const pageIds = pageCandidates.map((item) => item.assetId);

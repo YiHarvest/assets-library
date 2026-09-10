@@ -4,7 +4,17 @@ import type { AssetDetail } from "@/shared/contracts";
 import { searchWithV2 } from "./v2/facade";
 import { assetEvidence, evidenceInWindow, permitsVisualMatch, type PlaybackEvidence } from "./asset-evidence";
 
-export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean }
+export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean }
+
+const isShortSearchTerm = (query: string) => query.trim().split(/\s+/).every(term => /^[\p{Script=Han}A-Za-z0-9]{2,8}$/u.test(term));
+
+/** standard 将中文拆成单字；短词必须连续命中，不能让“夕阳”给“阳台”加分。 */
+function lexicalMatch(field: string, query: string, options: { boost?: number; _name?: string } = {}) {
+  if (!isShortSearchTerm(query)) return { match: { [field]: { query, ...options } } };
+  const terms = query.trim().split(/\s+/);
+  if (terms.length === 1) return { match_phrase: { [field]: { query: terms[0], ...options } } };
+  return { bool: { should: terms.map(term => ({ match_phrase: { [field]: term } })), minimum_should_match: 1, ...options } };
+}
 
 export interface SearchCandidate {
   assetId: string;
@@ -178,6 +188,10 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   };
   const focus = byAsset(vectorHits), context = byAsset(contextHits);
   const scenes = byAsset(options.sceneHits ?? []);
+  const keywordSearch = options.keywordSearch && isShortSearchTerm(options.query ?? "");
+  const lexicalIds = new Set([...keywordHits, ...(options.visualHits ?? [])].map(hit => hit.assetId));
+  // 短词搜整条素材：没有完整词证据时，整片语义须接近本次最佳结果，防止局部泛化填满列表。
+  const semanticFloor = Math.max(threshold, ...[...scenes.values()].map(hit => (hit.score ?? threshold) - 0.1));
   const candidates = new Map<string, SearchCandidate>();
   for (const assetId of new Set([...focus.keys(), ...context.keys()])) {
     if (options.query !== undefined && !permitsVisualMatch(scenes.get(assetId)?.content ?? focus.get(assetId)?.content ?? "", options.query)) continue;
@@ -188,6 +202,7 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
     let matchQuality = options.contextRequired ? 0.9 * contextSimilarity! : semanticSimilarity === undefined ? contextSimilarity : contextSimilarity === undefined
       ? semanticSimilarity : 0.7 * semanticSimilarity + 0.3 * contextSimilarity;
     const sceneSimilarity = scenes.get(assetId)?.score;
+    if (keywordSearch && !lexicalIds.has(assetId) && (sceneSimilarity ?? semanticSimilarity ?? -1) < semanticFloor) continue;
     // 整片描述只校验局部高分，不能把片尾事实变成片头的命中证据。
     if (sceneSimilarity !== undefined && matchQuality !== undefined) {
       matchQuality = Math.min(matchQuality, 0.75 * matchQuality + 0.25 * sceneSimilarity);
@@ -262,15 +277,15 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
       min_score: config.SEARCH_KEYWORD_THRESHOLD,
       _source: ["assetId"],
       query: { bool: { should: [
-        { match: { content: { query, boost: 2 } } },
-        ...(contextVector ? [{ match: { content: { query: context, boost: 1 } } }] : []),
-        ...["events", "facets.topic", "facets.object"].map(field => ({ match: { [field]: { query: context || query, _name: field } } })),
+        lexicalMatch("content", query, { boost: 2 }),
+        ...(contextVector ? [lexicalMatch("content", context!, { boost: 1 })] : []),
+        ...["events", "facets.topic", "facets.object"].map(field => lexicalMatch(field, context || query, { _name: field })),
       ], minimum_should_match: 1, filter: [filter] } },
       sort: [{ _score: "desc" }, { assetId: "asc" }],
     },
   ] as const;
   const visual = { ...bodies[1], query: { bool: { filter: [filter], minimum_should_match: 1,
-    should: ["facets.person", "facets.scene"].map(field => ({ match: { [field]: { query: context || query, _name: field } } })) } } };
+    should: ["facets.person", "facets.scene"].map(field => lexicalMatch(field, context || query, { _name: field })) } } };
   const requests = [...bodies, ...(contextVector ? [{ ...bodies[0], knn: { ...bodies[0].knn, query_vector: contextVector } }] : []), visual];
   const run = async (body: object, lexical = false, playbackOnly = true) => {
     const response = await esRequest("/_search?allow_partial_search_results=false", {

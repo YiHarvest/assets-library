@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { MediaPreview } from "@/components/media-preview";
 import { Badge } from "@/components/ui/badge";
-import { appUrl } from "@/lib/paths";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -40,8 +39,10 @@ function detailPath(asset: ApiV1AssetDetail) {
 
 export function AssetEditor({
   initialAsset,
+  returnTo,
 }: {
   initialAsset: ApiV1AssetDetail;
+  returnTo: string;
 }) {
   const router = useRouter();
   const [asset, setAsset] = useState(initialAsset);
@@ -180,7 +181,7 @@ export function AssetEditor({
       await waitForTask(task);
       // 生产页面前缀由 rewrite 提供，删除后使用整页导航避免 Next Router
       // 把带前缀地址误判为应用内部路由并触发客户端错误。
-      window.location.assign(appUrl("/"));
+      window.location.assign(returnTo);
     });
 
   return (

@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { WebUiLink } from "@/components/webui-link";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
+import { redirect } from "next/navigation";
 import type {
   AssetQueryResponse,
   UserDirectoryResponse,
@@ -130,6 +131,11 @@ export default async function OverviewPage({
     ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
     : appUrl("/upload");
   const total = page.tag_statistics?.total_assets ?? page.items.length;
+  if (cursor && !page.items.length && history.length) {
+    const lastPage = Math.min(history.length - 1, Math.max(0, Math.ceil(total / 8) - 1));
+    redirect(overviewHref({ ...common, cursor: history[lastPage], history: history.slice(0, lastPage) }));
+  }
+  const returnTo = overviewHref({ ...common, cursor, history });
   const currentUser = userDirectory.items.find(
     (user) => user.user_id === userId,
   );
@@ -258,7 +264,7 @@ export default async function OverviewPage({
             size="sm"
             aria-label="画廊视图"
           >
-            <WebUiLink href={overviewHref({ ...common, layout: "gallery" })}>
+            <WebUiLink href={overviewHref({ ...common, cursor, history, layout: "gallery" })}>
               <LayoutGrid className="size-3.5" />
             </WebUiLink>
           </Button>
@@ -268,7 +274,7 @@ export default async function OverviewPage({
             size="sm"
             aria-label="列表视图"
           >
-            <WebUiLink href={overviewHref({ ...common, layout: "list" })}>
+            <WebUiLink href={overviewHref({ ...common, cursor, history, layout: "list" })}>
               <List className="size-3.5" />
             </WebUiLink>
           </Button>
@@ -325,7 +331,7 @@ export default async function OverviewPage({
           </CardContent>
         </Card>
       ) : (
-        <AssetOverviewGrid assets={page.items} layout={layout} />
+        <AssetOverviewGrid key={returnTo} assets={page.items} layout={layout} returnTo={returnTo} />
       )}
 
       {(history.length > 0 || page.has_more) && (
@@ -350,6 +356,7 @@ export default async function OverviewPage({
               <ChevronLeft className="size-4" /> 上一页
             </WebUiLink>
           </Button>
+          <span className="px-2 text-sm text-slate-500">第 {history.length + 1} 页</span>
           <Button
             asChild
             variant="outline"

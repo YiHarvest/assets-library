@@ -11,6 +11,9 @@ vi.mock("@/lib/server-api-v1", () => apiMocks);
 
 import OverviewPage from "@/app/page";
 import { AssetScopeSwitcher } from "@/components/asset-scope-switcher";
+import { AssetOverviewGrid } from "@/components/asset-overview-grid";
+import AssetDetailPage from "@/app/assets/[id]/page";
+import { appUrl } from "@/lib/paths";
 
 function emptyPage(search: {
   mode: "keyword" | "semantic" | "hybrid";
@@ -146,4 +149,41 @@ describe("overview search routing", () => {
     });
     expect((requestedBody().filter as { user_scope: object }).user_scope).not.toHaveProperty("user_id");
   });
+
+  it("keeps the page, filter and private scope in detail return links", async () => {
+    apiMocks.serverApiV1.mockResolvedValue({ ...emptyPage(), items: [{ asset_id: "asset-a" }] });
+    apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
+    const parameters = { scope: "private", user_id: "user-7", tag: "夕阳", layout: "list", cursor: "page-3",
+      history: Buffer.from(JSON.stringify([null, "page-2"])).toString("base64url") };
+    const view = await OverviewPage({ searchParams: Promise.resolve(parameters) });
+    const grid = React.Children.toArray(view.props.children).find(child => React.isValidElement(child) && child.type === AssetOverviewGrid);
+    if (!React.isValidElement<{ returnTo: string }>(grid)) throw new Error("Missing grid");
+    const target = new URL(grid.props.returnTo, "http://localhost");
+    for (const [key, value] of Object.entries(parameters)) expect(target.searchParams.get(key)).toBe(value);
+    expect(renderedText(view).replace(/\s+/g, "")).toContain("第3页");
+  });
+
+  it.each([16, 8, 0])("returns to the last available page when deletion leaves %s assets", async total => {
+    apiMocks.serverApiV1.mockResolvedValue({ ...emptyPage(), tag_statistics: { total_assets: total } });
+    apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
+    const action = OverviewPage({ searchParams: Promise.resolve({ scope: "private", user_id: "user-7", tag: "夕阳", layout: "list",
+      cursor: "page-3", history: Buffer.from(JSON.stringify([null, "page-2"])).toString("base64url") }) });
+    const error = await action.catch(cause => cause);
+    expect(error.digest).toContain("NEXT_REDIRECT");
+    const target = new URL(error.digest.split(";")[2], "http://localhost");
+    expect(target.searchParams.get("cursor")).toBe(total === 16 ? "page-2" : null);
+    expect(target.searchParams.get("scope")).toBe("private");
+    expect(target.searchParams.get("user_id")).toBe("user-7");
+    expect(target.searchParams.get("tag")).toBe("夕阳");
+    expect(target.searchParams.get("layout")).toBe("list");
+  });
+
+  it.each([appUrl("/?cursor=page-3&scope=private&user_id=user-7"), "https://evil.example/", "//evil.example/", "javascript:alert(1)", "/upload"])(
+    "only accepts overview return URLs: %s", async returnTo => {
+      apiMocks.serverApiV1.mockResolvedValue({ user_id: "user-7", review_status: "pending_review" });
+      const view = await AssetDetailPage({ params: Promise.resolve({ id: "asset-a" }), searchParams: Promise.resolve({ return_to: returnTo }) });
+      const target = view.props.children.props.returnTo;
+      expect(target).toBe(returnTo.startsWith(appUrl("/?")) ? returnTo : appUrl("/?view=pending&scope=private&user_id=user-7"));
+    },
+  );
 });

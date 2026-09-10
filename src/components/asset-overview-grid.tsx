@@ -32,24 +32,38 @@ const statusLabel: Record<ApiTaskStatus, string> = {
   failed: "处理失败",
 };
 
-function detailHref(asset: ApiV1AssetSummary) {
+function detailHref(asset: ApiV1AssetSummary, returnTo: string) {
   const query = new URLSearchParams({ scope: asset.user_id ? "private" : "public" });
   if (asset.user_id) query.set("user_id", asset.user_id);
+  query.set("return_to", returnTo);
   return appUrl(`/assets/${asset.asset_id}?${query.toString()}`);
 }
 
 export function AssetOverviewGrid({
-  assets,
+  assets: initialAssets,
   layout,
+  returnTo,
 }: {
   assets: ApiV1AssetSummary[];
   layout: "gallery" | "list";
+  returnTo: string;
 }) {
   const router = useRouter();
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [selected, setSelected] = useState(new Set<string>());
+  const [removed, setRemoved] = useState(new Set<string>());
+  const [deleting, setDeleting] = useState(false);
+  const assets = initialAssets.filter((asset) => !removed.has(asset.asset_id));
+  const selectedAssets = assets.filter((asset) => selected.has(asset.asset_id));
+  const toggleSelection = (id: string) => setSelected((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
   const hasActiveJobs = assets.some((asset) =>
     ["queued", "running"].includes(asset.status),
   );
@@ -102,13 +116,58 @@ export function AssetOverviewGrid({
     }
   };
 
+  const removeSelected = async () => {
+    if (!selectedAssets.length || deleting || publishingId) return;
+    if (!window.confirm(`确认永久删除选中的 ${selectedAssets.length} 项素材及其文件？`)) return;
+    setDeleting(true);
+    setPreviewIndex(null);
+    setMessage("正在删除所选素材…");
+    const deleted = new Set<string>();
+    const failures: string[] = [];
+    for (let offset = 0; offset < selectedAssets.length; offset += 3) {
+      const batch = selectedAssets.slice(offset, offset + 3);
+      const results = await Promise.allSettled(batch.map(async (asset) => {
+        const task = await apiV1<TaskAccepted>(`/assets/${asset.asset_id}`, {
+          method: "DELETE",
+          body: JSON.stringify({ user_id: asset.user_id }),
+        });
+        await waitForTask(task);
+      }));
+      results.forEach((result, index) => {
+        const asset = batch[index]!;
+        if (result.status === "fulfilled") deleted.add(asset.asset_id);
+        else failures.push(`${asset.name}：${result.reason instanceof Error ? result.reason.message : "删除失败"}`);
+      });
+    }
+    setRemoved((current) => new Set([...current, ...deleted]));
+    setSelected(new Set(selectedAssets.filter((asset) => !deleted.has(asset.asset_id)).map((asset) => asset.asset_id)));
+    setMessage(`已删除 ${deleted.size} 项${failures.length ? `，失败 ${failures.length} 项。${failures.join("；")}` : "。"}`);
+    setDeleting(false);
+    router.refresh();
+  };
+
   return (
     <div className="space-y-4">
       {message && (
-        <p className="flex items-center gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          <AlertCircle className="size-4" /> {message}
+        <p role="status" className="rounded-lg bg-slate-100 p-3 text-sm text-slate-700 dark:bg-white/10 dark:text-slate-200">
+          {message}
         </p>
       )}
+      <div className="flex flex-wrap items-center gap-3 rounded-2xl bg-white/70 px-4 py-3 text-sm dark:bg-white/[0.06]">
+        <label className="flex cursor-pointer items-center gap-2">
+          <input type="checkbox" className="size-4 accent-[#0071e3]" aria-label="本页全选"
+            checked={assets.length > 0 && selectedAssets.length === assets.length}
+            ref={(input) => { if (input) input.indeterminate = selectedAssets.length > 0 && selectedAssets.length < assets.length; }}
+            disabled={deleting}
+            onChange={(event) => setSelected(new Set(event.target.checked ? assets.map((asset) => asset.asset_id) : []))} />
+          本页全选
+        </label>
+        <span className="text-slate-500">已选 {selectedAssets.length} 项</span>
+        <Button variant="ghost" size="sm" disabled={deleting || !selectedAssets.length} onClick={() => setSelected(new Set())}>取消选择</Button>
+        <Button variant="destructive" size="sm" className="ml-auto" disabled={deleting || !!publishingId || !selectedAssets.length} onClick={() => void removeSelected()}>
+          {deleting ? "正在删除…" : `删除所选（${selectedAssets.length}）`}
+        </Button>
+      </div>
       {hasSearchScores && (
         <div className="flex items-center justify-between rounded-2xl bg-white/55 px-4 py-3 text-sm text-slate-600 dark:bg-white/[0.06] dark:text-slate-300">
           <span>搜索结果按相关性排序</span>
@@ -128,6 +187,10 @@ export function AssetOverviewGrid({
             <GalleryCard
               key={asset.asset_id}
               asset={asset}
+              returnTo={returnTo}
+              selected={selected.has(asset.asset_id)}
+              deleting={deleting}
+              onSelect={() => toggleSelection(asset.asset_id)}
               showDiagnostics={showDiagnostics}
               publishing={publishingId === asset.asset_id}
               onPreview={() => setPreviewIndex(index)}
@@ -141,6 +204,10 @@ export function AssetOverviewGrid({
             <ListRow
               key={asset.asset_id}
               asset={asset}
+              returnTo={returnTo}
+              selected={selected.has(asset.asset_id)}
+              deleting={deleting}
+              onSelect={() => toggleSelection(asset.asset_id)}
               showDiagnostics={showDiagnostics}
               publishing={publishingId === asset.asset_id}
               onPreview={() => setPreviewIndex(index)}
@@ -149,8 +216,9 @@ export function AssetOverviewGrid({
           ))}
         </div>
       )}
-      {previewIndex !== null && (
+      {previewIndex !== null && assets[previewIndex] && (
         <PreviewDialog
+          returnTo={returnTo}
           asset={assets[previewIndex]!}
           current={previewIndex}
           total={assets.length}
@@ -217,6 +285,10 @@ function Diagnostics({ asset }: { asset: ApiV1AssetSummary }) {
 
 interface AssetCardProps {
   asset: ApiV1AssetSummary;
+  returnTo: string;
+  selected: boolean;
+  deleting: boolean;
+  onSelect: () => void;
   showDiagnostics: boolean;
   publishing: boolean;
   onPreview: () => void;
@@ -225,6 +297,10 @@ interface AssetCardProps {
 
 function GalleryCard({
   asset,
+  returnTo,
+  selected,
+  deleting,
+  onSelect,
   showDiagnostics,
   publishing,
   onPreview,
@@ -254,8 +330,9 @@ function GalleryCard({
       </button>
       <CardContent className="space-y-3 p-4 pt-4">
         <div className="flex items-center justify-between gap-3">
+          <input type="checkbox" className="size-4 shrink-0 accent-[#0071e3]" aria-label={`选择 ${asset.name}`} checked={selected} disabled={deleting} onChange={onSelect} />
           <WebUiLink
-            href={detailHref(asset)}
+            href={detailHref(asset, returnTo)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
@@ -273,7 +350,7 @@ function GalleryCard({
           <Button
             className="w-full"
             size="sm"
-            disabled={publishing}
+            disabled={publishing || deleting}
             onClick={() => void onPublish(asset)}
           >
             <Send className="size-3.5" />
@@ -287,6 +364,10 @@ function GalleryCard({
 
 function ListRow({
   asset,
+  returnTo,
+  selected,
+  deleting,
+  onSelect,
   showDiagnostics,
   publishing,
   onPreview,
@@ -296,6 +377,7 @@ function ListRow({
     asset.status === "done" && asset.review_status === "pending_review";
   return (
     <article className="flex gap-4 border-b border-black/[0.06] p-3 last:border-0 dark:border-white/[0.10] sm:items-center sm:p-4">
+      <input type="checkbox" className="my-auto size-4 shrink-0 accent-[#0071e3]" aria-label={`选择 ${asset.name}`} checked={selected} disabled={deleting} onChange={onSelect} />
       <button
         type="button"
         className="relative size-20 shrink-0 overflow-hidden rounded-xl bg-[#e9e9eb] sm:size-24"
@@ -311,7 +393,7 @@ function ListRow({
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex items-center gap-3">
           <WebUiLink
-            href={detailHref(asset)}
+            href={detailHref(asset, returnTo)}
             className="truncate font-semibold tracking-tight hover:text-[#0071e3]"
           >
             {asset.name}
@@ -340,7 +422,7 @@ function ListRow({
         {canPublish && (
           <Button
             size="sm"
-            disabled={publishing}
+            disabled={publishing || deleting}
             onClick={() => void onPublish(asset)}
           >
             {publishing ? "正在入库…" : "入库"}
@@ -353,6 +435,7 @@ function ListRow({
 
 function PreviewDialog({
   asset,
+  returnTo,
   current,
   total,
   onClose,
@@ -360,6 +443,7 @@ function PreviewDialog({
   onNext,
 }: {
   asset: ApiV1AssetSummary;
+  returnTo: string;
   current: number;
   total: number;
   onClose: () => void;
@@ -389,7 +473,7 @@ function PreviewDialog({
           </div>
           <div className="flex items-center gap-2">
             <WebUiLink
-              href={detailHref(asset)}
+              href={detailHref(asset, returnTo)}
               className="rounded-full bg-white/15 px-3 py-2 text-sm hover:bg-white/25"
             >
               查看详情

@@ -304,6 +304,7 @@ export async function matchCompatibilitySegments(
   const usedAssetIds = new Set<string>();
   const config = loadConfig();
   const clipEnabled = config.SEGMENT_MATCH_CLIP_ENABLED;
+  const minVideoDurationMs = config.SEGMENT_MATCH_MIN_VIDEO_DURATION_MS;
   const contexts = segmentRecallContexts(segments, options.sourceText);
   const recall = async (shortVideosOnly = false) => {
     const searches: DescriptionSearchResult[] = [];
@@ -312,7 +313,7 @@ export async function matchCompatibilitySegments(
       searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
         { description: segment.text, keywords: segment.keyword.trim() ? [segment.keyword.trim()] : [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
         { includeAllUsers: true }, {
-          ...(shortVideosOnly ? { shortVideosOnly: true } : { minDurationMs: 2000 }),
+          ...(shortVideosOnly ? { shortVideosOnly: true } : { minDurationMs: minVideoDurationMs }),
           ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
           ...(contexts[start + offset] !== segment.text.trim() && requiresRecallContext(segment.text) ? { contextRequired: true } : {}),
           ...(clipEnabled && segment.end_time > segment.start_time ? { playbackDurationMs: Math.round((segment.end_time - segment.start_time) * 1000) } : {}),
@@ -331,10 +332,10 @@ export async function matchCompatibilitySegments(
   let shortSearches: DescriptionSearchResult[] = [];
   if (!candidateAssetIds || candidateAssetIds.length >= 2) {
     shortSearches = await recall(true);
-    pools = addShortVideoGroups(segments, pools, shortSearches, clipEnabled);
+    pools = addShortVideoGroups(segments, pools, shortSearches, minVideoDurationMs, clipEnabled);
   }
   const assignment = balancedAssetAssignment(segments, pools, isRandom, config.SEARCH_SEMANTIC_THRESHOLD);
-  fitShortVideoGroups(segments, assignment, shortSearches, clipEnabled);
+  fitShortVideoGroups(segments, assignment, shortSearches, minVideoDurationMs, clipEnabled);
   for (const [index, segment] of segments.entries()) {
     const search = searches[index];
     const candidate = assignment.get(index);

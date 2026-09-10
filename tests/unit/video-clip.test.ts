@@ -52,6 +52,8 @@ describe("matched video clipping through the media response", () => {
       await exec("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", `color=c=${color}:size=${size}:rate=${rate}:duration=1`,
         ...(audio ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100"] : []), "-t", "1",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", ...(audio ? ["-c:a", "aac"] : []), path.join(fixtureRoot, `${name}.mp4`)]);
+      await exec("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(fixtureRoot, `${name}.mp4`), "-t", "0.5",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", path.join(fixtureRoot, `tiny-${name}.mp4`)]);
     }
   }, 20_000);
   afterAll(async () => fs.rm(fixtureRoot, { recursive: true, force: true }));
@@ -73,19 +75,20 @@ describe("matched video clipping through the media response", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  async function shortVideoUrl() {
+  async function shortVideoUrl(durationMs = 1000) {
     const secondId = "00000000-0000-4000-8000-000000000002";
     const objects = [object, { ...object, id: "second-object", provider: "zos", objectKey: "short-b.mp4" }];
     objects[0].localPath = "short-a.mp4";
-    await fs.copyFile(path.join(fixtureRoot, "short-a.mp4"), path.join(root, "short-a.mp4"));
+    const prefix = durationMs === 500 ? "tiny-" : "";
+    await fs.copyFile(path.join(fixtureRoot, `${prefix}short-a.mp4`), path.join(root, "short-a.mp4"));
     fakes.getObject.mockImplementation(async condition => {
       const id = new MySqlDialect().sqlToQuery(condition).params[0];
       return objects.filter(item => item.id === id);
     });
     fakes.getAsset.mockImplementation(async id => ({ id, mediaObjectId: id === assetId ? object.id : "second-object", mediaType: "video",
       mimeType: "video/mp4", processingStatus: "completed", reviewStatus: "published", deletedAt: null }));
-    fakes.getDetail.mockImplementation(async () => ({ mediaType: "video", segmentStartMs: 5000, segmentEndMs: 6000 }));
-    fakes.download.mockImplementation(async (_key: string, destination: string) => fs.copyFile(path.join(fixtureRoot, "short-b.mp4"), destination));
+    fakes.getDetail.mockImplementation(async () => ({ mediaType: "video", segmentStartMs: 5000, segmentEndMs: 5000 + durationMs }));
+    fakes.download.mockImplementation(async (_key: string, destination: string) => fs.copyFile(path.join(fixtureRoot, `${prefix}short-b.mp4`), destination));
     const combined = new URL(url);
     combined.searchParams.set("concat", Buffer.from(JSON.stringify([{ assetId, userId: "759" }, { assetId: secondId, userId: null }])).toString("base64url"));
     return { combined, secondId, objects };
@@ -141,11 +144,29 @@ describe("matched video clipping through the media response", () => {
 
   it("rejects insufficient totals and repeated components before downloading", async () => {
     const { combined } = await shortVideoUrl();
-    fakes.getDetail.mockResolvedValue({ mediaType: "video", segmentStartMs: 0, segmentEndMs: 999 });
+    fakes.getDetail.mockResolvedValue({ mediaType: "video", segmentStartMs: 0, segmentEndMs: 499 });
     await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400 });
     combined.searchParams.set("concat", Buffer.from(JSON.stringify([{ assetId, userId: "759" }, { assetId, userId: "759" }])).toString("base64url"));
     await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400 });
     expect(fakes.download).not.toHaveBeenCalled();
+  });
+
+  it("serves a one-second combination at the default minimum and revalidates a higher configured minimum", async () => {
+    const { combined } = await shortVideoUrl(500);
+    const response = await mediaResponse(assetId, new Request(combined));
+    expect(response.status).toBe(200);
+    const file = path.join(root, "one-second.mp4");
+    await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+    expect(Number((await probe(file)).format.duration)).toBeCloseTo(1, 1);
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "2000");
+    await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("checks actual combined duration against configuration even if database metadata overstates it", async () => {
+    const { combined } = await shortVideoUrl(500);
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "1500");
+    fakes.getDetail.mockResolvedValue({ mediaType: "video", segmentStartMs: 0, segmentEndMs: 1000 });
+    await expect(mediaResponse(assetId, new Request(combined))).rejects.toMatchObject({ status: 400, message: "短视频组合实际时长不足 1.5 秒。" });
   });
 
   it("cuts 8.5 seconds to the target slot, preserves audio and serves byte ranges from the cached MP4", async () => {

@@ -26,23 +26,23 @@ function group(parts: MatchMaterial[], durations: Record<string, number>, target
     searchScore: parts.reduce((sum, part) => sum + (part.searchScore ?? 0), 0) / parts.length };
 }
 
-/** 毫秒子集和：至少 2 秒，优先接近目标，再少用素材；不重复片段。 */
-export function closestShortVideos(items: MatchMaterial[], durations: Record<string, number>, targetMs: number, clipEnabled = true, initial: MatchMaterial[] = []) {
-  const target = Math.max(2000, Math.round(targetMs));
+/** 毫秒子集和：达到配置的最小时长，优先接近目标，再少用素材；不重复片段。 */
+export function closestShortVideos(items: MatchMaterial[], durations: Record<string, number>, targetMs: number, minDurationMs: number, clipEnabled = true, initial: MatchMaterial[] = []) {
+  const target = Math.max(minDurationMs, Math.round(targetMs));
   const sums = new Map<number, MatchMaterial[]>([[initial.reduce((sum, item) => sum + durations[item.id], 0), initial]]);
   for (const item of new Map(items.map(item => [item.id, item])).values()) {
     if (initial.some(part => candidateIdentity(part) === candidateIdentity(item))) continue;
     const duration = durations[item.id];
-    if (!Number.isSafeInteger(duration) || duration <= 0 || duration >= 2000) continue;
+    if (!Number.isSafeInteger(duration) || duration <= 0 || duration >= minDurationMs) continue;
     for (const [total, parts] of [...sums]) {
       if (parts.some(part => candidateIdentity(part) === candidateIdentity(item))) continue;
       if (clipEnabled && parts.reduce((frames, part) => frames + sourceFrames(durations[part.id]), 0) >= Math.floor(targetMs / 40)) continue;
       const next = total + duration;
-      if (next >= target + 2000) continue;
+      if (next >= target + minDurationMs) continue;
       if (!sums.has(next) || sums.get(next)!.length > parts.length + 1) sums.set(next, [...parts, item]);
     }
   }
-  return [...sums].filter(([total]) => total >= 2000).sort(([a, left], [b, right]) =>
+  return [...sums].filter(([total]) => total >= minDurationMs).sort(([a, left], [b, right]) =>
     Math.abs(a - target) - Math.abs(b - target) || left.length - right.length || a - b)[0]?.[1];
 }
 
@@ -51,6 +51,7 @@ export function addShortVideoGroups(
   segments: { start_time: number; end_time: number }[],
   regularPools: MatchMaterial[][],
   searches: DescriptionSearchResult[],
+  minDurationMs: number,
   clipEnabled = true,
 ): MatchMaterial[][] {
   return segments.map((segment, index) => {
@@ -63,17 +64,17 @@ export function addShortVideoGroups(
       if (!parts || parts.length < 2) return;
       const material = group(parts, durations, clipEnabled ? target : Infinity);
       if (!material) return;
-      material.durationPenalty = 0.005 * Math.abs(parts.reduce((sum, part) => sum + durations[part.id], 0) - Math.max(2000, target)) / Math.max(2000, target);
+      material.durationPenalty = 0.005 * Math.abs(parts.reduce((sum, part) => sum + durations[part.id], 0) - Math.max(minDurationMs, target)) / Math.max(minDurationMs, target);
       if (!groups.has(material.id) || matchQuality(material) > matchQuality(groups.get(material.id)!)) groups.set(material.id, material);
     };
     items.forEach((first, i) => {
-      if (!Number.isSafeInteger(durations[first.id]) || durations[first.id] <= 0 || durations[first.id] >= 2000 ||
+      if (!Number.isSafeInteger(durations[first.id]) || durations[first.id] <= 0 || durations[first.id] >= minDurationMs ||
         (clipEnabled && sourceFrames(durations[first.id]) >= Math.floor(target / 40))) return;
       // 大池按语义排名循环保留搭档，避免 O(n²) 组合挤占分配资源；子集和另找接近时长的组。
       const alternatives = [...items.slice(i + 1), ...items.slice(0, i)];
-      for (const second of (items.length > 16 ? alternatives.slice(0, 8) : alternatives)) if (Number.isSafeInteger(durations[second.id]) && durations[second.id] > 0 && durations[second.id] < 2000 &&
-        durations[first.id] + durations[second.id] >= 2000) add([first, second]);
-      add(closestShortVideos([...items.slice(i), ...items.slice(0, i)], durations, target, clipEnabled, [first]));
+      for (const second of (items.length > 16 ? alternatives.slice(0, 8) : alternatives)) if (Number.isSafeInteger(durations[second.id]) && durations[second.id] > 0 && durations[second.id] < minDurationMs &&
+        durations[first.id] + durations[second.id] >= minDurationMs) add([first, second]);
+      add(closestShortVideos([...items.slice(i), ...items.slice(0, i)], durations, target, minDurationMs, clipEnabled, [first]));
     });
     return [...regularPools[index], ...groups.values()];
   });
@@ -81,7 +82,7 @@ export function addShortVideoGroups(
 
 /** 分配到实际文本时段后，用剩余合格片段调整时长，不占用其他已分配组合。 */
 export function fitShortVideoGroups(
-  segments: { start_time: number; end_time: number }[], assignment: Map<number, MatchMaterial>, searches: DescriptionSearchResult[], clipEnabled = true,
+  segments: { start_time: number; end_time: number }[], assignment: Map<number, MatchMaterial>, searches: DescriptionSearchResult[], minDurationMs: number, clipEnabled = true,
 ) {
   const reserved = new Set([...assignment.values()].flatMap(item => (item.parts ?? [item]).map(candidateIdentity)));
   const target = (index: number) => (segments[index].end_time - segments[index].start_time) * 1000;
@@ -93,7 +94,7 @@ export function fitShortVideoGroups(
     if (material.parts.reduce((sum, part) => sum + durations[part.id], 0) >= target(index)) continue;
     const items = search.items.map(item => ({ ...item, mediaIdentity: search.mediaIdentities?.[item.id], matchQuality: search.matchQualities?.[item.id], playbackEvidence: search.playbackEvidence?.[item.id] }));
     const parts = closestShortVideos(items.filter(item => !reserved.has(candidateIdentity(item)) && matchQuality(item) >= matchQuality(material) - 0.05),
-      durations, target(index), clipEnabled, material.parts);
+      durations, target(index), minDurationMs, clipEnabled, material.parts);
     if (!parts) continue;
     const fitted = group(parts, durations, clipEnabled ? target(index) : Infinity);
     if (!fitted) continue;

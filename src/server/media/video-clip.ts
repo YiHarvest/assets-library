@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
 import { AppError } from "@/server/errors";
+import { loadConfig } from "@/server/config";
 import { runH264Encode, runMediaCommand } from "@/server/media/ffmpeg";
 import { resolveMediaPath } from "@/server/media/storage";
 
@@ -52,6 +53,7 @@ export async function prepareVideoClip(
       let outputArgs: string[];
       let outputDurationMs = durationMs;
       if (additionalSources.length) {
+        const minVideoDurationMs = loadConfig().SEGMENT_MATCH_MIN_VIDEO_DURATION_MS;
         const files = [source];
         for (const [index, download] of additionalSources.entries()) {
           const file = path.join(workspace, `source-${index + 1}.mp4`);
@@ -65,12 +67,12 @@ export async function prepareVideoClip(
           const probe = JSON.parse(stdout) as { streams: Array<{ codec_type: string; width?: number; height?: number; duration?: string }>; format: { duration?: string } };
           const video = probe.streams.find(stream => stream.codec_type === "video");
           const duration = Number(video?.duration ?? probe.format.duration);
-          // 兼容旧组合中不足 3 秒的成员，新组合的成员由召回限制为不足 2 秒。
-          if (!video?.width || !video.height || !Number.isFinite(duration) || duration <= 0 || duration >= 3) throw failure;
+          // 兼容旧组合中不足 3 秒的成员，新组合的成员时长由配置限制。
+          if (!video?.width || !video.height || !Number.isFinite(duration) || duration <= 0 || duration * 1000 >= Math.max(3000, minVideoDurationMs)) throw failure;
           probes.push({ width: video.width, height: video.height, duration, audio: probe.streams.some(stream => stream.codec_type === "audio") });
         }
         const totalMs = Math.round(probes.reduce((sum, probe) => sum + probe.duration * 1000, 0));
-        if (totalMs < 2000) throw new AppError("invalid_request", "短视频组合实际时长不足 2 秒。", 400);
+        if (totalMs < minVideoDurationMs) throw new AppError("invalid_request", `短视频组合实际时长不足 ${minVideoDurationMs / 1000} 秒。`, 400);
         outputDurationMs = Math.min(durationMs, totalMs);
         const width = Math.ceil(probes[0].width / 2) * 2, height = Math.ceil(probes[0].height / 2) * 2;
         const filters = probes.flatMap((probe, i) => {
@@ -106,7 +108,7 @@ export async function prepareVideoClip(
         if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || !Number.isFinite(fps) || fps <= 0) {
           throw failure;
         }
-        // 已通过 2 秒候选门槛的视频若短于目标时段，直接使用原文件，不循环补齐。
+        // 已通过候选时长门槛的视频若短于目标时段，直接使用原文件，不循环补齐。
         if (sourceDuration * 1000 <= durationMs) return null;
         inputArgs = ["-ss", "0", "-i", source];
         outputArgs = ["-map", "0:v:0", "-map", "0:a:0?",

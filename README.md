@@ -423,7 +423,7 @@ v1 将当前完整 `description`、视频 `visualSegments` / `keyMoments` / `tim
 
 - `SEARCH_VECTOR_TOP_K` / `SEARCH_KEYWORD_TOP_K`：每路候选分块数，默认各 100。
 - `SEARCH_SEMANTIC_THRESHOLD`：原始余弦相似度下限，两个业务接口共用，默认 `0.5`，范围 `[-1,1]`；设为 `-1` 不限制。v2 使用策略文件中的 `semanticThreshold`，当前同为 `0.5`。
-- `SEGMENT_MATCH_CLIP_ENABLED`：默认 `true`。分段匹配命中长视频时，在原媒体 URL 上附带 `clip_ms`，首次下载截取素材开头 N 秒（N 为文本段时长）并缓存 MP4。设为 `false` 后独立视频使用原 URL，短片组合返回完整拼接视频。原视频达到 2 秒（含）即可直接参与匹配，不足 2 秒时可作为补充组合候选：各片段对当前文本的原始语义分数须大于 0.5，组合累计至少 2 秒，尽量贴近目标时长，否则放弃；图片固定生成 3 秒静态视频（URL 带 `still_ms=3000`，返回类型为 `video`），这两条规则不受裁剪开关影响。达到 2 秒但短于文本的视频不循环或拼接。下游原样使用 `matched_candidate_url`，请求和响应字段不变。
+- `SEGMENT_MATCH_CLIP_ENABLED`：默认 `true`。分段匹配命中长视频时，在原媒体 URL 上附带 `clip_ms`，首次下载截取素材开头 N 秒（N 为文本段时长）并缓存 MP4。设为 `false` 后独立视频使用原 URL，短片组合返回完整拼接视频。原视频达到 `SEGMENT_MATCH_MIN_VIDEO_DURATION_MS`（默认 `1000` 毫秒，含边界）即可直接参与匹配，低于该时长时可作为补充组合候选：各片段对当前文本的原始语义分数须大于 0.5，组合累计须达到同一时长门槛，尽量贴近目标时长，否则放弃；图片固定生成 3 秒静态视频（URL 带 `still_ms=3000`，返回类型为 `video`），这两条规则不受裁剪开关影响。达到配置门槛但短于文本的视频不循环或拼接。下游原样使用 `matched_candidate_url`，请求和响应字段不变。
 - `SEARCH_KEYWORD_THRESHOLD`：BM25 原始分数下限，默认 `0`，不限制关键词分数；最终仍受语义门槛约束。
 - `SEARCH_NUM_CANDIDATES`：向量近邻候选数，默认 200，不小于向量 Top-K。
 - `SEARCH_RRF_K`：RRF 常数，默认 60；语义 0.5、事件/物体/主题 0.25、人物/场景 0.25。

@@ -1320,7 +1320,7 @@ export interface DescriptionSearchResult {
 }
 
 export interface DescriptionSearchOptions extends RecallOptions {
-  /** 仅召回不足 2 秒且有效播放语义分数大于 0.5 的视频。 */
+  /** 仅召回低于配置的最小时长且有效播放语义分数大于 0.5 的视频。 */
   shortVideosOnly?: boolean;
   /** Internal target slot duration; images can fill a slot without this limit. */
   minDurationMs?: number;
@@ -1378,7 +1378,7 @@ export async function searchAssetsByDescriptionDetailed(
   if (options.minDurationMs !== undefined) conditions.push(or(eq(assets.mediaType, "image"),
     sql`${assets.segmentEndMs} >= ${assets.segmentStartMs} + ${options.minDurationMs}`)!);
   if (options.shortVideosOnly) conditions.push(eq(assets.mediaType, "video"),
-    sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + 2000`);
+    sql`${assets.segmentEndMs} > ${assets.segmentStartMs} AND ${assets.segmentEndMs} < ${assets.segmentStartMs} + ${loadConfig().SEGMENT_MATCH_MIN_VIDEO_DURATION_MS}`);
   const where = and(...conditions);
   const eligible = await db.select({ id: assets.id }).from(assets).where(where);
   const allowThemeMatch = options.allowThemeMatch && Boolean(options.candidateAssetIds?.length);

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { db } from "@/server/db";
 import { mediaObjects } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import { loadConfig } from "@/server/config";
 import { resolveMediaPath } from "@/server/media/storage";
 import { prepareVideoClip } from "@/server/media/video-clip";
 import { getAssetDetail, getAssetRecord } from "@/server/repositories/assets";
@@ -259,6 +260,7 @@ export async function mediaResponse(assetId: string, request: Request) {
   const params = new URL(request.url).searchParams;
   const clipMs = params.get("clip_ms");
   if (params.has("concat")) {
+    const minVideoDurationMs = loadConfig().SEGMENT_MATCH_MIN_VIDEO_DURATION_MS;
     let parts: Array<{ assetId: string; userId: string | null }>;
     try {
       parts = z.array(z.object({ assetId: z.string().uuid(), userId: userIdSchema.nullable() }).strict()).min(2).max(100)
@@ -274,9 +276,9 @@ export async function mediaResponse(assetId: string, request: Request) {
       const detail = await getAssetDetail(part.assetId, part.userId ? { userId: part.userId } : {});
       const durationMs = (detail.segmentEndMs ?? 0) - (detail.segmentStartMs ?? 0);
       const record = part.assetId === assetId ? asset : await getAssetRecord(part.assetId);
-      // 保留已下发组合 URL 对 2–3 秒成员的兼容；新匹配只组合不足 2 秒的素材。
+      // 保留旧组合中不足 3 秒的成员；新组合按配置限定成员时长。
       if (!record || record.deletedAt || record.reviewStatus === "deleted" || !mediaIsReady(record) ||
-        detail.mediaType !== "video" || durationMs <= 0 || durationMs >= 3000) {
+        detail.mediaType !== "video" || durationMs <= 0 || durationMs >= Math.max(3000, minVideoDurationMs)) {
         throw new AppError("invalid_request", "短视频组合中的素材已不可用。", 404);
       }
       const [stored] = part.assetId === assetId ? [object] : await db.select().from(mediaObjects)
@@ -285,7 +287,7 @@ export async function mediaResponse(assetId: string, request: Request) {
       objects.push(stored);
       totalMs += durationMs;
     }
-    if (totalMs < 2000) throw new AppError("invalid_request", "短视频组合时长不足 2 秒。", 400);
+    if (totalMs < minVideoDurationMs) throw new AppError("invalid_request", `短视频组合时长不足 ${minVideoDurationMs / 1000} 秒。`, 400);
     const clipped = await prepareVideoClip(objects.map(item => `${item.id}:${item.updatedAt.getTime()}`).join(","),
       clipMs === null ? totalMs : Number(clipMs), destination => downloadMediaObject(objects[0], destination), false,
       objects.slice(1).map(item => destination => downloadMediaObject(item, destination)));

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MySqlDialect } from "drizzle-orm/mysql-core";
 import {
   alignCompatibilitySegments,
   compatibilityCallbackFromJob,
@@ -120,8 +121,25 @@ describe("compatibility segment matching", () => {
     expect(() => loadTestConfig({ SEGMENT_MATCH_CLIP_ENABLED: "invalid" })).toThrow();
   });
 
+  it("defaults the video minimum to one second and validates overrides", () => {
+    expect(loadTestConfig({}).SEGMENT_MATCH_MIN_VIDEO_DURATION_MS).toBe(1000);
+    expect(loadTestConfig({ SEGMENT_MATCH_MIN_VIDEO_DURATION_MS: "1500" }).SEGMENT_MATCH_MIN_VIDEO_DURATION_MS).toBe(1500);
+    for (const value of ["0", "-1", "1.5", "invalid", ""]) {
+      expect(() => loadTestConfig({ SEGMENT_MATCH_MIN_VIDEO_DURATION_MS: value })).toThrow();
+    }
+  });
+
+  it.each([1000, 1500, 2000])("passes the configured %s ms minimum to regular recall", async minimum => {
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", String(minimum));
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({ items: [], threshold: 0, maxScore: null, reason: "no_candidates", message: null }));
+    await matchCompatibilitySegments(alignCompatibilitySegments(request()).slice(0, 1), "https://focus.example.test", {}, { search, getAsset: async () => null });
+    expect(search.mock.calls[0][2]?.minDurationMs).toBe(minimum);
+    expect(search.mock.calls[1][2]?.shortVideosOnly).toBe(true);
+  });
+
   it.each([
     { enabled: "true", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: "1480" },
+    { enabled: "true", mediaType: "video" as const, sourceMs: 1000, slotMs: 1480, clip: null },
     { enabled: "false", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: null },
     { enabled: "true", mediaType: "video" as const, sourceMs: 2000, slotMs: 1480, clip: "1480" },
     { enabled: "true", mediaType: "video" as const, sourceMs: 2467, slotMs: 1160, clip: "1160" },
@@ -151,8 +169,8 @@ describe("compatibility segment matching", () => {
     expect(url.searchParams.has("concat")).toBe(false);
     expect(url.searchParams.get("still_ms")).toBe(mediaType === "image" ? "3000" : null);
     expect(matched.matched_candidate_type).toBe("video");
-    // 原视频 2 秒门槛在 ES 召回和全局分配前应用，与文本时段长度、裁剪开关无关。
-    expect(search.mock.calls[0][2]).toMatchObject({ minDurationMs: 2000 });
+    // 默认 1 秒门槛在 ES 召回和全局分配前应用，与文本时段长度、裁剪开关无关。
+    expect(search.mock.calls[0][2]).toMatchObject({ minDurationMs: 1000 });
   });
 
   it("passes existing sentence context to recall while preserving segment text, timing and selection scope", async () => {
@@ -346,7 +364,7 @@ describe("compatibility segment matching", () => {
         semanticThreshold: 0.55,
         isRandom: false,
         excludedAssetIds: [],
-        minDurationMs: 2000,
+        minDurationMs: 1000,
         playbackDurationMs: 880,
       },
     );
@@ -448,6 +466,7 @@ describe("compatibility segment matching", () => {
   });
 
   it("uses raw similarity strictly above 0.5 for short videos, not high RRF or BM25 scores", async () => {
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "2000");
     const candidates = [
       { assetId: "pass", searchScore: 0.2, semanticSimilarity: 0.51, matchQuality: 0.57 },
       { assetId: "weak-scene", searchScore: 1, semanticSimilarity: 0.51, matchQuality: 0.49 },
@@ -468,8 +487,21 @@ describe("compatibility segment matching", () => {
     } finally { vi.restoreAllMocks(); }
   });
 
+  it.each([1000, 1500, 2000])("uses the configured %s ms boundary in the short-video database filter", async minimum => {
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", String(minimum));
+    databaseRows.mockResolvedValue([]);
+    vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
+    try {
+      await searchAssetsByDescriptionDetailed({ description: "AI", limit: 10 }, {}, { shortVideosOnly: true });
+      const query = new MySqlDialect().sqlToQuery(databaseRows.mock.calls.at(-1)![0]);
+      expect(query.sql).toMatch(/segment_end_ms.*<.*segment_start_ms.*\+/);
+      expect(query.params).toContain(minimum);
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it.each(["true", "false"])("returns one combined video URL with unchanged fields and clipping=%s", async enabled => {
     vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", enabled);
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "2000");
     const parts = [candidate(), { ...candidate(), id: "00000000-0000-4000-8000-000000000002" }];
     const segment = { ...alignCompatibilitySegments(request())[0], start_time: 6.12, end_time: 7.6 };
     const [result] = await matchCompatibilitySegments([segment], "https://focus.example.test", { isRandom: false }, {
@@ -487,6 +519,7 @@ describe("compatibility segment matching", () => {
   });
 
   it("lets a stronger short combination replace a regular match even when every segment is covered", async () => {
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "2000");
     const regular = candidate();
     const parts = [2, 3].map(i => {
       const id = `00000000-0000-4000-8000-00000000000${i}`;
@@ -639,7 +672,7 @@ describe("compatibility segment matching", () => {
         excludedAssetIds: [],
         semanticThreshold: 0.55,
         isRandom: false,
-        minDurationMs: 2000,
+        minDurationMs: 1000,
         playbackDurationMs: 880,
       },
     );

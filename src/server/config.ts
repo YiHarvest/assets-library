@@ -194,6 +194,7 @@ const envSchema = z
     SEARCH_KEYWORD_TOP_K: z.coerce.number().int().min(1).max(1000).default(100),
     SEARCH_SEMANTIC_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.5),
     SEGMENT_MATCH_CLIP_ENABLED: booleanSchema.default(true),
+    SEGMENT_MATCH_MIN_VIDEO_DURATION_MS: z.coerce.number().int().positive().default(1000),
     SEARCH_KEYWORD_THRESHOLD: z.coerce.number().min(0).default(0),
     SEARCH_NUM_CANDIDATES: z.coerce.number().int().min(1).max(10000).default(200),
     SEARCH_RRF_K: z.coerce.number().int().positive().default(60),

@@ -5,6 +5,10 @@ import { manifest, source, tokenizer } from "../helpers/recall";
 import { parseSearchManifest } from "@/server/search/v2/manifest";
 
 describe("v2 searchable asset document", () => {
+  it("turns unusable footage into a tombstone without embedding or lexical content", () => {
+    const doc = buildSearchDocument({ ...source, description: "画面全黑，没有任何可见内容。" }, 2, manifest, tokenizer);
+    expect(doc).toMatchObject({ assetId: source.id, deleted: true, chunks: [], name: "", modelTags: [], humanTags: [] });
+  });
   it("builds a real legacy-chunk ablation with trim-only text and no splitting while preserving independent metadata", () => {
     const legacy = parseSearchManifest({ ...manifest, buildId: "legacy-ablation", physicalIndex: "test_recall_v2_legacy",
       chunker: { ...manifest.chunker, version: "legacy-v1", maxTokens: 8192, overlapTokens: 0 },

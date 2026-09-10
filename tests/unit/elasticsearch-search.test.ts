@@ -29,6 +29,14 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
+  it("removes stale invalid documents without requesting an embedding", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => json({ deleted: 2 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await indexAsset({ ...asset, analysis: { ...asset.analysis!, description: "画面全黑，没有任何可见的视觉内容。" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("_delete_by_query");
+  });
+
   it("allows a selected visual metaphor with confident local context and scene evidence while favoring direct matches", () => {
     const focus = [{ ...chunk("digital-face:1"), score: 0.35 }, { ...chunk("AI-ui:1"), score: 0.72 }];
     const context = [{ ...chunk("digital-face:1"), score: 0.65, evidence: { kind: "point" as const, startMs: 200 } },
@@ -95,7 +103,7 @@ describe("ES asset recall", () => {
     const hits = [{ ...chunk("black:1"), score: 0.8 }];
     const sceneHits = [{ ...chunk("black:0"), score: 0.8, content: "视频全程为黑屏画面，无任何可见视觉内容。" }];
     expect(fuseResults(hits, [], 60, [], 0.5, { sceneHits, query: "丝毫全是自己" })).toEqual([]);
-    expect(fuseResults(hits, [], 60, [], 0.5, { sceneHits, query: "黑屏过渡" })).toHaveLength(1);
+    expect(fuseResults(hits, [], 60, [], 0.5, { sceneHits, query: "黑屏过渡" })).toEqual([]);
   });
   it("rejects a weak UI match without scene support while retaining semantic scene matches", () => {
     const result = fuseResults([

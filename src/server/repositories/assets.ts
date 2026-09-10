@@ -34,6 +34,7 @@ import {
   users,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import { unusableVisualReason } from "@/server/media/material-quality";
 import {
   canClaimAnalyzeTask,
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
@@ -1205,8 +1206,9 @@ function candidateScores(candidate: SearchCandidate) {
 
 /** MySQL 先限定权限和结构化过滤，两路 ES 召回使用完全相同的候选范围。 */
 async function recallWithinDatabaseScope(query: string, eligibleIds: string[], where: SQL | undefined, exactTags: ExactTagFilter[] = [], context?: string, options?: RecallOptions) {
-  if (loadConfig().SEARCH_RECALL_ENGINE !== "v2") return options ? searchAssets(query, eligibleIds, undefined, context, options) : searchAssets(query, eligibleIds, undefined, context);
-  return searchAssets(query, eligibleIds, async (candidateIds) => {
+  const candidates = loadConfig().SEARCH_RECALL_ENGINE !== "v2"
+    ? await (options ? searchAssets(query, eligibleIds, undefined, context, options) : searchAssets(query, eligibleIds, undefined, context))
+    : await searchAssets(query, eligibleIds, async (candidateIds) => {
     if (!candidateIds.length) return [];
     // Re-read exact tag membership as well as mutable scope/review/deletion fields.
     const currentTagIds = exactTags.length ? await assetIdsMatchingExactTags(exactTags) : null;
@@ -1214,6 +1216,15 @@ async function recallWithinDatabaseScope(query: string, eligibleIds: string[], w
       currentTagIds ? currentTagIds.size ? inArray(assets.id, [...currentTagIds]) : sql`false` : undefined));
     return rows.map((row) => row.id);
   }, context, options);
+  if (!candidates.length) return candidates;
+  // 存量坏素材和尚未更新的 ES 文档也必须经过当前分析结果校验。
+  const rows = await db.select({ id: assets.id, description: assets.description,
+    analysisDescription: sql<string | null>`JSON_UNQUOTE(JSON_EXTRACT(${analysisResults.resultJson}, '$.description'))`,
+  }).from(assets).leftJoin(analysisResults, eq(analysisResults.assetId, assets.id))
+    .where(and(where, eq(assets.processingStatus, "completed"), inArray(assets.id, candidates.map(item => item.assetId))));
+  const usable = new Set(rows.filter(row => !unusableVisualReason(row.description ?? "") &&
+    !unusableVisualReason(row.analysisDescription ?? "")).map(row => row.id));
+  return candidates.filter(candidate => usable.has(candidate.assetId));
 }
 
 export async function queryAssetsPage({
@@ -1366,6 +1377,7 @@ export async function searchAssetsByDescriptionDetailed(
 ): Promise<DescriptionSearchResult> {
   const conditions: SQL[] = [
     inArray(assets.reviewStatus, ["pending_review", "published"]),
+    eq(assets.processingStatus, "completed"),
     isNull(assets.deletedAt),
   ];
   const ownership = scopeCondition(scope);

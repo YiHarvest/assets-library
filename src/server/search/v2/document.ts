@@ -1,11 +1,14 @@
 import { canonicalJson, compareText, fingerprint, normalizeSearchText } from "./fingerprint";
 import { buildSearchChunks } from "./chunks";
 import type { SearchAssetSource, SearchBuildManifest, SearchDocument, TextTokenizer } from "./types";
+import { unusableVisualReason } from "@/server/media/material-quality";
 
 /** Pure construction from a consistent source snapshot; no media IO or model calls. */
 export function buildSearchDocument(
   source: SearchAssetSource, sourceRevision: number, manifest: SearchBuildManifest, tokenizer: TextTokenizer,
 ): SearchDocument {
+  if (unusableVisualReason(source.description) || unusableVisualReason(source.analysis?.description ?? ""))
+    return buildDeletionDocument(source.id, sourceRevision, manifest);
   const chunks = buildSearchChunks(source, manifest, tokenizer);
   const tagRefs = [...new Map(source.tags.map((tag) => {
     const value = { category: normalizeSearchText(tag.category), value: normalizeSearchText(tag.value), source: tag.source ?? "model" };

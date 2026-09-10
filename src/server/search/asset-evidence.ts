@@ -1,4 +1,5 @@
 import type { AssetDetail } from "@/shared/contracts";
+import { unusableVisualReason } from "@/server/media/material-quality";
 
 export interface PlaybackEvidence {
   kind: "point" | "range" | "static" | "unknown" | "summary";
@@ -28,7 +29,8 @@ export function assetEvidence(asset: Pick<AssetDetail, "description" | "analysis
       timed.push({ content: item.summary.trim(), kind: "point", startMs: Math.round(item.seconds * 1000), endMs: Math.round(item.seconds * 1000) });
     }
   }
-  const chunks = [
+  const unusable = unusableVisualReason(asset.description) || unusableVisualReason(analysis?.description ?? "");
+  const chunks = unusable ? [] : [
     ...(asset.description.trim() ? [{ content: asset.description.trim(), kind: analysis?.kind === "image" ? "static" as const : timed.length ? "summary" as const : "unknown" as const }] : []),
     ...timed,
   ];
@@ -37,13 +39,4 @@ export function assetEvidence(asset: Pick<AssetDetail, "description" | "analysis
       value && !["城市风貌", "建筑", "科技", "财经", "社会场景", "无人物"].includes(value)))],
   ]));
   return { chunks: [...new Map(chunks.map(chunk => [JSON.stringify(chunk), chunk])).values()], facets };
-}
-
-/** 空白画面和测试信号只服务于明确寻找这类画面的查询。 */
-export function permitsVisualMatch(content: string, query: string) {
-  if (/(?:纯黑|全黑|黑屏|纯白|全白|白屏)/u.test(content) && /(?:无|没有)(?:任何)?(?:可见)?(?:视觉)?(?:内容|元素|物体|细节|信息)|全程(?:为|是)(?:黑屏|白屏|纯黑|纯白)/u.test(content))
-    return /(?:黑屏|白屏|纯黑|纯白|黑色背景|白色背景|空白画面)/u.test(query);
-  if (/^(?:标准)?(?:电视)?测试卡|^(?:电视)?测试信号/u.test(content))
-    return /(?:测试卡|测试信号|彩条|信号校准)/u.test(query);
-  return true;
 }

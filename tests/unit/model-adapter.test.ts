@@ -1154,7 +1154,7 @@ describe("model adapter", () => {
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   });
 
-  it.each(["画面全黑，没有人物或可见文字。", "灰色墙面前的空椅子，没有人物。"])(
+  it.each(["纯黑背景上有白色文字。", "灰色墙面前的空椅子，没有人物。"])(
     "keeps simple but concrete visual descriptions: %s", async description => {
       const { root, input } = await createImageFixture("asset-simple-scene-");
       try {
@@ -1165,6 +1165,24 @@ describe("model adapter", () => {
       } finally { await fs.rm(root, { recursive: true, force: true }); }
     },
   );
+
+  it.each([
+    { description: "视频画面呈现为全黑状态，没有任何可见的视觉内容、人物或场景细节。" },
+    { description: "无规则闪烁的色块，无法辨认内容。", usable: false, rejectionReason: "只有无意义噪声" },
+  ])("rejects unusable footage without repair or model failover", async fields => {
+    const { root, input } = await createVideoFixture("asset-unusable-", 3);
+    try {
+      const config = loadConfig({ MEDIA_ROOT: root, VLM_BASE_URL: modelBaseUrl,
+        VLM_NAME: "primary-model", VLM_FALLBACK_NAMES: "fallback-model" });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        chatContentResponse(JSON.stringify({ ...videoAnalysis, ...fields })),
+      );
+      await expect(new OpenAICompatibleAnalyzer(config).analyze(input)).rejects.toMatchObject({
+        code: "invalid_request", details: { reason: "unusable_visual_content" },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
 
   it("corrects a concrete description with invalid labels before falling back", async () => {
     const { root, input } = await createImageFixture("asset-failover-format-");

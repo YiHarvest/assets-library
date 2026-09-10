@@ -7,6 +7,7 @@ import {
   type ModelTarget,
 } from "@/server/config";
 import { AppError } from "@/server/errors";
+import { UnusableMaterialError, unusableVisualReason } from "@/server/media/material-quality";
 import { auditLog } from "@/server/observability/audit-log";
 import {
   readVideoFrameSet,
@@ -135,6 +136,8 @@ class ModelTargetRequestLimiter {
 
 const imageShape = `{
   "kind":"image",
+  "usable":true,
+  "rejectionReason":null,
   "primaryCategory":"城市风貌|建筑|科技|财经|社会场景",
   "description":"string",
   "tags":{"scene":["string"],"object":["string"],"person":["string"],"style":["string"],"color_composition":["string"]},
@@ -143,6 +146,8 @@ const imageShape = `{
 
 const videoShape = `{
   "kind":"video",
+  "usable":true,
+  "rejectionReason":null,
   "primaryCategory":"城市风貌|建筑|科技|财经|社会场景",
   "description":"string",
   "topics":["string"],
@@ -164,6 +169,7 @@ function promptFor(mediaType: MediaType, durationSeconds: number | null) {
       : "识别画面与可见文字；无法识别 OCR 时提供 unavailableReason。ocr.text 只摘录关键可见文字，最多 600 字；表格或密集文本不要逐行完整转写，超出时截断。";
   return [
     "你是素材库分析器。描述、topics 和所有标签值必须以简体中文为主。",
+    "先判断整条素材是否有可用视觉内容：全程黑屏、白屏或无内容的纯色画面、纯噪声、测试信号、完全遮挡或严重模糊到无法辨认任何场景、物体或文字时，usable=false，rejectionReason 写明原因，不要编造主题和标签。其他情况 usable=true，rejectionReason=null。无人空镜、夜景、黑色背景、剪影、数字人、抽象动画和有文字的画面可以有效；局部黑屏或片头片尾过渡不能判定整条素材无效。",
     "分析结果用于短视频文案逐段匹配画面。保留可复用的视觉事实与关键技术名称；topics 优先提炼画面直接支持的主题、活动和功能，人物标签保留可见的人数与大致年龄段。不针对某篇文案编造用途，不为凑数补标签。",
     "description 首句概括画面的具体主题：什么场景、谁在做什么、软件或产品的用途；后续再补充细节。对画面明确支持的技术和功能写出常用中文名称并保留关键专有名词，不要只描述屏幕、界面和操作步骤。只描述可见事实，不推断亲属关系、商业效果或抽象寓意。",
     "每个标签值必须至少包含一个中文汉字；禁止英文标签、拼音和 snake_case。JSON 字段名与标签分类键保持结构中规定的英文。",
@@ -197,6 +203,7 @@ function repairPromptFor(
 ) {
   return [
     "下面是一次素材分析的无效输出。只修复 JSON 结构、一级分类、中文规则和规定数量，不需要也不得重新分析图片。",
+    "保留原输出的 usable 与 rejectionReason 判断，不得把无效素材改成可用素材。",
     `修复原因：${correction}`,
     `必须严格符合此结构：${mediaType === "image" ? imageShape : videoShape}`,
     `必须输出 primaryCategory 字段，取值为五个一级分类词之一，逐字一致：${PRIMARY_TAG_CATEGORIES.join("、")}。`,
@@ -527,6 +534,11 @@ const genericAnalysisPattern =
 
 function parseAnalysisText(text: string, durationSeconds: number | null) {
   const payload = JSON.parse(stripCodeFence(text));
+  const unusable = typeof payload?.description === "string" ? unusableVisualReason(payload.description) : null;
+  if (payload?.usable === false || unusable) {
+    throw new UnusableMaterialError(unusable || (typeof payload.rejectionReason === "string"
+      ? payload.rejectionReason.trim().slice(0, 200) : "") || "没有可用视觉内容。");
+  }
   // 没有具体画面描述时，纯文本修复无法补出视觉事实，必须重新看图。
   if (typeof payload?.description !== "string" || !payload.description.trim() ||
       genericAnalysisPattern.test(payload.description.trim()) ||
@@ -791,6 +803,8 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         try {
           return parseAnalysisText(text, media.durationSeconds);
         } catch (error) {
+          // 内容拒绝不能走 JSON 修复或候选模型兜底，否则坏素材可能被改写成正常描述。
+          if (error instanceof UnusableMaterialError) throw error;
           auditLog(
             "vlm_response_parse_failed",
             {

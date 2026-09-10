@@ -2,7 +2,8 @@ import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import type { AssetDetail } from "@/shared/contracts";
 import { searchWithV2 } from "./v2/facade";
-import { assetEvidence, evidenceInWindow, permitsVisualMatch, type PlaybackEvidence } from "./asset-evidence";
+import { assetEvidence, evidenceInWindow, type PlaybackEvidence } from "./asset-evidence";
+import { unusableVisualReason } from "@/server/media/material-quality";
 
 export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean; allowThemeMatch?: boolean }
 
@@ -194,7 +195,7 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   const semanticFloor = Math.max(threshold, ...[...scenes.values()].map(hit => (hit.score ?? threshold) - 0.1));
   const candidates = new Map<string, SearchCandidate>();
   for (const assetId of new Set([...focus.keys(), ...context.keys()])) {
-    if (options.query !== undefined && !permitsVisualMatch(scenes.get(assetId)?.content ?? focus.get(assetId)?.content ?? "", options.query)) continue;
+    if (unusableVisualReason(scenes.get(assetId)?.content ?? focus.get(assetId)?.content ?? "")) continue;
     const semanticSimilarity = focus.get(assetId)?.score, contextSimilarity = context.get(assetId)?.score;
     if (options.contextRequired && (contextSimilarity ?? -1) < threshold) continue;
     if (Math.max(semanticSimilarity ?? -1, contextSimilarity ?? -1) < threshold &&

@@ -16,6 +16,7 @@ import {
   vi,
 } from "vitest";
 import type { MultimodalAnalyzer } from "@/server/model/analyzer";
+import { UnusableMaterialError } from "@/server/media/material-quality";
 import type {
   ObjectByteRange,
   ObjectStorage,
@@ -438,6 +439,32 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     await expect(
       fs.stat(path.join(process.env.MEDIA_ROOT!, ".staging", taskId)),
     ).rejects.toThrow();
+  }, 30_000);
+
+  test.each(["vlm", "legacy-description"])("不合格素材拒绝入库，公私副本同时隐藏且不生成标签或向量：%s", async mode => {
+    const image = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#000000" } }).png().toBuffer();
+    if (mode === "vlm") analyzeMock.mockRejectedValueOnce(new UnusableMaterialError("全程黑屏，没有可用视觉内容。"));
+    else analyzeMock.mockResolvedValueOnce({
+      result: { kind: "image", description: "视频画面呈现为全黑状态，没有任何可见的视觉内容、人物或场景细节，表现为无信号或黑屏。",
+        tags: { scene: ["社会场景"], object: [], person: [], style: [], color_composition: [] },
+        ocr: { text: null, unavailableReason: "无文字" } },
+      model: { protocol: "openai_chat_completions", name: "legacy-vlm" },
+    });
+    const { service, taskId } = await createAndSeal("black.png", image);
+    await processUntilIdle();
+    expect(await service.getTask(taskId)).toMatchObject({ status: "failed", phase: "finished", failed_items: 1, done_items: 0 });
+    for (const table of [schema.publicAssets, schema.privateAssets]) {
+      const rows = await database.db.select().from(table);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ processingStatus: "failed", reviewStatus: "deleted", deletedAt: expect.any(Date),
+        failureCode: "invalid_request", failureMessage: expect.stringContaining("素材不合格") });
+      await expect(repository.getAssetDetail(rows[0].id)).rejects.toThrow();
+    }
+    expect(await database.db.select().from(schema.analysisResults)).toEqual([]);
+    expect(await database.db.select().from(schema.assetTags)).toEqual([]);
+    expect(await database.db.select().from(schema.jobs).where(eq(schema.jobs.type, "embed"))).toEqual([]);
+    expect(indexAssetMock).not.toHaveBeenCalled();
+    expect(analyzeMock).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   test("索引失败保留分析结果，重试、编辑和存量重建复用同一索引任务", async () => {

@@ -18,6 +18,7 @@ import {
   tasks,
 } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
+import { UnusableMaterialError, unusableVisualReason } from "@/server/media/material-quality";
 import {
   analysisRelativePath,
   readVideoFrames,
@@ -219,6 +220,8 @@ function updateProcessingAsset(
     description?: string;
     failureCode?: string | null;
     failureMessage?: string | null;
+    reviewStatus?: "deleted";
+    deletedAt?: Date;
     updatedAt: Date;
   },
 ) {
@@ -275,6 +278,8 @@ async function persistAnalysis(
   protocol: string,
   modelName: string,
 ) {
+  const unusable = unusableVisualReason(result.description);
+  if (unusable) throw new UnusableMaterialError(unusable);
   if (!job.assetId) return false;
   const asset = await analysisAsset(job);
   if (!asset || asset.deletedAt || asset.reviewStatus === "deleted") return true;
@@ -394,6 +399,7 @@ async function failJobAndMarkAsset(job: ClaimedJob, error: unknown) {
           processingStatus: "failed",
           failureCode: appError.code satisfies FailureCode,
           failureMessage: appError.message,
+          ...(error instanceof UnusableMaterialError ? { reviewStatus: "deleted" as const, deletedAt: now } : {}),
           updatedAt: now,
         }),
       ),

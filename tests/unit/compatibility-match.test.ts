@@ -16,7 +16,7 @@ import { loadTestConfig } from "../helpers/config";
 
 const databaseRows = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db", () => ({
-  db: { select: () => ({ from: () => ({ where: databaseRows,
+  db: { select: () => ({ from: () => ({ where: databaseRows, leftJoin: () => ({ where: databaseRows }),
     innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
   }) }) },
 }));
@@ -465,6 +465,23 @@ describe("compatibility segment matching", () => {
     } finally { vi.restoreAllMocks(); }
   });
 
+  it.each(["v1", "v2"])("rejects a stale black candidate using the current analysis even after its description is edited: %s", async engine => {
+    vi.stubEnv("SEARCH_RECALL_ENGINE", engine);
+    databaseRows.mockResolvedValueOnce([{ id: "black" }]).mockResolvedValueOnce([
+      { id: "black", description: "人工智能画面", analysisDescription: "视频画面呈现为全黑状态，没有任何可见的视觉内容。" },
+    ]);
+    const search = vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([
+      { assetId: "black", semanticSimilarity: 0.9, matchQuality: 0.9, searchScore: 1 },
+    ]);
+    try {
+      const result = await searchAssetsByDescriptionDetailed({ description: "AI", limit: 10 }, {}, {});
+      expect(search).toHaveBeenCalledOnce();
+      expect(result.items).toEqual([]);
+      const query = new MySqlDialect().sqlToQuery(databaseRows.mock.calls.at(-1)![0]);
+      expect(query.params).toContain("completed");
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it("uses raw similarity strictly above 0.5 for short videos, not high RRF or BM25 scores", async () => {
     vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "2000");
     const candidates = [
@@ -475,6 +492,7 @@ describe("compatibility segment matching", () => {
       { assetId: "keyword", searchScore: 1 },
     ];
     databaseRows.mockResolvedValueOnce(candidates.map(candidate => ({ id: candidate.assetId })))
+      .mockResolvedValueOnce(candidates.map(candidate => ({ id: candidate.assetId })))
       .mockResolvedValueOnce([{ ...candidate(), id: "pass", createdAt: new Date(), updatedAt: new Date(), segmentStartMs: 2000, segmentEndMs: 3600 }]);
     vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue(candidates);
     try {

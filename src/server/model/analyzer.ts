@@ -369,13 +369,14 @@ function asStringArray(value: unknown) {
 }
 
 /**
- * Chat Completions 协议的 thinking 参数。除标准 enable_thinking 外同时下发
- * chat_template_kwargs（vLLM / llama.cpp 类网关对其生效），否则部分推理模型
- *（如 Qwythos）会忽略顶层开关而把所有 token 消耗在 reasoning_content 上，
- * 导致 content 为空、JSON 解析失败。
+ * DeepSeek 使用 thinking.type；其他模型保留 enable_thinking 和
+ * chat_template_kwargs，兼容 vLLM / llama.cpp 网关。
  */
 function chatThinkingOptions(model: ConfiguredModelTarget) {
   const enableThinking = model.requestOptions.enableThinking;
+  if (enableThinking !== null && /^deepseek-/i.test(model.name)) {
+    return { thinking: { type: enableThinking ? "enabled" : "disabled" } };
+  }
   return enableThinking === null
     ? {}
     : {

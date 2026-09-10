@@ -1279,6 +1279,42 @@ describe("model adapter", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it("uses DeepSeek thinking options for analysis and repair, and gateway options for fallback", async () => {
+    const { root, input } = await createVideoFixture("asset-deepseek-thinking-", 3);
+    try {
+      const config = loadConfig({
+        MEDIA_ROOT: root,
+        VLM_BASE_URL: "https://api.deepseek.com",
+        VLM_NAME: "deepseek-v4-flash-vision-exp",
+        VLM_FALLBACK_BASE_URL: "https://vision.example/v1",
+        VLM_FALLBACK_NAMES: "kimi-k2.5",
+        VLM_ENABLE_THINKING: "false",
+      });
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(chatContentResponse("invalid JSON"))
+        .mockResolvedValueOnce(chatContentResponse("invalid JSON"))
+        .mockResolvedValueOnce(chatContentResponse(JSON.stringify(videoAnalysis)));
+
+      const outcome = await new OpenAICompatibleAnalyzer(config).analyze(input);
+
+      expect(outcome.model.name).toBe("kimi-k2.5");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const bodies = fetchMock.mock.calls.map(call => JSON.parse(String(call[1]?.body)));
+      for (const body of bodies.slice(0, 2)) {
+        expect(body).toMatchObject({ model: "deepseek-v4-flash-vision-exp", thinking: { type: "disabled" } });
+        expect(body).not.toHaveProperty("enable_thinking");
+        expect(body).not.toHaveProperty("chat_template_kwargs");
+      }
+      expect(bodies[2]).toMatchObject({
+        model: "kimi-k2.5", enable_thinking: false,
+        chat_template_kwargs: { enable_thinking: false },
+      });
+      expect(bodies[2]).not.toHaveProperty("thinking");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("disables thinking through chat_template_kwargs for llama.cpp-hosted models", async () => {
     const { root, input } = await createImageFixture("asset-thinking-kwargs-");
     const config = loadConfig({

@@ -66,6 +66,22 @@ describe("structured audit logging", () => {
     });
   });
 
+  it("preserves wrapped error stacks and driver causes in the emitted trace", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const cause = Object.assign(new Error("Deadlock found"), { code: "ER_LOCK_DEADLOCK" });
+    cause.stack = "Error: Deadlock found\n    at execute (mysql.ts:20:4)";
+    const error = new Error("Failed query", { cause });
+    error.stack = "Error: Failed query\n    at persistAnalysis (processing.ts:310:7)";
+    auditLog("worker_analysis_failed", errorAuditFields(error), "error");
+    expect(JSON.parse(String(log.mock.calls[0][0]))).toMatchObject({
+      error_code: "ER_LOCK_DEADLOCK",
+      error_message: "Failed query",
+      error_cause: "Deadlock found",
+      error_stack: ["    at persistAnalysis (processing.ts:310:7)"],
+      error_cause_stack: ["    at execute (mysql.ts:20:4)"],
+    });
+  });
+
   it("keeps each concurrent request's input, repeated query values and streamed output together", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     await Promise.all(["one", "two"].map(async (name) => {

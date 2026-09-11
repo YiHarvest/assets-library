@@ -566,10 +566,13 @@ async function processAnalysisJob(
     return;
   }
   let workspace: string | null = null;
+  const started = process.hrtime.bigint();
+  let stage = "hydrate_media";
   try {
     const hydrated = await hydratedAsset(record, job, storage);
     const asset = hydrated.asset;
     workspace = hydrated.workspace;
+    stage = "validate_media";
     const validationAdvance = await advanceJobAssetStatus(job, record, "validating");
     if (validationAdvance === "lease_lost") return;
     if (validationAdvance === "asset_unavailable") {
@@ -579,6 +582,7 @@ async function processAnalysisJob(
     const prepared = hydrated.precomputedFrames
       ? { mimeType: asset.mimeType, sizeBytes: asset.sizeBytes }
       : await mediaPreparer(asset);
+    stage = "persist_media_metadata";
     await db.transaction(async (tx) => {
       await Promise.all(
         (await activeAnalysisRefs(tx, job, record)).map((ref) =>
@@ -591,20 +595,24 @@ async function processAnalysisJob(
       );
     });
     if (asset.mediaType === "video" && !hydrated.precomputedFrames) {
+      stage = "prepare_frames";
       await videoFramePreparer(asset);
     }
+    stage = "mark_analyzing";
     const analysisAdvance = await advanceJobAssetStatus(job, record, "analyzing");
     if (analysisAdvance === "lease_lost") return;
     if (analysisAdvance === "asset_unavailable") {
       await stopUnavailableAnalysis(job);
       return;
     }
+    stage = "analyze";
     const outcome = await analyzer.analyze({
       assetId: asset.id,
       mediaType: asset.mediaType,
       mimeType: prepared.mimeType,
       relativePath: asset.originalPath,
     });
+    stage = "persist_analysis";
     if (
       await persistAnalysis(
         job,
@@ -613,9 +621,18 @@ async function processAnalysisJob(
         outcome.model.name,
       )
     ) {
+      stage = "finish_task";
       await finishAnalysisLifecycle(job);
     }
   } catch (error) {
+    // Log the original exception before the public failure is normalized.
+    auditLog("worker_analysis_failed", {
+      task_id: job.taskId, job_id: job.id, asset_id: job.assetId, item_id: record.taskItemId,
+      attempt: job.attempt, stage, filename: record.originalFilename,
+      segment_duration_ms: record.segmentStartMs != null && record.segmentEndMs != null
+        ? record.segmentEndMs - record.segmentStartMs : null,
+      duration_ms: elapsedMilliseconds(started), ...errorAuditFields(error),
+    }, error instanceof UnusableMaterialError ? "warn" : "error");
     if (await failJobAndMarkAsset(job, error)) {
       await finishAnalysisLifecycle(job, error);
     }

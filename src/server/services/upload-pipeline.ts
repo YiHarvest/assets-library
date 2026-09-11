@@ -45,6 +45,7 @@ import {
 import type { ObjectStorage, StoredObject } from "@/server/storage/object-storage";
 import { createZosObjectStorage } from "@/server/storage/zos";
 import { loadConfig, type AppConfig } from "@/server/config";
+import { auditLog, elapsedMilliseconds, errorAuditFields } from "@/server/observability/audit-log";
 
 interface UploadContext {
   task: typeof tasks.$inferSelect;
@@ -622,6 +623,8 @@ export async function processValidateJob(
   dependencies: UploadPipelineDependencies = defaultDependencies(),
 ) {
   let context: UploadContext | undefined;
+  const started = process.hrtime.bigint();
+  let stage = "load_upload";
   try {
     context = await uploadContext(job);
     if (await alreadyPersisted(context.item.id)) {
@@ -631,19 +634,28 @@ export async function processValidateJob(
       return;
     }
     await markTaskItemRunning(context.task.id, context.item.id, "validating");
+    stage = "validate_media";
     const validated = await validateMediaFile(
       stagingPath(context, dependencies),
       context.item.filename,
     );
     if (validated.mediaType === "image") {
+      stage = "persist_image";
       await processImage(job, context, validated, dependencies);
     } else {
+      stage = "split_and_persist_video";
       await processVideo(job, context, dependencies);
     }
     await removeStagingFile(stagingPath(context, dependencies)).catch((error) => {
       console.error("持久化成功，但本地 staging 文件清理失败。", error);
     });
   } catch (error) {
+    auditLog("worker_upload_failed", {
+      task_id: job.taskId, job_id: job.id,
+      item_id: context?.item.id ?? job.payload?.taskItemId,
+      filename: context?.item.filename, attempt: job.attempt, stage,
+      duration_ms: elapsedMilliseconds(started), ...errorAuditFields(error),
+    }, "error");
     await failJob(job);
     const failedItemId = context?.item.id ??
       (typeof job.payload?.taskItemId === "string"

@@ -90,8 +90,11 @@ export function errorAuditFields(error: unknown) {
         ? candidate.$metadata.requestId
         : null,
     error_message: truncate(error.message),
+    error_stack: error.stack?.split("\n").filter(line => /^\s+at /.test(line)).slice(0, 8) ?? null,
     error_cause:
       typeof cause?.message === "string" ? truncate(cause.message) : null,
+    error_cause_stack: candidate.cause instanceof Error
+      ? candidate.cause.stack?.split("\n").filter(line => /^\s+at /.test(line)).slice(0, 8) ?? null : null,
     error_details: safeValue(candidate.details, "details"),
   };
 }

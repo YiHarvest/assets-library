@@ -387,7 +387,7 @@ mysqlTest("MySQL 数据层", () => {
          FROM information_schema.tables
         WHERE table_schema = DATABASE()
           AND table_type = 'BASE TABLE'
-          AND table_name NOT IN ('__drizzle_migrations', 'assets')
+          AND table_name NOT IN ('__drizzle_migrations', 'legacy_asset_migration_state', 'assets')
         ORDER BY table_name`,
     );
     expect(tableRows.map((row) => row.tableName)).toEqual(applicationTables);
@@ -403,7 +403,15 @@ mysqlTest("MySQL 数据层", () => {
             OR (table_name = 'video_sources' AND column_name = 'media_object_id')
           )`,
     );
-    expect(legacyColumnRows).toEqual([]);
+    // migration 0007 保留旧关联列，供启动时迁移历史素材使用。
+    expect(legacyColumnRows.map((row) => `${row.tableName}.${row.columnName}`).sort()).toEqual([
+      "analysis_results.asset_id",
+      "asset_tag_rejections.asset_id",
+      "asset_tags.asset_id",
+      "jobs.asset_id",
+      "search_index_state.asset_id",
+      "video_sources.media_object_id",
+    ]);
 
     const [viewRows] = await migrationConnection.pool.query<
       Array<RowDataPacket & { tableName: string }>
@@ -952,7 +960,7 @@ mysqlTest("MySQL 数据层", () => {
       if (userId) {
         await migrationConnection.db
           .update(privateAssets)
-          .set({ processingStatus: "completed" })
+          .set({ processingStatus: "completed", reviewStatus: "published" })
           .where(eq(privateAssets.id, assetId));
       } else {
         await migrationConnection.db
@@ -1585,8 +1593,8 @@ mysqlTest("MySQL 数据层", () => {
     const queuedPublish = await repository.createMutationTask({
       type: "publish",
       assetId,
-      userId: "publish-requester",
-      payload: { userId: "publish-requester" },
+      userId: null,
+      payload: { userId: null },
     });
     const [initialPublishJob] = await migrationConnection.db
       .select({
@@ -1902,7 +1910,9 @@ mysqlTest("MySQL 数据层", () => {
     expect((await repository.queryAssetsPage({ ...options, page: 999 })).items).toEqual([]);
     const single = await repository.queryAssetsPage({ ...options, semanticQuery: "海边小船" });
     expect(single.totalPages).toBe(1);
-    expect(searchAssetsMock).toHaveBeenLastCalledWith("海边小船 不要求标签中出现的查询词", expect.any(Array));
+    expect(searchAssetsMock).toHaveBeenLastCalledWith(
+      "海边小船 不要求标签中出现的查询词", expect.any(Array), undefined, undefined, { keywordSearch: true },
+    );
     const personal = await repository.queryAssetsPage({ ...options, userId: "user-a" });
     expect(personal.items.map((item) => item.id)).toEqual([privateId]);
     expect(searchAssetsMock.mock.lastCall?.[1]).toEqual([privateId]);
@@ -1922,7 +1932,7 @@ mysqlTest("MySQL 数据层", () => {
       { description: "海边", keywords: ["小船"], limit: 1 }, {},
       { candidateAssetIds: [first, second], excludedAssetIds: [first], semanticThreshold: 0.99 },
     );
-    expect(searchAssetsMock).toHaveBeenLastCalledWith("海边 小船", [second]);
+    expect(searchAssetsMock).toHaveBeenLastCalledWith("海边 小船", [second], undefined, undefined);
     expect(match.items[0]).toMatchObject({ id: second, searchScore: 0.1 });
     expect(match.threshold).toBe(0);
     searchAssetsMock.mockRejectedValue(new Error("Embedding 服务不可用"));
@@ -1930,6 +1940,8 @@ mysqlTest("MySQL 数据层", () => {
   }, 30_000);
 
   test.each(["published", "pending_review"] as const)("兼容匹配 %s 素材、持久化任务并投递 camelCase 回调", async (reviewStatus) => {
+    vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "500");
+    vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", "true");
     const assetId = crypto.randomUUID();
     await repository.createAsset({
       assetId,
@@ -1939,6 +1951,8 @@ mysqlTest("MySQL 数据层", () => {
       originalPath: `/tmp/${assetId}`,
       mimeType: "video/mp4",
       mediaType: "video",
+      segmentStartMs: 0,
+      segmentEndMs: 3000,
       sizeBytes: 10,
       enqueueAnalysis: false,
     });
@@ -2068,8 +2082,11 @@ mysqlTest("MySQL 数据层", () => {
       },
     });
     expect(searchAssetsMock).toHaveBeenCalledWith(
-      "如果能回到二十岁",
+      "如果能回到二十岁 回到二十岁",
       [assetId],
+      undefined,
+      undefined,
+      { playbackDurationMs: 1280, contextRequired: undefined },
     );
 
     const [generatedCallback] = await migrationConnection.db
@@ -2153,6 +2170,7 @@ mysqlTest("MySQL 数据层", () => {
     expect(matchedUrl.origin).toBe("https://focus.example.com");
     expect(matchedUrl.pathname).toContain(`/api/v1/media/${assetId}`);
     expect(matchedUrl.searchParams.get("user_id")).toBe("759");
+    expect(matchedUrl.searchParams.get("clip_ms")).toBe("1280");
   }, 30_000);
 
   test("将失败的素材错误码与公私素材 ID 向上聚合到 item 和 task", async () => {

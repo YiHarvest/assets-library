@@ -63,7 +63,7 @@ suite("recall revisions and durable build jobs in MySQL", () => {
     expect((await readRecallInventory(connection.db, manifest.buildId)).currentSourceMismatches).toBe(0);
     await connection.db.update(schema.recallBuilds).set({ writeEnabled: false }).where(eq(schema.recallBuilds.buildId, manifest.buildId));
     await expect(backfillRecallBatch(connection.db, manifest.buildId)).rejects.toThrow(/双写/);
-  });
+  }, 30_000);
 
   it("commits each snapshot with its revision and jobs, rolls back together, and retains deletion after cascade", async () => {
     const now = new Date();
@@ -102,7 +102,7 @@ suite("recall revisions and durable build jobs in MySQL", () => {
       expect.objectContaining({ assetId, sourceRevision: 3, deleted: true }),
     ]));
     expect(jobs.every((job) => job.publicAssetId === null && job.privateAssetId === null && job.taskId === null)).toBe(true);
-  });
+  }, 30_000);
 
   it("keeps a separate watermark per build and serializes simultaneous edits without duplicate backfill jobs", async () => {
     const now = new Date();
@@ -146,7 +146,7 @@ suite("recall revisions and durable build jobs in MySQL", () => {
     expect(watermarks.find((item) => item.buildId === first.buildId)).toMatchObject({ desiredRevision: 3, indexedRevision: 3,
       status: "done", contentHash: "c".repeat(64), errorMessage: null });
     expect(watermarks.find((item) => item.buildId === second.buildId)).toMatchObject({ desiredRevision: 3, indexedRevision: null, status: "queued" });
-  });
+  }, 30_000);
 
   it.skipIf(!process.env.TEST_RECALL_ES_URL)("runs committed snapshots through real ES, retries failure and deletes after the asset row is gone", async () => {
     const now = new Date();

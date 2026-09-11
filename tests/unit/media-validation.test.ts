@@ -232,6 +232,21 @@ describe("media validation", () => {
     ).rejects.toMatchObject({ code: "corrupt_file" });
   });
 
+  it("rejects truncated video data even when the MP4 header is readable", async () => {
+    const filePath = path.join(directory, "truncated.mp4");
+    await execFileAsync("ffmpeg", [
+      "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x96:rate=25:duration=1",
+      "-c:v", "mpeg4", "-q:v", "2", "-movflags", "+faststart", "-y", filePath,
+    ]);
+    const original = await fs.readFile(filePath);
+    const truncated = original.subarray(0, Math.floor(original.length * 0.8));
+    await fs.writeFile(filePath, truncated);
+    expect((await probeVideo(filePath)).streams[0].codec_name).toBe("mpeg4");
+    await expect(validateMediaFile(filePath, "truncated.mp4"))
+      .rejects.toMatchObject({ code: "corrupt_file" });
+    expect(await fs.readFile(filePath)).toEqual(truncated);
+  });
+
   for (const target of [
     { extension: ".jpg", format: "jpeg" },
     { extension: ".png", format: "png" },

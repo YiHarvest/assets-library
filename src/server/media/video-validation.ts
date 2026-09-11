@@ -150,13 +150,15 @@ function isBrowserCompatibleMp4(probe: ProbedVideo) {
 }
 
 async function validateDecodedVideo(filePath: string) {
-  await runMediaCommand(
+  const { stdout } = await runMediaCommand(
     "ffmpeg",
     [
       "-nostdin",
       "-v",
       "error",
       "-xerror",
+      "-progress",
+      "pipe:1",
       "-protocol_whitelist",
       localMediaProtocols,
       "-format_whitelist",
@@ -180,6 +182,9 @@ async function validateDecodedVideo(filePath: string) {
     ),
     300_000,
   );
+  // 复用完整解码的最终时间戳；容器标注时长可能漏算帧之间的时间间隙。
+  const microseconds = positiveNumber([...stdout.matchAll(/^out_time_us=(.+)$/gm)].at(-1)?.[1]);
+  return microseconds === null ? null : microseconds / 1_000_000;
 }
 
 function durationMatches(sourceSeconds: number, outputSeconds: number) {
@@ -191,6 +196,7 @@ async function normalizeVideoFormat(
   filePath: string,
   sourceProbe: ProbedVideo,
   sizeLimit: MediaSizeLimit,
+  decodedSourceSeconds: number | null,
 ) {
   const canCopyVideo =
     sourceProbe.codecName === "h264" &&
@@ -267,11 +273,12 @@ async function normalizeVideoFormat(
           "视频无法转换为兼容的 H.264 MP4。",
         );
       }
-      await validateDecodedVideo(temporaryPath);
+      const decodedOutputSeconds = await validateDecodedVideo(temporaryPath);
+      const hasDecodedDurations = decodedSourceSeconds !== null && decodedOutputSeconds !== null;
       if (
         !durationMatches(
-          sourceProbe.durationSeconds,
-          outputProbe.durationSeconds,
+          hasDecodedDurations ? decodedSourceSeconds : sourceProbe.durationSeconds,
+          hasDecodedDurations ? decodedOutputSeconds : outputProbe.durationSeconds,
         )
       ) {
         throwIfNormalizedOutputLikelyReachedLimit(normalizedSize, sizeLimit);
@@ -293,10 +300,10 @@ export async function validateVideoFile(
   const sizeLimit = { mediaLabel: "视频", maximumBytes } as const;
   assertSourceMediaSize(sizeBytes, sizeLimit);
   const sourceProbe = await probeVideo(filePath);
-  await validateDecodedVideo(filePath);
+  const decodedSourceSeconds = await validateDecodedVideo(filePath);
   const normalizedSize = isBrowserCompatibleMp4(sourceProbe)
     ? sizeBytes
-    : await normalizeVideoFormat(filePath, sourceProbe, sizeLimit);
+    : await normalizeVideoFormat(filePath, sourceProbe, sizeLimit, decodedSourceSeconds);
   return {
     mediaType: "video",
     mimeType: target.mimeType,

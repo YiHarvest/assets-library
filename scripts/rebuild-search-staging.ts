@@ -110,7 +110,7 @@ export async function rebuildSearchStaging(stateFile = process.argv[2]) {
               await request(`${indexPath}/_mapping`, "PUT", { _meta: { stagingBuildId: state.buildId, sourceHash, model: state.model } });
               state.indexUuid = (await request(indexPath))[state.index].settings.index.uuid;
             }
-            state.assets[id] = { hash, documents: evidence.chunks.length ? evidence.chunks.length + (assetSearchMetadata(asset) ? 1 : 0) : 0 };
+            state.assets[id] = { hash, documents: evidence.chunks.length ? evidence.chunks.length + (assetSearchMetadata(asset) ? 1 : 0) + (evidence.theme ? 1 : 0) : 0 };
             await pause(100); // One embedding request at a time, with a pause between assets.
           }
           delete state.failures[id];

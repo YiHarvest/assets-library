@@ -53,5 +53,13 @@ describe("material playback evidence", () => {
     expect(evidenceInWindow({ kind: "static" }, 440)).toBe(true);
     expect(evidenceInWindow({ kind: "point", startMs: 440 }, 440)).toBe(false);
     expect(evidenceInWindow({ kind: "range", startMs: 0, endMs: 440 }, 440)).toBe(true);
+    expect(evidenceInWindow({ kind: "theme" }, 440)).toBe(false);
+  });
+
+  it("uses current topics for expression themes without restoring removed model topics", () => {
+    expect(assetEvidence({ description: "芯片动画", analysis: null,
+      tags: [{ category: "topic", value: "人工智能算力" }, { category: "scene", value: "科技" }] }).theme).toBe("人工智能算力");
+    expect(assetEvidence({ description: "视频全程为黑屏画面，无任何可见视觉内容。", analysis: null,
+      tags: [{ category: "topic", value: "人工智能算力" }] }).theme).toBe("");
   });
 });

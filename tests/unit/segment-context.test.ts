@@ -65,6 +65,18 @@ describe("business segment recall context", () => {
       .toEqual(["安卓手机可以跑这种模式。店关着门，它也在干活。", "评论区见。"]);
   });
 
+  it("resolves omitted objects in closing invitations instead of retrieving account verification screens", () => {
+    const preceding = "技术红利会逐渐消失，不信可以收藏起来。";
+    const closing = "一年后欢迎来验证。";
+    const segment = { text: "一年后欢迎来验证", group_id: [1, 1] };
+    expect(requiresRecallContext(segment.text)).toBe(true);
+    expect(segmentRecallContexts([segment], preceding + closing)).toEqual([preceding + closing]);
+    expect(segmentRecallContexts([{ text: "技术红利会消失", group_id: [1, 1] }, segment]))
+      .toEqual(["技术红利会消失", "技术红利会消失，一年后欢迎来验证"]);
+    expect(requiresRecallContext("手机收到验证码")).toBe(false);
+    expect(requiresRecallContext("收藏商品")).toBe(false);
+  });
+
   it("keeps group context when the full script has no internal sentence boundaries", () => {
     const segments = [
       { text: "有事自己扛", group_id: [1, 2] }, { text: "有苦自己咽", group_id: [2, 2] },

@@ -26,6 +26,7 @@ export interface SearchCandidate {
   semanticSimilarity?: number;
   contextSimilarity?: number;
   sceneSimilarity?: number;
+  themeSimilarity?: number;
   matchQuality?: number;
   playbackEvidence?: PlaybackEvidence[];
   matchedFields?: string[];
@@ -128,12 +129,12 @@ async function ensureIndex(dimensions: number) {
 }
 
 export async function indexAsset(asset: AssetDetail) {
-  const { chunks, facets } = assetEvidence(asset);
+  const { chunks, facets, theme } = assetEvidence(asset);
   if (!chunks.length) {
     await deleteAssetIndex(asset.id);
     return;
   }
-  const texts = [...new Set(chunks.map(chunk => chunk.content))];
+  const texts = [...new Set([...chunks.map(chunk => chunk.content), ...(theme ? [theme] : [])])];
   const vectors = await embedTexts(texts);
   await ensureIndex(vectors[0].length);
   // ponytail: 素材级删除后批量重建不是原子操作；需要并发重建同一素材时再串行化。
@@ -146,6 +147,8 @@ export async function indexAsset(asset: AssetDetail) {
   // 元数据单独作为 BM25 文档，每个素材只写一次，不生成或污染视觉向量。
   const metadata = assetSearchMetadata(asset);
   if (metadata) operations.push({ index: { _id: `${asset.id}:metadata` } }, { assetId: asset.id, content: metadata, facets });
+  if (theme) operations.push({ index: { _id: `${asset.id}:theme` } },
+    { assetId: asset.id, content: theme, evidenceKind: "theme", embedding: vectors[texts.indexOf(theme)] });
   const response = await esRequest("/_bulk?refresh=wait_for", {
     method: "POST",
     headers: { "content-type": "application/x-ndjson" },
@@ -181,7 +184,7 @@ interface ChunkHit {
 
 /** 素材级 RRF：完整局部语境参与语义召回，BM25 不能绕过语义门槛。 */
 export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: number, contextHits: ChunkHit[] = [], threshold = 0.5,
-  options: RecallOptions & { visualHits?: ChunkHit[]; sceneHits?: ChunkHit[]; query?: string } = {}): SearchCandidate[] {
+  options: RecallOptions & { visualHits?: ChunkHit[]; sceneHits?: ChunkHit[]; themeHits?: ChunkHit[]; query?: string } = {}): SearchCandidate[] {
   const byAsset = (hits: ChunkHit[]) => {
     const assets = new Map<string, ChunkHit>();
     for (const hit of hits) if (!assets.has(hit.assetId) || (hit.score ?? -1) > (assets.get(hit.assetId)!.score ?? -1)) assets.set(hit.assetId, hit);
@@ -189,6 +192,9 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   };
   const focus = byAsset(vectorHits), context = byAsset(contextHits);
   const scenes = byAsset(options.sceneHits ?? []);
+  const themeHits = (options.allowThemeMatch ? options.themeHits ?? [] : [])
+    .filter(hit => (hit.score ?? -1) >= Math.max(threshold, 0.55));
+  const themes = byAsset(themeHits);
   const keywordSearch = options.keywordSearch && isShortSearchTerm(options.query ?? "");
   const lexicalIds = new Set([...keywordHits, ...(options.visualHits ?? [])].map(hit => hit.assetId));
   // 短词搜整条素材：没有完整词证据时，整片语义须接近本次最佳结果，防止局部泛化填满列表。
@@ -197,36 +203,44 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   for (const assetId of new Set([...focus.keys(), ...context.keys()])) {
     if (unusableVisualReason(scenes.get(assetId)?.content ?? focus.get(assetId)?.content ?? "")) continue;
     const semanticSimilarity = focus.get(assetId)?.score, contextSimilarity = context.get(assetId)?.score;
+    const themeSimilarity = themes.get(assetId)?.score;
+    // 主题用于表达关联，仍须当前可播放画面提供语义证据；不能靠整片标签越过片头校验。
+    const playbackSimilarity = options.contextRequired ? contextSimilarity : Math.max(semanticSimilarity ?? -1, contextSimilarity ?? -1);
+    const thematicQuality = Math.min(themeSimilarity ?? -1, playbackSimilarity ?? -1);
     if (options.contextRequired && (contextSimilarity ?? -1) < threshold) continue;
     if (Math.max(semanticSimilarity ?? -1, contextSimilarity ?? -1) < threshold &&
       !(focus.has(assetId) && semanticSimilarity === undefined)) continue;
     let matchQuality = options.contextRequired ? 0.9 * contextSimilarity! : semanticSimilarity === undefined ? contextSimilarity : contextSimilarity === undefined
       ? semanticSimilarity : 0.7 * semanticSimilarity + 0.3 * contextSimilarity;
     const sceneSimilarity = scenes.get(assetId)?.score;
-    if (options.allowThemeMatch && sceneSimilarity !== undefined && sceneSimilarity < threshold) continue;
+    if (options.allowThemeMatch && sceneSimilarity !== undefined && sceneSimilarity < threshold && thematicQuality < threshold) continue;
     if (keywordSearch && !lexicalIds.has(assetId) && (sceneSimilarity ?? semanticSimilarity ?? -1) < semanticFloor) continue;
     // 整片描述只校验局部高分，不能把片尾事实变成片头的命中证据。
     if (sceneSimilarity !== undefined && matchQuality !== undefined) {
       matchQuality = Math.min(matchQuality, 0.75 * matchQuality + 0.25 * sceneSimilarity);
     }
-    // 主题补充需 >= 0.55 的片头与整片支持；只计 1/4 阈值以上收益，保留直接匹配优势。
-    const themeSimilarity = Math.min(contextSimilarity ?? -1, sceneSimilarity ?? -1);
+    // 独立主题至少 0.55，且可播放事实达标；旧索引沿用语境/整片支持。只计 1/4 收益。
+    const contextSceneSimilarity = Math.min(contextSimilarity ?? -1, sceneSimilarity ?? -1);
     let themeMatch = false;
-    if (options.allowThemeMatch && themeSimilarity >= Math.max(threshold, 0.55)) {
-      const themeQuality = threshold + 0.25 * (themeSimilarity - threshold);
+    const themeSupport = Math.max(thematicQuality, contextSceneSimilarity >= Math.max(threshold, 0.55) ? contextSceneSimilarity : -1);
+    if (options.allowThemeMatch && themeSupport >= threshold) {
+      const themeQuality = threshold + 0.25 * (themeSupport - threshold);
       themeMatch = themeQuality > (matchQuality ?? -1);
       matchQuality = Math.max(matchQuality ?? -1, themeQuality);
     }
     if (sceneSimilarity !== undefined && matchQuality !== undefined && matchQuality < threshold) continue;
-    const evidence = (options.contextRequired || themeMatch ? contextHits : vectorHits).filter(hit => hit.assetId === assetId && hit.evidence && hit.score !== undefined)
+    const evidence = (options.contextRequired || (themeMatch && (contextSimilarity ?? -1) >= (semanticSimilarity ?? -1)) ? contextHits : vectorHits).filter(hit => hit.assetId === assetId && hit.evidence && hit.score !== undefined)
       .map(hit => ({ ...hit.evidence!, similarity: hit.score! }));
-    candidates.set(assetId, { assetId, searchScore: 0, semanticSimilarity, contextSimilarity, sceneSimilarity, matchQuality,
+    candidates.set(assetId, { assetId, searchScore: 0, semanticSimilarity, contextSimilarity, sceneSimilarity, ...(themeSimilarity === undefined ? {} : { themeSimilarity }), matchQuality,
       ...(evidence.length ? { playbackEvidence: evidence } : {}) });
   }
   const semantic = [...candidates.values()].sort((a, b) => (b.matchQuality ?? 0) - (a.matchQuality ?? 0));
   const lexical = (hits: ChunkHit[]) => [...byAsset(hits).keys()].filter(id => candidates.has(id)).map(id => candidates.get(id)!);
+  const thematic = lexical(themeHits);
   const routes: Array<[SearchCandidate[], "semanticScore" | "keywordScore", number]> = [
-    [semantic, "semanticScore", 0.5], [lexical(keywordHits), "keywordScore", options.visualHits ? 0.25 : 0.5],
+    [semantic, "semanticScore", thematic.length ? 0.25 : 0.5],
+    ...(thematic.length ? [[thematic, "semanticScore", 0.25] as [SearchCandidate[], "semanticScore", number]] : []),
+    [lexical(keywordHits), "keywordScore", options.visualHits ? 0.25 : 0.5],
     ...(options.visualHits ? [[lexical(options.visualHits), "keywordScore", 0.25] as [SearchCandidate[], "keywordScore", number]] : []),
   ];
   for (const [items, field, weight] of routes) items.forEach((candidate, rank) => {
@@ -268,7 +282,7 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
     { bool: { filter: [{ term: { evidenceKind: "range" } }, { range: { endMs: { lte: options.playbackDurationMs } } }] } },
     { terms: { evidenceKind: ["static", "unknown"] } }, { bool: { must_not: { exists: { field: "evidenceKind" } } } },
   ], minimum_should_match: 1 } }];
-  const vectorFilter = window.length ? { bool: { filter: [filter, ...window] } } : filter;
+  const vectorFilter = { bool: { filter: [filter, ...window], must_not: [{ term: { evidenceKind: "theme" } }] } };
   const source = ["assetId", "evidenceKind", "startMs", "endMs", "content"];
   const bodies = [
     {
@@ -317,12 +331,21 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
         ...(lexical ? { matchedFields: hit.matched_queries ?? [] } : { evidence: { kind: hit._source.evidenceKind ?? "unknown",
           ...(hit._source.startMs === undefined ? {} : { startMs: hit._source.startMs }),
           ...(hit._source.endMs === undefined ? {} : { endMs: hit._source.endMs }) } }),
-      })).filter(hit => lexical || !playbackOnly || options.playbackDurationMs === undefined || evidenceInWindow(hit.evidence!, options.playbackDurationMs));
+      })).filter(hit => lexical || !playbackOnly || (hit.evidence?.kind !== "theme" &&
+        (options.playbackDurationMs === undefined || evidenceInWindow(hit.evidence!, options.playbackDurationMs))));
   };
-  const responses = await Promise.all(requests.map((body, route) => run(body, route === 1 || route === requests.length - 1)));
+  // 只对用户勾选的有限素材做主题评分，复用已有查询向量；旧索引没有 theme 文档时自然返回空集。
+  const [responses, themeHits] = await Promise.all([
+    Promise.all(requests.map((body, route) => run(body, route === 1 || route === requests.length - 1))),
+    options.allowThemeMatch ? run({ size: assetIds.length, _source: source, query: { script_score: {
+      query: { bool: { filter: [filter, { term: { evidenceKind: "theme" } }, { exists: { field: "embedding" } }] } },
+      script: { source: "(0.7 * cosineSimilarity(params.vector, 'embedding') + 0.3 * cosineSimilarity(params.context, 'embedding') + 1.0) / 2.0",
+        params: { vector: options.contextRequired ? contextVector ?? vector : vector, context: contextVector ?? vector } },
+    } } }, false, false).then(hits => hits.filter(hit => hit.evidence?.kind === "theme")) : [],
+  ]);
   const results = [responses[0], responses[1], contextVector ? responses[2] : [], responses.at(-1)!];
   // 对两路候选的有限并集补齐原始分数，既能评估语境，也能阻止关键词绕过语义门槛。
-  const candidateIds = [...new Set(results.flatMap(hits => hits.map(hit => hit.assetId)))];
+  const candidateIds = [...new Set([...results.flat(), ...themeHits].map(hit => hit.assetId))];
   await Promise.all([vector, contextVector].map(async (queryVector, index) => {
     if (!queryVector) return;
     const route = index === 0 ? 0 : 2;
@@ -330,7 +353,8 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
     const missing = candidateIds.filter(id => !scored.has(id));
     if (!missing.length) return;
     const supplemental = await run({ size: missing.length, _source: source, collapse: { field: "assetId" },
-      query: { script_score: { query: { bool: { filter: [{ terms: { assetId: missing } }, { exists: { field: "embedding" } }, ...window] } },
+      query: { script_score: { query: { bool: { filter: [{ terms: { assetId: missing } }, { exists: { field: "embedding" } }, ...window],
+        must_not: [{ term: { evidenceKind: "theme" } }] } },
         script: { source: "(cosineSimilarity(params.vector, 'embedding') + 1.0) / 2.0", params: { vector: queryVector } } } } });
     results[route].push(...supplemental.filter(hit => missing.includes(hit.assetId)));
   }));
@@ -339,7 +363,7 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
     query: { script_score: { query: { bool: { filter: [{ terms: { assetId: candidateIds } }, { terms: { evidenceKind: ["summary", "static", "unknown"] } }, { exists: { field: "embedding" } }] } },
       script: { source: "(Math.max(cosineSimilarity(params.vector, 'embedding'), cosineSimilarity(params.context, 'embedding')) + 1.0) / 2.0",
         params: { vector, context: contextVector ?? vector } } } } }, false, false) : [];
-  return [...results, sceneHits.filter(hit => ["summary", "static", "unknown"].includes(hit.evidence?.kind ?? ""))];
+  return [...results, sceneHits.filter(hit => ["summary", "static", "unknown"].includes(hit.evidence?.kind ?? "")), themeHits];
 }
 
 export async function searchAssets(query: string, assetIds: string[], revalidate?: (assetIds: string[]) => Promise<string[]>, context?: string, options: RecallOptions = {}): Promise<SearchCandidate[]> {
@@ -348,6 +372,6 @@ export async function searchAssets(query: string, assetIds: string[], revalidate
   if (config.SEARCH_RECALL_ENGINE === "v2") return searchWithV2(query, assetIds, revalidate, context);
   const results = await recallChunks(query, assetIds, context, options);
   const candidates = fuseResults(results[0], results[1], config.SEARCH_RRF_K, results[2], config.SEARCH_SEMANTIC_THRESHOLD,
-    { ...options, query, contextRequired: options.contextRequired && !!context && context.trim() !== query.trim(), visualHits: results[3], sceneHits: results[4] });
+    { ...options, query, contextRequired: options.contextRequired && !!context && context.trim() !== query.trim(), visualHits: results[3], sceneHits: results[4], themeHits: results[5] });
   return config.SEARCH_RERANK_ENABLED ? rerank(query, candidates) : candidates;
 }

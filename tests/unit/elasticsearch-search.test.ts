@@ -69,6 +69,59 @@ describe("ES asset recall", () => {
         allowThemeMatch: true, sceneHits: [{ ...chunk("contacts:0"), score: 0.4517 }],
       });
     expect(result).toEqual([]);
+    // 历史请求“从答话工具”：普通通讯录的宽泛主题不能把候选抬过准入。
+    expect(fuseResults([{ ...chunk("contacts:1"), score: 0.5218 }], [], 60,
+      [{ ...chunk("contacts:1"), score: 0.4825 }], 0.5, { allowThemeMatch: true,
+        sceneHits: [{ ...chunk("contacts:0"), score: 0.4898 }],
+        themeHits: [{ ...chunk("contacts:theme"), score: 0.5107 }] })).toEqual([]);
+  });
+
+  it("admits an indexed expression theme with playback support despite a slightly weaker whole-scene score", () => {
+    const focus = [{ ...chunk("ai:1"), score: 0.50, evidence: { kind: "point" as const, startMs: 0 } }];
+    const context = [{ ...chunk("ai:1"), score: 0.54, evidence: { kind: "point" as const, startMs: 0 } }];
+    const options = { allowThemeMatch: true, sceneHits: [{ ...chunk("ai:0"), score: 0.49 }],
+      themeHits: [{ ...chunk("ai:theme"), score: 0.62 }] };
+    expect(fuseResults(focus, [], 60, context, 0.5, { ...options, themeHits: [] })).toEqual([]);
+    const [result] = fuseResults(focus, [], 60, context, 0.5, options);
+    expect(result).toMatchObject({ assetId: "ai", themeSimilarity: 0.62,
+      playbackEvidence: [{ kind: "point", startMs: 0, similarity: 0.54 }] });
+    expect(result.matchQuality).toBeCloseTo(0.51);
+    expect(fuseResults(focus, [], 60, context, 0.5, { ...options, allowThemeMatch: false })).toHaveLength(1);
+  });
+
+  it("never treats a strong indexed theme as proof of absent or weak playable content", () => {
+    const options = { allowThemeMatch: true, sceneHits: [{ ...chunk("late:0"), score: 0.95 }],
+      themeHits: [{ ...chunk("late:theme"), score: 0.99 }] };
+    expect(fuseResults([], [], 60, [], 0.5, options)).toEqual([]);
+    expect(fuseResults([{ ...chunk("late:1"), score: 0.49 }], [], 60,
+      [{ ...chunk("late:1"), score: 0.49 }], 0.5, options)).toEqual([]);
+    expect(fuseResults([{ ...chunk("late:1"), score: 0.9 }], [], 60,
+      [{ ...chunk("late:1"), score: 0.3 }], 0.5, { ...options, contextRequired: true })).toEqual([]);
+  });
+
+  it("retrieves theme-only candidates, verifies their playable facts and preserves the selected scope", async () => {
+    vi.stubEnv("SEARCH_SEMANTIC_THRESHOLD", "0.5");
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }] });
+      const body = JSON.parse(String(init.body)); requests.push(body);
+      const script = body.query?.script_score;
+      if (!script) return json({ hits: { hits: [] } });
+      const filter = script.query.bool.filter;
+      const kind = filter.some((f: { term?: { evidenceKind?: string } }) => f.term?.evidenceKind === "theme") ? "theme"
+        : filter.some((f: { terms?: { evidenceKind?: string[] } }) => f.terms?.evidenceKind) ? "summary" : "point";
+      const score = kind === "theme" ? 0.65 : kind === "summary" ? 0.48 : 0.55;
+      return json({ hits: { hits: ["selected", "outside"].map(assetId => ({ _id: `${assetId}:${kind}`,
+        _source: { assetId, evidenceKind: kind, ...(kind === "point" ? { startMs: 0 } : {}) }, _score: (score + 1) / 2 })) } });
+    }));
+    const result = await searchAssets("人工智能", ["selected"], undefined, undefined,
+      { allowThemeMatch: true, playbackDurationMs: 500 });
+    expect(result.map(candidate => candidate.assetId)).toEqual(["selected"]);
+    expect(result[0].playbackEvidence).toEqual([{ kind: "point", startMs: 0, similarity: expect.closeTo(0.55) }]);
+    expect(result[0].themeSimilarity).toBeCloseTo(0.65);
+    expect(result[0].matchQuality).toBeGreaterThan(0.5);
+    const supplemental = requests.find(body => JSON.stringify(body).includes("script_score") && JSON.stringify(body).includes('"lt":500'));
+    expect(JSON.stringify(supplemental)).toContain('"must_not":[{"term":{"evidenceKind":"theme"}}]');
   });
 
   it("keeps sunset synonyms but rejects broad balcony and apartment matches in keyword search", () => {
@@ -157,7 +210,7 @@ describe("ES asset recall", () => {
     expect(result.map(item => item.assetId)).toEqual(["early"]);
     expect(result[0].playbackEvidence).toEqual([{ kind: "point", startMs: 200, similarity: expect.closeTo(0.7) }]);
     expect(JSON.stringify(requests[0])).toContain('"lt":1480');
-    expect(JSON.stringify(requests.find(body => JSON.stringify(body).includes("script_score")))).toContain('"lte":1480');
+    expect(requests.some(body => JSON.stringify(body).includes("script_score") && JSON.stringify(body).includes('"lte":1480'))).toBe(true);
   });
 
   it("admits context matches and verifies keyword candidates against visual semantics", async () => {
@@ -285,6 +338,22 @@ describe("ES asset recall", () => {
     ]);
   });
 
+  it("indexes only current topic tags as a separate non-playable vector", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).includes("/embeddings")) return json({ data: JSON.parse(String(init?.body)).input
+        .map((_: string, index: number) => ({ index, embedding: [index + 1, 1] })) });
+      return json({ errors: false, deleted: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await indexAsset({ ...asset, tags: [{ category: "topic", value: "人工智能算力" }, { category: "scene", value: "科技" }] });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).toEqual(["人工描述", "人工智能算力"]);
+    const bulk = fetchMock.mock.calls.find(([url]) => String(url).includes("/_bulk"))!;
+    const documents = String(bulk[1]?.body).trim().split("\n").map(line => JSON.parse(line));
+    expect(documents).toContainEqual({ assetId: "asset-a", content: "人工智能算力", evidenceKind: "theme", embedding: [2, 1] });
+    expect(documents).toContainEqual({ assetId: "asset-a", content: "人工描述", evidenceKind: "static", embedding: [1, 1] });
+    expect(String(bulk[1]?.body)).not.toContain("已删除标签");
+  });
+
   it("clears old documents when a material no longer has searchable text", async () => {
     const fetchMock = vi.fn().mockResolvedValue(json({ deleted: 2, failures: [] }));
     vi.stubGlobal("fetch", fetchMock);
@@ -314,12 +383,13 @@ describe("ES asset recall", () => {
     expect(result.map((item) => item.assetId)).toEqual(["a", "b"]);
     const vector = JSON.parse(fetchMock.mock.calls[1][1].body);
     const keyword = JSON.parse(fetchMock.mock.calls[2][1].body);
-    expect(vector.knn.filter).toEqual({ terms: { assetId: ["a", "b"] } });
+    expect(vector.knn.filter).toEqual({ bool: { filter: [{ terms: { assetId: ["a", "b"] } }],
+      must_not: [{ term: { evidenceKind: "theme" } }] } });
     expect(vector.knn.similarity).toBe(0.6);
     expect(keyword.min_score).toBe(12);
     expect(vector).not.toHaveProperty("query");
     expect(vector._source).toEqual(["assetId", "evidenceKind", "startMs", "endMs", "content"]);
-    expect(keyword.query.bool.filter).toEqual([vector.knn.filter]);
+    expect(keyword.query.bool.filter).toEqual([{ terms: { assetId: ["a", "b"] } }]);
     expect(keyword).not.toHaveProperty("knn");
     expect(keyword.query.bool.should).toContainEqual({ bool: { should: [
       { match_phrase: { content: "夕阳下的海边" } }, { match_phrase: { content: "小船" } },

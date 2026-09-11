@@ -2,7 +2,7 @@ import type { AssetDetail } from "@/shared/contracts";
 import { unusableVisualReason } from "@/server/media/material-quality";
 
 export interface PlaybackEvidence {
-  kind: "point" | "range" | "static" | "unknown" | "summary";
+  kind: "point" | "range" | "static" | "unknown" | "summary" | "theme";
   startMs?: number;
   endMs?: number;
   similarity: number;
@@ -38,5 +38,6 @@ export function assetEvidence(asset: Pick<AssetDetail, "description" | "analysis
     [...new Set(asset.tags.filter(tag => tag.category === category).map(tag => tag.value.trim()).filter(value =>
       value && !["城市风貌", "建筑", "科技", "财经", "社会场景", "无人物"].includes(value)))],
   ]));
-  return { chunks: [...new Map(chunks.map(chunk => [JSON.stringify(chunk), chunk])).values()], facets };
+  return { chunks: [...new Map(chunks.map(chunk => [JSON.stringify(chunk), chunk])).values()], facets,
+    theme: unusable ? "" : facets.topic.join("，") };
 }

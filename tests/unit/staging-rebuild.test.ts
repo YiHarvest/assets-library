@@ -36,7 +36,8 @@ beforeEach(async () => {
   mocks.index.mockImplementation(async asset => {
     index = loadConfig().ELASTICSEARCH_INDEX;
     expect(index).toMatch(/^live_dev_staging_[0-9a-f]{32}$/);
-    documents = assetEvidence(asset).chunks.length;
+    const evidence = assetEvidence(asset);
+    documents = evidence.chunks.length + (Object.values(evidence.facets).flat().length ? 1 : 0) + (evidence.theme ? 1 : 0);
   });
   mocks.remove.mockImplementation(async () => { expect(loadConfig().ELASTICSEARCH_INDEX).toBe(index); documents = 0; });
   vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
@@ -78,4 +79,13 @@ it("refuses a resumed build once its index is behind a live alias", async () => 
   expect(mocks.index).toHaveBeenCalledTimes(1);
   expect(mocks.remove).not.toHaveBeenCalled();
   expect(loadConfig().ELASTICSEARCH_INDEX).toBe("live_dev");
+});
+
+it("counts the independent theme document when rebuilding existing topic tags", async () => {
+  mocks.detail.mockResolvedValue({ ...assets[0], tags: [{ category: "topic", value: "人工智能算力" }] });
+  const file = join(directory, "state.json");
+  await rebuildSearchStaging(file);
+  const state = JSON.parse(await readFile(file, "utf8"));
+  expect(state.status).toBe("snapshot_complete");
+  expect(state.verification.documents).toBe(assetEvidence(assets[0]).chunks.length + 2);
 });

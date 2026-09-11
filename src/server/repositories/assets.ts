@@ -130,27 +130,11 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
           ? "updating"
           : "retrying";
   await db.transaction(async (tx) => {
-    if (input.type === "publish") {
-      const [asset] = target.kind === "private"
-        ? await tx
-            .select({ id: privateAssets.id })
-            .from(privateAssets)
-            .where(
-              and(
-                eq(privateAssets.id, input.assetId),
-                eq(privateAssets.userId, userId!),
-              ),
-            )
-            .limit(1)
-        : await tx
-            .select({ id: publicAssets.id })
-            .from(publicAssets)
-            .where(eq(publicAssets.id, input.assetId))
-            .limit(1);
-      if (!asset) {
-        throw new AppError("invalid_request", "素材不存在。", 404);
-      }
-    }
+    const [asset] = target.kind === "private"
+      ? await tx.select({ id: privateAssets.id }).from(privateAssets)
+          .where(and(eq(privateAssets.id, input.assetId), eq(privateAssets.userId, userId!))).limit(1)
+      : await tx.select({ id: publicAssets.id }).from(publicAssets).where(eq(publicAssets.id, input.assetId)).limit(1);
+    if (!asset) throw new AppError("invalid_request", "素材不存在。", 404);
     if (userId) {
       await tx
         .insert(users)
@@ -1637,7 +1621,7 @@ export async function updateAssetMetadata(
           id: crypto.randomUUID(),
           ...associationTarget(ref),
           tagId: storedTag.id,
-          source: "human",
+          source: existing.find(item => item.category === tag.category && normalizeTag(item.value) === normalizedValue)?.source ?? "human",
           confidence: null,
         });
     }

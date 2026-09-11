@@ -1793,6 +1793,46 @@ mysqlTest("MySQL 数据层", () => {
     });
   });
 
+  test.each([false, true])("重新分析更新模型描述并保留人工描述 manual=%s", async (manual) => {
+    const assetId = crypto.randomUUID();
+    await repository.createAsset({ assetId, name: "重解析", originalFilename: "retry.jpg", originalPath: "/tmp/retry.jpg",
+      mimeType: "image/jpeg", mediaType: "image", sizeBytes: 10, enqueueAnalysis: false });
+    const previous = { kind: "image" as const, description: "旧模型描述", tags: { scene: [], object: [], person: [], style: [], color_composition: [] },
+      ocr: { text: null, unavailableReason: "无文字" } };
+    await migrationConnection.db.insert(analysisResults).values({ id: crypto.randomUUID(), publicAssetId: assetId,
+      schemaVersion: 1, resultJson: previous, modelProtocol: "openai_chat_completions", modelName: "test", completedAt: new Date() });
+    await migrationConnection.db.update(publicAssets).set({ description: manual ? "人工描述" : previous.description }).where(eq(publicAssets.id, assetId));
+    await migrationConnection.db.insert(jobs).values({ id: crypto.randomUUID(), publicAssetId: assetId, type: "analyze",
+      availableAt: new Date(), createdAt: new Date(), updatedAt: new Date() });
+    const job = await repository.claimNextJob("description-regression");
+    if (!job) throw new Error("未领取分析任务");
+    const { processJob } = await import("@/server/services/processing");
+    await processJob(job, { analyze: async () => ({ result: { ...previous, description: "新的模型描述" },
+      model: { protocol: "openai_chat_completions", name: "test" } }) }, async () => ({ mimeType: "image/jpeg", sizeBytes: 10 }));
+    const detail = await repository.getAssetDetail(assetId);
+    expect(detail.analysis?.description).toBe("新的模型描述");
+    expect(detail.description).toBe(manual ? "人工描述" : "新的模型描述");
+  });
+
+  test("保存标签保留原来源，空 user_id 的私库修改返回可识别错误", async () => {
+    const id = crypto.randomUUID();
+    await repository.createAsset({ assetId: id, userId: "785", name: "广告后台", originalFilename: "ad.jpg", originalPath: "/tmp/ad.jpg",
+      mimeType: "image/jpeg", mediaType: "image", sizeBytes: 10, enqueueAnalysis: false });
+    const scope = { userId: "785" };
+    await repository.updateAssetMetadata(id, { name: "广告后台", description: "电脑屏幕", tags: [{ category: "scene", value: "电脑屏幕" }] }, scope);
+    const { assetTags } = await import("@/server/db/schema");
+    await migrationConnection.db.update(assetTags).set({ source: "model" }).where(eq(assetTags.privateAssetId, id));
+    const detail = await repository.updateAssetMetadata(id, { name: "广告后台", description: "电脑屏幕", tags: [
+      { category: "scene", value: "电脑屏幕" }, { category: "form", value: "投流" },
+    ] }, scope);
+    expect(detail.tags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "scene", value: "电脑屏幕", source: "model" }),
+      expect.objectContaining({ category: "form", value: "投流", source: "human" }),
+    ]));
+    await expect(repository.createMutationTask({ type: "update", assetId: id, userId: "" }))
+      .rejects.toMatchObject({ code: "invalid_request", status: 404 });
+  });
+
   test("混合召回保留结构化过滤、权限、分页与标签统计", async () => {
     async function seedAsset(input: {
       name: string;

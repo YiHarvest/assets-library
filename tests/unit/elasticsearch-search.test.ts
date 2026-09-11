@@ -3,6 +3,7 @@ import { assetSearchChunks, assetSearchMetadata, deleteAssetIndex, fuseResults, 
 import { apiV1ErrorResponse } from "@/server/api/handler";
 import { loadConfig } from "@/server/config";
 import type { AssetDetail } from "@/shared/contracts";
+import { balancedAssetAssignment } from "@/server/services/balanced-asset-assignment";
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 const chunk = (chunkId: string) => ({ chunkId, assetId: chunkId.split(":")[0] });
@@ -13,7 +14,7 @@ const asset: AssetDetail = {
   mediaUrl: "/media/a", createdAt: "2026-09-08T00:00:00.000Z",
   updatedAt: "2026-09-08T00:00:00.000Z", originalFilename: "a.jpg", mimeType: "image/jpeg", sizeBytes: 10,
   failureCode: null, failureMessage: null, segmentStartMs: null, segmentEndMs: null,
-  analysis: { kind: "image", description: "旧描述", tags: { scene: ["已删除标签"], object: [], person: [], style: [], color_composition: [] }, ocr: { text: "欢迎", unavailableReason: null } },
+  analysis: { kind: "image", description: "旧描述", tags: { scene: ["已删除标签"], object: [], person: [], style: [], color_composition: [] }, ocr: { text: null, unavailableReason: "无文字" } },
 };
 
 beforeEach(() => {
@@ -29,6 +30,57 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("ES asset recall", () => {
+  it("retrieves manual tags from the expanded metadata fields and carries their preference to assignment", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).includes("/embeddings")) return json({ data: [{ index: 0, embedding: [1, 0] }] });
+      const body = JSON.parse(String(init?.body));
+      return json({ hits: { hits: body.knn
+        ? [{ _id: "phone:0", _score: 0.8, _source: { assetId: "phone", evidenceKind: "static" } }]
+        : [{ _id: "phone:metadata", _score: 20, matched_queries: ["humanTags"],
+            _source: { assetId: "phone", humanTags: ["刷手机"] } }] } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const [result] = await searchAssets("刷手机", ["phone"]);
+    expect(result.semanticSimilarity).toBeCloseTo(0.6);
+    expect(result.matchQuality).toBeCloseTo(0.69);
+    const queries = fetchMock.mock.calls.filter(([url]) => String(url).includes("/_search"));
+    const lexical = JSON.parse(String(queries[1][1]?.body));
+    expect(lexical._source).toContain("humanTags");
+    for (const field of ["form", "style", "color_composition", "custom"]) expect(JSON.stringify(lexical.query)).toContain(`facets.${field}`);
+  });
+
+  it("indexes image OCR independently without adding metadata to the visual embedding", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).includes("/embeddings")) return json({ data: JSON.parse(String(init?.body)).input
+        .map((_: string, index: number) => ({ index, embedding: [index + 1, 1] })) });
+      return json({ errors: false, deleted: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    if (asset.analysis?.kind !== "image") throw new Error("Expected image fixture");
+    await indexAsset({ ...asset, tags: [{ category: "custom", value: "获客", source: "human" }],
+      analysis: { ...asset.analysis, ocr: { text: "智能获客系统", unavailableReason: null } } });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).toEqual(["人工描述", "智能获客系统"]);
+    const bulk = fetchMock.mock.calls.find(([url]) => String(url).includes("/_bulk"))!;
+    const documents = String(bulk[1]?.body).trim().split("\n").map(line => JSON.parse(line));
+    expect(documents).toContainEqual({ assetId: "asset-a", content: "智能获客系统", evidenceKind: "static", embedding: [2, 1] });
+    expect(documents).toContainEqual(expect.objectContaining({ humanTags: ["获客"], facets: expect.objectContaining({ custom: ["获客"] }) }));
+  });
+
+  it("carries a specific manual tag preference through fusion into global placement", () => {
+    const focus = [{ ...chunk("phone:0"), score: 0.6 }];
+    const keywords = [{ ...chunk("phone:metadata"), humanTags: ["刷手机"], matchedFields: ["humanTags"] }];
+    const night = fuseResults([{ ...focus[0], score: 0.65 }], keywords, 60, [], 0.5, { query: "北京时间深夜" });
+    const phone = fuseResults(focus, keywords, 60, [], 0.5, { query: "也不用你刷手机" });
+    const assignment = balancedAssetAssignment([{ start_time: 0, end_time: 1 }, { start_time: 10, end_time: 11 }],
+      [night, phone].map(pool => pool.map(candidate => ({ ...candidate, id: candidate.assetId }))));
+    expect([...assignment.keys()]).toEqual([1]);
+    expect(fuseResults([{ ...focus[0], score: 0.49 }], keywords, 60, [], 0.5, { query: "刷手机" })).toEqual([]);
+    expect(fuseResults(focus, keywords, 60, [{ ...focus[0], score: 0.4 }], 0.5,
+      { query: "刷手机", contextRequired: true })).toEqual([]);
+    expect(fuseResults([{ ...focus[0], score: 0.501 }], keywords, 60, [{ ...focus[0], score: 0.47 }], 0.5,
+      { query: "刷手机", sceneHits: [{ ...focus[0], score: 0.54 }], allowThemeMatch: true }))
+      .toEqual([expect.objectContaining({ matchQuality: expect.any(Number) })]);
+  });
   it("removes stale invalid documents without requesting an embedding", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => json({ deleted: 2 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -278,7 +330,7 @@ describe("ES asset recall", () => {
       { category: "scene", value: "科技" }, { category: "form", value: "固定视角" },
       { category: "topic", value: "账号违规" }, { category: "person", value: "年轻人" },
       { category: "topic", value: "账号违规" },
-    ] })).toBe("账号违规，年轻人");
+    ] })).toBe("账号违规，年轻人，固定视角");
     expect(assetSearchMetadata({ ...asset, tags: [] })).toBe("");
   });
 
@@ -334,7 +386,7 @@ describe("ES asset recall", () => {
     expect(bulk[1].body.trim().split("\n").map((line: string) => JSON.parse(line))).toEqual([
       { index: { _id: "asset-a:0" } }, { assetId: "asset-a", content: "人工描述", evidenceKind: "summary", embedding: [0.1, 0.2] },
       { index: { _id: "asset-a:1" } }, { assetId: "asset-a", content: "走在海边", events: "走在海边", evidenceKind: "range", startMs: 0, endMs: 1000, embedding: [0.3, 0.4] },
-      { index: { _id: "asset-a:metadata" } }, { assetId: "asset-a", content: "海边", facets: { topic: [], scene: ["海边"], person: [], object: [] } },
+      { index: { _id: "asset-a:metadata" } }, { assetId: "asset-a", content: "海边", facets: { topic: [], scene: ["海边"], person: [], object: [], form: [], style: [], color_composition: [], custom: [] }, humanTags: [] },
     ]);
   });
 

@@ -2,7 +2,7 @@ import { loadConfig } from "@/server/config";
 import { AppError } from "@/server/errors";
 import type { AssetDetail } from "@/shared/contracts";
 import { searchWithV2 } from "./v2/facade";
-import { assetEvidence, evidenceInWindow, type PlaybackEvidence } from "./asset-evidence";
+import { assetEvidence, evidenceInWindow, indexedTagCategories, type PlaybackEvidence } from "./asset-evidence";
 import { unusableVisualReason } from "@/server/media/material-quality";
 
 export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean; allowThemeMatch?: boolean }
@@ -116,7 +116,8 @@ async function ensureIndex(dimensions: number) {
       embedding: { type: "dense_vector", dims: dimensions, index: true, similarity: "cosine" },
       evidenceKind: { type: "keyword" }, startMs: { type: "long" }, endMs: { type: "long" },
       events: { type: "text", analyzer },
-      facets: { properties: Object.fromEntries(["topic", "scene", "person", "object"].map(field => [field, { type: "text", analyzer }])) },
+      facets: { properties: Object.fromEntries(indexedTagCategories.map(field => [field, { type: "text", analyzer }])) },
+      humanTags: { type: "text", analyzer },
     } } }),
   }, [400]);
   if (!response.ok) {
@@ -129,7 +130,7 @@ async function ensureIndex(dimensions: number) {
 }
 
 export async function indexAsset(asset: AssetDetail) {
-  const { chunks, facets, theme } = assetEvidence(asset);
+  const { chunks, facets, theme, humanTags } = assetEvidence(asset);
   if (!chunks.length) {
     await deleteAssetIndex(asset.id);
     return;
@@ -146,7 +147,7 @@ export async function indexAsset(asset: AssetDetail) {
   ]);
   // 元数据单独作为 BM25 文档，每个素材只写一次，不生成或污染视觉向量。
   const metadata = assetSearchMetadata(asset);
-  if (metadata) operations.push({ index: { _id: `${asset.id}:metadata` } }, { assetId: asset.id, content: metadata, facets });
+  if (metadata) operations.push({ index: { _id: `${asset.id}:metadata` } }, { assetId: asset.id, content: metadata, facets, humanTags });
   if (theme) operations.push({ index: { _id: `${asset.id}:theme` } },
     { assetId: asset.id, content: theme, evidenceKind: "theme", embedding: vectors[texts.indexOf(theme)] });
   const response = await esRequest("/_bulk?refresh=wait_for", {
@@ -180,6 +181,7 @@ interface ChunkHit {
   content?: string;
   evidence?: Omit<PlaybackEvidence, "similarity">;
   matchedFields?: string[];
+  humanTags?: string[];
 }
 
 /** 素材级 RRF：完整局部语境参与语义召回，BM25 不能绕过语义门槛。 */
@@ -199,6 +201,7 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
   const lexicalIds = new Set([...keywordHits, ...(options.visualHits ?? [])].map(hit => hit.assetId));
   // 短词搜整条素材：没有完整词证据时，整片语义须接近本次最佳结果，防止局部泛化填满列表。
   const semanticFloor = Math.max(threshold, ...[...scenes.values()].map(hit => (hit.score ?? threshold) - 0.1));
+  const text = (options.query ?? "").replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
   const candidates = new Map<string, SearchCandidate>();
   for (const assetId of new Set([...focus.keys(), ...context.keys()])) {
     if (unusableVisualReason(scenes.get(assetId)?.content ?? focus.get(assetId)?.content ?? "")) continue;
@@ -228,6 +231,11 @@ export function fuseResults(vectorHits: ChunkHit[], keywordHits: ChunkHit[], k: 
       themeMatch = themeQuality > (matchQuality ?? -1);
       matchQuality = Math.max(matchQuality ?? -1, themeQuality);
     }
+    // 原始画面和必需语境均已准入；具体人工标签参与综合质量，重复标签不叠加。
+    const exactTag = [...keywordHits, ...(options.visualHits ?? [])].filter(hit => hit.assetId === assetId)
+      .flatMap(hit => hit.humanTags ?? []).flatMap(tag => tag.split(/[\s,，、]+/u))
+      .some(tag => { const value = tag.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase(); return value.length >= 2 && text.includes(value); });
+    if (exactTag && matchQuality !== undefined) matchQuality = Math.min(1, matchQuality + 0.08);
     if (sceneSimilarity !== undefined && matchQuality !== undefined && matchQuality < threshold) continue;
     const evidence = (options.contextRequired || (themeMatch && (contextSimilarity ?? -1) >= (semanticSimilarity ?? -1)) ? contextHits : vectorHits).filter(hit => hit.assetId === assetId && hit.evidence && hit.score !== undefined)
       .map(hit => ({ ...hit.evidence!, similarity: hit.score! }));
@@ -268,7 +276,7 @@ interface SearchHits {
   timed_out?: boolean;
   _shards?: { failed: number };
   hits: { hits: Array<{ _id: string; _score: number; matched_queries?: string[];
-    _source: { assetId: string; content?: string; evidenceKind?: PlaybackEvidence["kind"]; startMs?: number; endMs?: number } }> };
+    _source: { assetId: string; content?: string; humanTags?: string[]; evidenceKind?: PlaybackEvidence["kind"]; startMs?: number; endMs?: number } }> };
 }
 
 /** 当前句、局部语境及两个词法方向的分块分数，不作为 API 的 RRF 分项分数。 */
@@ -299,11 +307,12 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
     {
       size: config.SEARCH_KEYWORD_TOP_K,
       min_score: config.SEARCH_KEYWORD_THRESHOLD,
-      _source: ["assetId"],
+      _source: ["assetId", "humanTags"],
       query: { bool: { should: [
         lexicalMatch("content", query, { boost: 2 }),
         ...(contextVector ? [lexicalMatch("content", context!, { boost: 1 })] : []),
-        ...["events", "facets.topic", "facets.object"].map(field => lexicalMatch(field, context || query, { _name: field })),
+        ...["events", "facets.topic", "facets.object", "facets.form", "facets.style", "facets.color_composition", "facets.custom"].map(field => lexicalMatch(field, context || query, { _name: field })),
+        lexicalMatch("humanTags", query, { _name: "humanTags" }),
       ], minimum_should_match: 1, filter: [filter] } },
       sort: [{ _score: "desc" }, { assetId: "asc" }],
     },
@@ -328,7 +337,7 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
       .map((hit): ChunkHit & { score: number } => ({
         chunkId: hit._id, assetId: hit._source.assetId, content: hit._source.content,
         score: lexical ? hit._score : 2 * hit._score - 1,
-        ...(lexical ? { matchedFields: hit.matched_queries ?? [] } : { evidence: { kind: hit._source.evidenceKind ?? "unknown",
+        ...(lexical ? { matchedFields: hit.matched_queries ?? [], humanTags: hit._source.humanTags } : { evidence: { kind: hit._source.evidenceKind ?? "unknown",
           ...(hit._source.startMs === undefined ? {} : { startMs: hit._source.startMs }),
           ...(hit._source.endMs === undefined ? {} : { endMs: hit._source.endMs }) } }),
       })).filter(hit => lexical || !playbackOnly || (hit.evidence?.kind !== "theme" &&

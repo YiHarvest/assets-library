@@ -299,6 +299,14 @@ async function persistAnalysis(
     const refs = await activeAnalysisRefs(tx, job, asset);
 
     for (const ref of refs) {
+      const table = ref.kind === "private" ? privateAssets : publicAssets;
+      const [current] = await tx.select({ description: table.description }).from(table).where(eq(table.id, ref.id)).limit(1);
+      const [previous] = await tx.select({ result: analysisResults.resultJson }).from(analysisResults).where(
+        ref.kind === "private" ? eq(analysisResults.privateAssetId, ref.id) : eq(analysisResults.publicAssetId, ref.id),
+      ).limit(1);
+      // 重新分析只替换模型描述；每份公私库素材独立保留人工修改。
+      const description = !current?.description || current.description === previous?.result?.description
+        ? result.description : current.description;
       await tx
         .insert(analysisResults)
         .values({
@@ -357,7 +365,7 @@ async function persistAnalysis(
           });
       }
       await updateProcessingAsset(tx, ref, {
-        description: asset.description || result.description,
+        description,
         processingStatus: "completed",
         failureCode: null,
         failureMessage: null,

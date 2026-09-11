@@ -3,6 +3,26 @@ import { assetEvidence, evidenceInWindow } from "@/server/search/asset-evidence"
 import { unusableVisualReason } from "@/server/media/material-quality";
 
 describe("material playback evidence", () => {
+  it("indexes current form, style, composition and custom labels without restoring deleted model labels", () => {
+    const result = assetEvidence({ description: "电脑屏幕", analysis: null, tags: [
+      { category: "form", value: "投流", source: "human" },
+      { category: "style", value: "写实" }, { category: "color_composition", value: "暖色" },
+      { category: "custom", value: "获客成本" }, { category: "scene", value: "科技" },
+    ] });
+    expect(result.facets).toMatchObject({ form: ["投流"], style: ["写实"], color_composition: ["暖色"], custom: ["获客成本"], scene: [] });
+  });
+
+  it("indexes visible image OCR independently and does not promote all historically human-marked tags", () => {
+    const result = assetEvidence({ description: "广告后台截图", tags: [
+      { category: "scene", value: "电脑屏幕", source: "human" },
+      { category: "custom", value: "投流", source: "human" },
+    ], analysis: { kind: "image", description: "广告后台截图",
+      tags: { scene: ["电脑屏幕"], person: [], object: [], style: [], color_composition: [] },
+      ocr: { text: "推广消耗 428.99 元", unavailableReason: null },
+    } });
+    expect(result.chunks).toContainEqual({ content: "推广消耗 428.99 元", kind: "static" });
+    expect(result).toMatchObject({ humanTags: ["投流"] });
+  });
   it.each([
     "纯黑色图像，无任何可见内容、物体或细节。",
     "视频全程为黑屏画面，无任何可见视觉内容。",

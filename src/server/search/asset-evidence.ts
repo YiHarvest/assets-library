@@ -1,6 +1,8 @@
 import type { AssetDetail } from "@/shared/contracts";
 import { unusableVisualReason } from "@/server/media/material-quality";
 
+export const indexedTagCategories = ["topic", "scene", "person", "object", "form", "style", "color_composition", "custom"];
+
 export interface PlaybackEvidence {
   kind: "point" | "range" | "static" | "unknown" | "summary" | "theme";
   startMs?: number;
@@ -32,12 +34,21 @@ export function assetEvidence(asset: Pick<AssetDetail, "description" | "analysis
   const unusable = unusableVisualReason(asset.description) || unusableVisualReason(analysis?.description ?? "");
   const chunks = unusable ? [] : [
     ...(asset.description.trim() ? [{ content: asset.description.trim(), kind: analysis?.kind === "image" ? "static" as const : timed.length ? "summary" as const : "unknown" as const }] : []),
+    ...(analysis?.kind === "image" && analysis.ocr.text?.trim() ? [{ content: analysis.ocr.text.trim(), kind: "static" as const }] : []),
     ...timed,
   ];
-  const facets = Object.fromEntries(["topic", "scene", "person", "object"].map(category => [category,
+  const facets = Object.fromEntries(indexedTagCategories.map(category => [category,
     [...new Set(asset.tags.filter(tag => tag.category === category).map(tag => tag.value.trim()).filter(value =>
       value && !["城市风貌", "建筑", "科技", "财经", "社会场景", "无人物"].includes(value)))],
   ]));
-  return { chunks: [...new Map(chunks.map(chunk => [JSON.stringify(chunk), chunk])).values()], facets,
+  // 历史编辑曾把保留的模型标签也标为 human；以原分析对照，只把人工补充的标签当作偏好。
+  const modelTags = new Set(analysis ? [
+    ...Object.entries(analysis.tags).flatMap(([category, values]) => values.map(value => `${category}:${value.trim().toLowerCase()}`)),
+    ...(analysis.kind === "video" ? analysis.topics.map(value => `topic:${value.trim().toLowerCase()}`) : []),
+  ] : []);
+  const humanTags = unusable ? [] : [...new Set(asset.tags.filter(tag => tag.source === "human" &&
+    facets[tag.category]?.includes(tag.value.trim()) && !modelTags.has(`${tag.category}:${tag.value.trim().toLowerCase()}`))
+    .map(tag => tag.value.trim()))];
+  return { chunks: [...new Map(chunks.map(chunk => [JSON.stringify(chunk), chunk])).values()], facets, humanTags,
     theme: unusable ? "" : facets.topic.join("，") };
 }

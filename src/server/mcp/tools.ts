@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { projectIdSchema } from "@/shared/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppConfig } from "@/server/config";
 import { loadConfig } from "@/server/config";
@@ -155,7 +156,7 @@ async function runIdempotentWrite<T extends Record<string, unknown>>(
 }
 
 async function runUploadFromUrl(
-  input: { url: string; filename?: string },
+  input: { url: string; filename?: string; project_id?: string | null },
   config: AppConfig,
   service: ApiV1Service,
 ) {
@@ -179,6 +180,7 @@ async function runUploadFromUrl(
     const createStarted = process.hrtime.bigint();
     const task = await service.createUploadTask({
       user_id: userId,
+      project_id: input.project_id,
       callback_url: null,
       items: [
         {
@@ -251,7 +253,7 @@ interface BatchUrlItem {
 }
 
 async function runUploadBatchFromUrls(
-  input: { items: BatchUrlItem[] },
+  input: { items: BatchUrlItem[]; project_id?: string | null },
   config: AppConfig,
   service: ApiV1Service,
 ) {
@@ -267,6 +269,7 @@ async function runUploadBatchFromUrls(
 
   const task = await service.createUploadTask({
     user_id: userId,
+    project_id: input.project_id,
     callback_url: null,
     items: sources.map((source) => ({
       filename: source.filename,
@@ -384,6 +387,7 @@ export function registerTools(
         "从可达 URL（白名单域名）拉取图片或视频并提交异步入库任务，立即返回 task_id；随后用 get_task_status 查询终态和素材 ID。",
       inputSchema: z.object({
         url: z.string().url().describe("文件的可达 URL（http/https，白名单域名）"),
+        project_id: projectIdSchema.nullish().describe("可选项目 UUID，整批素材继承该归属"),
         filename: z
           .string()
           .trim()
@@ -394,9 +398,9 @@ export function registerTools(
         idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ url, filename, idempotency_key }) => auditedToolCall(
+    async ({ url, filename, project_id, idempotency_key }) => auditedToolCall(
       "upload_from_url",
-      { url, filename, idempotency_key },
+      { url, filename, project_id, idempotency_key },
       async () => {
         const currentUserId = userId();
         const result = await runIdempotentWrite(
@@ -405,8 +409,8 @@ export function registerTools(
           "upload_from_url",
           currentUserId,
           idempotency_key,
-          { url, filename },
-          () => runUploadFromUrl({ url, filename }, config, service),
+          { url, filename, project_id },
+          () => runUploadFromUrl({ url, filename, project_id }, config, service),
         );
         return textResult(result);
       },
@@ -420,6 +424,7 @@ export function registerTools(
       description:
         "从白名单 URL 批量拉取 1–100 个图片/视频，在一个任务中封存。",
       inputSchema: z.object({
+        project_id: projectIdSchema.nullish().describe("可选项目 UUID，整批素材继承该归属"),
         items: z
           .array(
             z.object({
@@ -438,9 +443,9 @@ export function registerTools(
         idempotency_key: idempotencyKeySchema,
       }),
     },
-    async ({ items, idempotency_key }) => auditedToolCall(
+    async ({ items, project_id, idempotency_key }) => auditedToolCall(
       "upload_batch_from_urls",
-      { items, idempotency_key },
+      { items, project_id, idempotency_key },
       async () => {
         const currentUserId = userId();
         const result = await runIdempotentWrite(
@@ -449,8 +454,8 @@ export function registerTools(
           "upload_batch_from_urls",
           currentUserId,
           idempotency_key,
-          { items },
-          () => runUploadBatchFromUrls({ items }, config, service),
+          { items, project_id },
+          () => runUploadBatchFromUrls({ items, project_id }, config, service),
         );
         return textResult(result);
       },
@@ -514,6 +519,7 @@ export function registerTools(
       description:
         "混合搜索与过滤素材。scope 决定可见范围：own 仅本人、user 指定用户、public 仅公共、all 公共+所有用户（默认 own）。支持游标分页与标签统计。",
       inputSchema: z.object({
+        project_id: projectIdSchema.nullish().describe("只查询此项目；省略或 null 不限制项目"),
         query: z
           .string()
           .trim()
@@ -560,6 +566,7 @@ export function registerTools(
         keywords: input.keywords,
         filter: {
           user_scope: scope,
+          project_id: input.project_id,
           media_types: input.media_types,
           tags: input.tags,
         },
@@ -750,17 +757,18 @@ export function registerTools(
       title: "列出我的素材",
       description: "分页列出当前调用方的素材展示列表（含媒体直链与缩略图 URL）。",
       inputSchema: z.object({
+        project_id: projectIdSchema.nullish(),
         cursor: z.string().min(1).max(2_048).nullable().optional(),
         limit: z.number().int().min(1).max(100).optional(),
       }),
     },
-    async ({ cursor, limit }) => auditedToolCall(
+    async ({ cursor, limit, project_id }) => auditedToolCall(
       "list_user_media",
-      { cursor, limit },
+      { cursor, limit, project_id },
       async () => {
       const result = await service.listUserMedia(
         userId(),
-        { cursor: cursor ?? null, limit: limit ?? 20 },
+        { cursor: cursor ?? null, limit: limit ?? 20, project_id },
         internalOrigin,
       );
       return textResult({

@@ -99,6 +99,7 @@ export interface CreateTaskManifest {
   id: string;
   type: "upload" | "delete" | "publish" | "update" | "retry";
   userId?: string | null;
+  projectId?: string | null;
   callbackUrl?: string | null;
   expiresAt?: Date | null;
   result?: Record<string, unknown> | null;
@@ -202,6 +203,7 @@ export async function createTaskWithItems(manifest: CreateTaskManifest) {
       type: manifest.type,
       phase: manifest.type === "upload" ? "receiving" : "queued",
       userId,
+      projectId: manifest.projectId ?? null,
       callbackUrl: manifest.callbackUrl?.trim() || null,
       totalBytes,
       totalItems: items.length,
@@ -710,6 +712,7 @@ export type AssetOverviewView = "pending" | "published";
 
 export interface AssetScope {
   userId?: string | null;
+  projectId?: string | null;
   excludeUserId?: string;
   includeAllUsers?: boolean;
 }
@@ -792,9 +795,11 @@ const thumbnailMediaObjects = alias(
 );
 
 function scopeCondition(scope: AssetScope): SQL | undefined {
-  if (scope.includeAllUsers) return undefined;
+  const project = scope.projectId ? eq(assets.projectId, scope.projectId) : undefined;
+  if (scope.includeAllUsers) return project;
   if (scope.excludeUserId) {
     return and(
+      project,
       eq(assets.kind, "public"),
       or(
         isNull(assets.uploaderUserId),
@@ -803,15 +808,16 @@ function scopeCondition(scope: AssetScope): SQL | undefined {
     );
   }
   const userId = scope.userId?.trim();
-  return userId
+  return and(project, userId
     ? and(eq(assets.kind, "private"), eq(assets.userId, userId))
-    : eq(assets.kind, "public");
+    : eq(assets.kind, "public"));
 }
 
 function rowMatchesScope(
-  row: Pick<typeof assets.$inferSelect, "kind" | "userId" | "uploaderUserId">,
+  row: Pick<typeof assets.$inferSelect, "kind" | "userId" | "uploaderUserId" | "projectId">,
   scope: AssetScope,
 ) {
+  if (scope.projectId && row.projectId !== scope.projectId) return false;
   if (scope.includeAllUsers) return true;
   if (scope.excludeUserId) {
     return row.kind === "public" && row.uploaderUserId !== scope.excludeUserId;
@@ -942,6 +948,7 @@ export async function listUserMediaPage(
   userId: string,
   cursor: UserMediaCursor | null = null,
   pageSize = 20,
+  projectId?: string | null,
 ): Promise<UserMediaPage> {
   const normalizedUserId = normalizedUsageUserId(userId);
   const safePageSize = Math.min(
@@ -981,7 +988,8 @@ export async function listUserMediaPage(
         eq(thumbnailMediaObjects.status, "persisted"),
       ),
     )
-    .where(and(userStorageConditions(normalizedUserId), cursorCondition))
+    .where(and(userStorageConditions(normalizedUserId), cursorCondition,
+      projectId ? eq(assets.projectId, projectId) : undefined))
     .orderBy(desc(assets.createdAt), desc(assets.id))
     // 多取一行即可判断下一页，避免 OFFSET 和额外 count(*) 扫描。
     .limit(safePageSize + 1);

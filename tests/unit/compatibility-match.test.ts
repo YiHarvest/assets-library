@@ -137,6 +137,23 @@ describe("compatibility segment matching", () => {
     expect(search.mock.calls[1][2]?.shortVideosOnly).toBe(true);
   });
 
+  it("keeps the project filter in regular and short-video recall without echoing it into callbacks", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000099";
+    const input = { ...request(), project_id: projectId };
+    const candidateIds = [candidate().id, "00000000-0000-4000-8000-000000000002"];
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({ items: [], threshold: 0, maxScore: null, reason: "no_candidates", message: null }));
+    await matchCompatibilitySegments(alignCompatibilitySegments(input).slice(0, 1), "https://focus.example.test", {
+      projectId, assetUrls: candidateIds.map(id => `https://focus.example.test/api/v1/media/${id}`),
+    }, { search, getAsset: async () => null });
+    expect(search).toHaveBeenCalledTimes(2);
+    for (const call of search.mock.calls) {
+      expect(call[1]).toEqual({ includeAllUsers: true, projectId });
+      expect(call[2]?.candidateAssetIds).toEqual(candidateIds);
+    }
+    expect(search.mock.calls[1][2]?.shortVideosOnly).toBe(true);
+    expect(compatibilityCallbackFields(input)).not.toHaveProperty("project_id");
+  });
+
   it.each([
     { enabled: "true", mediaType: "video" as const, sourceMs: 8500, slotMs: 1480, clip: "1480" },
     { enabled: "true", mediaType: "video" as const, sourceMs: 1000, slotMs: 1480, clip: null },

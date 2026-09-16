@@ -231,6 +231,7 @@ export class UploadService {
       id: taskId,
       type: "upload",
       userId: input.user_id,
+      projectId: input.project_id,
       callbackUrl: input.callback_url,
       expiresAt,
       items: manifests,
@@ -238,6 +239,7 @@ export class UploadService {
     addAuditFields({
       task_id: taskId,
       user_id: input.user_id?.trim() || null,
+      project_id: input.project_id ?? null,
       upload_item_count: manifests.length,
       upload_total_bytes: totalBytes,
       upload_filenames: manifests.map((item) => item.filename),

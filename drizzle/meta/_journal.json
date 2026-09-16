@@ -71,6 +71,13 @@
       "when": 1788934826028,
       "tag": "0009_recall_revisions",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1789543460966,
+      "tag": "0010_asset_projects",
+      "breakpoints": true
     }
   ]
 }

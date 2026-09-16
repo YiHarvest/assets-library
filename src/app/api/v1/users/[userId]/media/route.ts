@@ -13,6 +13,7 @@ export async function GET(
     const { userId } = await context.params;
     const url = new URL(request.url);
     const input = userMediaListQuerySchema.parse({
+      project_id: url.searchParams.get("project_id") ?? undefined,
       cursor: url.searchParams.get("cursor"),
       limit: url.searchParams.get("limit") ?? undefined,
     });

@@ -22,6 +22,7 @@ import { createLocalId } from "@/lib/local-id";
 import {
   MAX_UPLOAD_TASK_BYTES,
   MAX_UPLOAD_TASK_ITEMS,
+  projectIdSchema,
   type TaskStatusResponse,
 } from "@/shared/contracts";
 
@@ -74,13 +75,16 @@ function taskItemError(item: TaskStatusResponse["items"][number]) {
     : item.error.message;
 }
 
-export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
+export function UploadForm({ initialUserId = "", initialProjectId = "", returnTo }: {
+  initialUserId?: string; initialProjectId?: string; returnTo?: string;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const pollControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(false);
   const [items, setItems] = useState<UploadItem[]>([]);
   const [userId, setUserId] = useState(initialUserId);
+  const [projectId, setProjectId] = useState(initialProjectId);
   const [task, setTask] = useState<TaskStatusResponse | null>(null);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -219,6 +223,11 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
   };
 
   const upload = async () => {
+    const project = projectIdSchema.optional().safeParse(projectId.trim() || undefined);
+    if (!project.success) {
+      setError("项目 ID 必须是有效的 UUID。");
+      return;
+    }
     const queuedItems = items.filter((item) => item.phase === "queued");
     if (queuedItems.length === 0) return;
     if (items.length > MAX_UPLOAD_TASK_ITEMS) {
@@ -237,6 +246,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
         method: "POST",
         body: JSON.stringify({
           user_id: userId,
+          project_id: project.data,
           items: items.map((item) => ({
             filename: item.file.name,
             size_bytes: item.file.size,
@@ -463,7 +473,7 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
                       )}
                       {item.assetIds[0] && (
                         <WebUiLink
-                          href={appUrl(`/assets/${item.assetIds[0]}?scope=${userId.trim() ? "private" : "public"}&user_id=${encodeURIComponent(userId)}`)}
+                          href={appUrl(`/assets/${item.assetIds[0]}?scope=${userId.trim() ? "private" : "public"}&user_id=${encodeURIComponent(userId)}${returnTo ? `&return_to=${encodeURIComponent(returnTo)}` : ""}`)}
                           className="mt-2 inline-flex text-xs font-medium text-cyan-700 hover:underline"
                         >
                           {item.assetIds.length > 1
@@ -480,6 +490,12 @@ export function UploadForm({ initialUserId = "" }: { initialUserId?: string }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
+        <label className="block space-y-2">
+          <span className="text-sm font-medium">项目 ID（可选）</span>
+          <Input value={projectId} maxLength={36} disabled={submitting || Boolean(task)}
+            onChange={(event) => setProjectId(event.target.value)} placeholder="填写业务项目的 UUID" />
+          <span className="block text-xs text-slate-500">本批素材及其分镜、公私副本使用同一项目；留空表示未归属项目。</span>
+        </label>
         <label className="block space-y-2">
           <span className="text-sm font-medium">用户 ID</span>
           <Input

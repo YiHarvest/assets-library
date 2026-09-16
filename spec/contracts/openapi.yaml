@@ -316,6 +316,11 @@ paths:
         均为普通绝对直链，可直接用于 img/video 元素，不返回 base64。
       parameters:
         - $ref: "#/components/parameters/RequiredUserId"
+        - name: project_id
+          in: query
+          required: false
+          description: 只查询此项目的素材；省略时保持原有用户范围。
+          schema: { type: string, format: uuid }
         - name: cursor
           in: query
           required: false
@@ -671,6 +676,8 @@ components:
       additionalProperties: true
       required: [asr, llm, callback_url]
       properties:
+        project_id:
+          $ref: "#/components/schemas/ProjectId"
         asr:
           description: 可传 ASR transcripts；LLM segments 已带时间轴时也可传空对象。
           type: object
@@ -894,6 +901,8 @@ components:
       description: 三步上传的第一步请求；user_id 为空只创建公共素材，非空同时创建公私两份。
       required: [items]
       properties:
+        project_id:
+          $ref: "#/components/schemas/ProjectId"
         user_id: { $ref: "#/components/schemas/NullableUserId" }
         callback_url: { $ref: "#/components/schemas/CallbackUrl" }
         items:
@@ -1132,11 +1141,20 @@ components:
           properties:
             mode: { type: string, const: exclude_user }
             user_id: { $ref: "#/components/schemas/UserId" }
+    ProjectId:
+      description: >-
+        可选业务项目 UUID，统一存为小写。上传时整批图片、分镜及公私副本继承；
+        查询时与原用户、公私库及其他过滤条件取交集。省略或 null 不限制项目；
+        指定项目不包含未归属素材。它是归属字段，不代替用户作用域。
+      oneOf: [{ type: string, format: uuid }, { type: "null" }]
+
     AssetQueryFilter:
       type: object
       additionalProperties: false
       description: 所有字段按 AND 组合；user_scope 缺省时只查询公共素材。
       properties:
+        project_id:
+          $ref: "#/components/schemas/ProjectId"
         user_scope:
           $ref: "#/components/schemas/UserScope"
           default: { mode: public }
@@ -1199,6 +1217,8 @@ components:
         - created_at
         - updated_at
       properties:
+        project_id:
+          $ref: "#/components/schemas/ProjectId"
         asset_id: { type: string, format: uuid }
         parent_video_id:
           description: 视频切片所属父视频；图片为 null。

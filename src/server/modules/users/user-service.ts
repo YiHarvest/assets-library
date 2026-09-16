@@ -126,6 +126,7 @@ export class UserService {
       userId,
       decodeUserMediaCursor(input.cursor),
       input.limit,
+      input.project_id,
     );
     return {
       user_id: userId,

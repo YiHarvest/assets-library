@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   analysisResultSchema,
+  assetQuerySchema,
+  compatibilityMatchRequestSchema,
+  createUploadTaskSchema,
+  userMediaListQuerySchema,
   apiV1AssetSummarySchema,
   assetEditSchema,
   assetQueryResponseSchema,
@@ -14,6 +18,22 @@ import {
 } from "@/shared/contracts";
 
 describe("shared contracts", () => {
+  it("accepts optional project UUIDs and rejects invalid project filters", () => {
+    const projectId = "aabbccdd-0000-4000-8000-000000000001";
+    const inputs = [
+      (project_id?: unknown) => createUploadTaskSchema.parse({ project_id, items: [{ filename: "a.png", size_bytes: 1 }] }).project_id,
+      (project_id?: unknown) => assetQuerySchema.parse({ filter: { project_id } }).filter.project_id,
+      (project_id?: unknown) => userMediaListQuerySchema.parse({ project_id }).project_id,
+      (project_id?: unknown) => compatibilityMatchRequestSchema.parse({ project_id, asr: {},
+        llm: { segments: [{ segment_id: 1, text: "夕阳", level: 1 }] }, callback_url: "https://example.com/callback" }).project_id,
+    ];
+    for (const parse of inputs) {
+      expect(parse()).toBeUndefined();
+      expect(parse(null)).toBeNull();
+      expect(parse(` ${projectId.toUpperCase()} `)).toBe(projectId);
+      for (const invalid of ["", "project-1", 123]) expect(() => parse(invalid)).toThrow();
+    }
+  });
   it.each(["image", "video"])("preserves more than five tags per category in stored %s analysis", (kind) => {
     const categories = kind === "image"
       ? ["scene", "object", "person", "style", "color_composition"]

@@ -153,9 +153,10 @@ describe("overview search routing", () => {
   it("keeps the page, filter and private scope in detail return links", async () => {
     apiMocks.serverApiV1.mockResolvedValue({ ...emptyPage(), items: [{ asset_id: "asset-a" }] });
     apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
-    const parameters = { scope: "private", user_id: "user-7", tag: "夕阳", layout: "list", cursor: "page-3",
+    const parameters = { scope: "private", user_id: "user-7", project_id: "aabbccdd-0000-4000-8000-000000000001", tag: "夕阳", layout: "list", cursor: "page-3",
       history: Buffer.from(JSON.stringify([null, "page-2"])).toString("base64url") };
     const view = await OverviewPage({ searchParams: Promise.resolve(parameters) });
+    expect(requestedBody()).toMatchObject({ filter: { project_id: parameters.project_id } });
     const grid = React.Children.toArray(view.props.children).find(child => React.isValidElement(child) && child.type === AssetOverviewGrid);
     if (!React.isValidElement<{ returnTo: string }>(grid)) throw new Error("Missing grid");
     const target = new URL(grid.props.returnTo, "http://localhost");
@@ -166,7 +167,7 @@ describe("overview search routing", () => {
   it.each([16, 8, 0])("returns to the last available page when deletion leaves %s assets", async total => {
     apiMocks.serverApiV1.mockResolvedValue({ ...emptyPage(), tag_statistics: { total_assets: total } });
     apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
-    const action = OverviewPage({ searchParams: Promise.resolve({ scope: "private", user_id: "user-7", tag: "夕阳", layout: "list",
+    const action = OverviewPage({ searchParams: Promise.resolve({ scope: "private", user_id: "user-7", project_id: "aabbccdd-0000-4000-8000-000000000001", tag: "夕阳", layout: "list",
       cursor: "page-3", history: Buffer.from(JSON.stringify([null, "page-2"])).toString("base64url") }) });
     const error = await action.catch(cause => cause);
     expect(error.digest).toContain("NEXT_REDIRECT");
@@ -176,6 +177,14 @@ describe("overview search routing", () => {
     expect(target.searchParams.get("user_id")).toBe("user-7");
     expect(target.searchParams.get("tag")).toBe("夕阳");
     expect(target.searchParams.get("layout")).toBe("list");
+    expect(target.searchParams.get("project_id")).toBe("aabbccdd-0000-4000-8000-000000000001");
+  });
+
+  it("shows invalid project input without querying an unrestricted library", async () => {
+    apiMocks.serverWebUiApi.mockResolvedValue({ items: [] });
+    const view = await OverviewPage({ searchParams: Promise.resolve({ project_id: "bad-project" }) });
+    expect(apiMocks.serverApiV1).not.toHaveBeenCalled();
+    expect(renderedText(view)).toContain("项目 ID 必须是有效的 UUID");
   });
 
   it.each([appUrl("/?cursor=page-3&scope=private&user_id=user-7"), "https://evil.example/", "//evil.example/", "javascript:alert(1)", "/upload"])(

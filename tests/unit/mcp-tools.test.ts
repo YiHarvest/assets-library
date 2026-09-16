@@ -191,6 +191,7 @@ describe("MCP tool registry", () => {
   });
 
   it("excludes the current uploader from MCP public searches", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000099";
     const queryAssets = vi.fn(async () => ({
       items: [],
       next_cursor: null,
@@ -203,7 +204,7 @@ describe("MCP tool registry", () => {
 
     await client.callTool({
       name: "query_assets",
-      arguments: { scope: "public", keywords: ["AI"] },
+      arguments: { scope: "public", keywords: ["AI"], project_id: projectId },
     });
 
     expect(queryAssets).toHaveBeenCalledWith(
@@ -211,6 +212,7 @@ describe("MCP tool registry", () => {
         keywords: ["AI"],
         filter: expect.objectContaining({
           user_scope: { mode: "exclude_user", user_id: "user_mcp_test" },
+          project_id: projectId,
         }),
       }),
     );

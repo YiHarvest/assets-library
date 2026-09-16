@@ -68,6 +68,7 @@ export const tasks = mysqlTable(
     phase: varchar("phase", { length: 64 }).notNull().default("queued"),
     userId: varchar("user_id", { length: 191 }),
     callbackUrl: varchar("callback_url", { length: 2048 }),
+    projectId: uuid("project_id"),
     receivedBytes: byteCount("received_bytes").notNull().default(0),
     totalBytes: byteCount("total_bytes").notNull().default(0),
     totalItems: int("total_items", { unsigned: true }).notNull().default(0),
@@ -344,6 +345,7 @@ export const legacyAssets = mysqlTable(
 
 function assetContentColumns() {
   return {
+    projectId: uuid("project_id"),
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
     taskItemId: uuid("task_item_id").references(() => taskItems.id, {
       onDelete: "set null",
@@ -415,6 +417,7 @@ export const publicAssets = mysqlTable(
       table.createdAt,
     ),
     uniqueIndex("public_assets_task_segment_unique").on(table.taskItemSegmentId),
+    index("public_assets_project_created_idx").on(table.projectId, table.createdAt),
     uniqueIndex("public_assets_source_segment_unique").on(
       table.videoSourceId,
       table.segmentIndex,
@@ -443,6 +446,7 @@ export const privateAssets = mysqlTable(
   (table) => [
     uniqueIndex("private_assets_public_asset_unique").on(table.publicAssetId),
     index("private_assets_user_created_idx").on(table.userId, table.createdAt),
+    index("private_assets_project_user_created_idx").on(table.projectId, table.userId, table.createdAt),
     index("private_assets_user_processing_created_idx").on(
       table.userId,
       table.processingStatus,
@@ -727,6 +731,7 @@ export const recallBuildState = mysqlTable("recall_build_state", {
 export const assetEntries = mysqlView("asset_entries", {
   kind: mysqlEnum("kind", ["public", "private"]).notNull(),
   id: uuid("id").notNull(),
+  projectId: uuid("project_id"),
   userId: varchar("user_id", { length: 191 }),
   uploaderUserId: varchar("uploader_user_id", { length: 191 }),
   publicAssetId: uuid("public_asset_id"),
@@ -764,7 +769,7 @@ export const assetEntries = mysqlView("asset_entries", {
   updatedAt: utcDateTime("updated_at").notNull(),
   deletedAt: utcDateTime("deleted_at"),
 }).as(sql`
-  select 'public' as kind, id, null as user_id, uploader_user_id,
+  select 'public' as kind, id, project_id, null as user_id, uploader_user_id,
     null as public_asset_id, task_id, task_item_id, task_item_segment_id,
     video_source_id, media_object_id, thumbnail_media_object_id, segment_index,
     segment_start_ms, segment_end_ms, name, description, media_type,
@@ -772,7 +777,7 @@ export const assetEntries = mysqlView("asset_entries", {
     review_status, failure_code, failure_message, created_at, updated_at, deleted_at
   from public_assets
   union all
-  select 'private' as kind, id, user_id, null as uploader_user_id,
+  select 'private' as kind, id, project_id, user_id, null as uploader_user_id,
     public_asset_id, task_id, task_item_id, task_item_segment_id,
     video_source_id, media_object_id, thumbnail_media_object_id, segment_index,
     segment_start_ms, segment_end_ms, name, description, media_type,

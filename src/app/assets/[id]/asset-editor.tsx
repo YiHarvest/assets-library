@@ -1,4 +1,5 @@
 "use client";
+import { AssetProject } from "@/components/asset-project";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -287,6 +288,7 @@ export function AssetEditor({
             </p>
           </CardHeader>
           <CardContent className="space-y-5">
+            <AssetProject projectId={asset.project_id} />
             <label className="block space-y-2">
               <span className="text-sm font-medium">素材名称</span>
               <Input value={name} onChange={(event) => setName(event.target.value)} />

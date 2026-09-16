@@ -1841,6 +1841,63 @@ mysqlTest("MySQL 数据层", () => {
       .rejects.toMatchObject({ code: "invalid_request", status: 404 });
   });
 
+  test.each(["v1", "v2"])("项目筛选贯穿列表、用户媒体和 %s 召回，勾选素材不能越过项目范围", async (engine) => {
+    vi.stubEnv("SEARCH_RECALL_ENGINE", engine);
+    const projectA = crypto.randomUUID();
+    const projectB = crypto.randomUUID();
+    const ids = Array.from({ length: 7 }, () => crypto.randomUUID());
+    const now = new Date();
+    const common = {
+      name: "夕阳", description: "海边夕阳下的人物剪影", mediaType: "image" as const,
+      originalFilename: "sunset.png", originalPath: "sunset.png", mimeType: "image/png", sizeBytes: 10,
+      processingStatus: "completed" as const, reviewStatus: "published" as const, createdAt: now, updatedAt: now,
+    };
+    await migrationConnection.db.insert(publicAssets).values([
+      { ...common, id: ids[0], projectId: projectA, uploaderUserId: "user-a" },
+      { ...common, id: ids[1], projectId: projectA },
+      { ...common, id: ids[2], projectId: projectB },
+      { ...common, id: ids[3] },
+    ]);
+    await migrationConnection.db.insert(privateAssets).values([
+      { ...common, id: ids[4], projectId: projectA, userId: "user-a" },
+      { ...common, id: ids[5], projectId: projectB, userId: "user-a" },
+      { ...common, id: ids[6], projectId: projectA, userId: "user-b" },
+    ]);
+    const options = { projectId: projectA, limit: 1, includeTagStatistics: true };
+    const first = await repository.queryAssetsPage(options);
+    const second = await repository.queryAssetsPage({ ...options, page: 2 });
+    expect(first).toMatchObject({ total: 2, totalPages: 2, tagStatistics: { total_assets: 2 } });
+    expect(new Set([...first.items, ...second.items].map(row => row.id))).toEqual(new Set(ids.slice(0, 2)));
+    expect((await repository.queryAssetsPage({ includeAllUsers: true })).total).toBe(7);
+    expect((await repository.queryAssetsPage({ projectId: null })).total).toBe(4);
+    expect((await repository.queryAssetsPage({ projectId: projectA, excludeUserId: "user-a" })).items.map(row => row.id)).toEqual([ids[1]]);
+    const media = await repository.listUserMediaPage("user-a", null, 20, projectA);
+    expect(media.items.map(row => row.assetId)).toEqual([ids[4]]);
+    // 模拟索引返回越界素材，验证候选筛选与回表复核两端都保留项目约束。
+    searchAssetsMock.mockResolvedValue(ids.map(assetId => ({ assetId, searchScore: 0.9 })));
+    const search = await repository.queryAssetsPage({ projectId: projectA, semanticQuery: "夕阳" });
+    expect(new Set(searchAssetsMock.mock.lastCall?.[1])).toEqual(new Set(ids.slice(0, 2)));
+    expect(new Set(search.items.map(row => row.id))).toEqual(new Set(ids.slice(0, 2)));
+    const match = await repository.searchAssetsByDescriptionDetailed(
+      { description: "夕阳", limit: 10 }, { includeAllUsers: true, projectId: projectA },
+      { candidateAssetIds: [ids[2], ids[4]] },
+    );
+    expect(searchAssetsMock.mock.lastCall?.[1]).toEqual([ids[4]]);
+    expect(match.items.map(row => row.id)).toEqual([ids[4]]);
+    const empty = await repository.searchAssetsByDescriptionDetailed(
+      { description: "夕阳", limit: 10 }, { includeAllUsers: true, projectId: projectA },
+      { candidateAssetIds: [ids[2]] },
+    );
+    expect(empty.items).toEqual([]);
+    await expect(repository.getAssetDetail(ids[2], { includeAllUsers: true, projectId: projectA })).rejects.toThrow("素材不存在");
+    const { DefaultApiV1Service } = await import("@/server/api/v1/default-service");
+    const apiPage = await new DefaultApiV1Service().queryAssets({
+      filter: { user_scope: { mode: "all" }, project_id: projectA }, cursor: null, limit: 20, include_tag_statistics: false,
+    });
+    expect(new Set(apiPage.items.map(row => row.asset_id))).toEqual(new Set([ids[0], ids[1], ids[4], ids[6]]));
+    expect(apiPage.items.every(row => row.project_id === projectA)).toBe(true);
+  }, 30_000);
+
   test("混合召回保留结构化过滤、权限、分页与标签统计", async () => {
     async function seedAsset(input: {
       name: string;
@@ -1943,6 +2000,7 @@ mysqlTest("MySQL 数据层", () => {
     vi.stubEnv("SEGMENT_MATCH_MIN_VIDEO_DURATION_MS", "500");
     vi.stubEnv("SEGMENT_MATCH_CLIP_ENABLED", "true");
     const assetId = crypto.randomUUID();
+    const projectId = crypto.randomUUID();
     await repository.createAsset({
       assetId,
       userId: "759",
@@ -1967,8 +2025,14 @@ mysqlTest("MySQL 数据层", () => {
     );
     await migrationConnection.db
       .update(privateAssets)
-      .set({ processingStatus: "completed", reviewStatus })
+      .set({ processingStatus: "completed", reviewStatus, projectId })
       .where(eq(privateAssets.id, assetId));
+    await migrationConnection.db.insert(publicAssets).values({
+      id: crypto.randomUUID(), projectId: crypto.randomUUID(), name: "其他项目的夕阳",
+      description: "夕阳下人物", mediaType: "image", originalFilename: "sunset.jpg",
+      originalPath: "/tmp/sunset.jpg", mimeType: "image/jpeg", sizeBytes: 10,
+      processingStatus: "completed", reviewStatus, createdAt: new Date(), updatedAt: new Date(),
+    });
     searchAssetsMock.mockResolvedValue([{ assetId, searchScore: 0.91 }]);
 
     const { compatibilityMatchRequestSchema } = await import("@/shared/contracts");
@@ -1977,6 +2041,7 @@ mysqlTest("MySQL 数据层", () => {
     );
     const { processCallbackJob } = await import("@/server/services/callbacks");
     const request = compatibilityMatchRequestSchema.parse({
+      project_id: projectId,
       asr: {
         transcripts: [
           {

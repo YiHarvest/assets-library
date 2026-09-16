@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const projectIdSchema = z.string().trim().uuid().toLowerCase();
+
 export const mediaTypeSchema = z.enum(["image", "video"]);
 export type MediaType = z.infer<typeof mediaTypeSchema>;
 
@@ -321,6 +323,7 @@ const compatibilityAssetUrlSchema = z.union([
 /** 旧剪辑业务的分段匹配请求；兼容 ASR 对齐和 LLM 已带时间轴两种格式。 */
 export const compatibilityMatchRequestSchema = z
   .object({
+    project_id: projectIdSchema.nullish(),
     asr: z
       .object({
         transcripts: z
@@ -383,6 +386,7 @@ export type UploadManifestItem = z.infer<typeof uploadManifestItemSchema>;
 export const createUploadTaskSchema = z
   .object({
     user_id: nullableUserIdSchema,
+    project_id: projectIdSchema.nullish(),
     callback_url: callbackUrlSchema,
     items: z
       .array(uploadManifestItemSchema)
@@ -471,6 +475,7 @@ export type UserScope = z.infer<typeof userScopeSchema>;
 export const assetQueryFilterSchema = z
   .object({
     user_scope: userScopeSchema.default({ mode: "public" }),
+    project_id: projectIdSchema.nullish(),
     media_types: z.array(mediaTypeSchema).max(2).optional(),
     statuses: z.array(apiTaskStatusSchema).max(4).optional(),
     review_statuses: z.array(reviewStatusSchema).max(3).optional(),
@@ -495,6 +500,7 @@ export type AssetQuery = z.infer<typeof assetQuerySchema>;
 
 export const apiV1AssetSummarySchema = z.object({
   asset_id: z.string().uuid(),
+  project_id: projectIdSchema.nullish(),
   parent_video_id: z.string().uuid().nullable(),
   segment_index: z.number().int().nonnegative().nullable(),
   user_id: userIdSchema.nullable(),
@@ -641,6 +647,7 @@ export const userMediaItemSchema = z.discriminatedUnion("media_type", [
 export type UserMediaItem = z.infer<typeof userMediaItemSchema>;
 
 export const userMediaListQuerySchema = z.object({
+  project_id: projectIdSchema.nullish(),
   cursor: z.string().min(1).max(2_048).nullable().default(null),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });

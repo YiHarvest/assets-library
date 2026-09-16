@@ -1,17 +1,29 @@
 import { UploadForm } from "./upload-form";
+import { appUrl } from "@/lib/paths";
+import { WebUiLink } from "@/components/webui-link";
 
 export default async function UploadPage({
   searchParams,
 }: {
-  searchParams: Promise<{ user_id?: string | string[] }>;
+  searchParams: Promise<{ user_id?: string | string[]; project_id?: string | string[]; return_to?: string | string[] }>;
 }) {
   const parameters = await searchParams;
   const rawUserId = Array.isArray(parameters.user_id)
     ? parameters.user_id[0]
     : parameters.user_id;
+  const rawProjectId = Array.isArray(parameters.project_id) ? parameters.project_id[0] : parameters.project_id;
+  const rawReturnTo = Array.isArray(parameters.return_to) ? parameters.return_to[0] : parameters.return_to;
+  let returnTo = appUrl("/");
+  if (rawReturnTo) {
+    try {
+      const target = new URL(rawReturnTo, "http://webui.local");
+      if (target.origin === "http://webui.local" && target.pathname === appUrl("/")) returnTo = target.pathname + target.search;
+    } catch { /* 无效来源返回素材库。 */ }
+  }
   return (
     <main className="mx-auto max-w-4xl px-5 py-10">
       <div className="mb-8">
+        <WebUiLink href={returnTo} className="mb-4 inline-block text-sm text-cyan-700">返回素材库</WebUiLink>
         <p className="mb-2 text-sm font-semibold tracking-wide text-cyan-700">
           NEW ASSET
         </p>
@@ -22,7 +34,7 @@ export default async function UploadPage({
           私人上传会同时生成一份待审核的公共副本，首次分析只执行一次。
         </p>
       </div>
-      <UploadForm initialUserId={rawUserId?.trim().slice(0, 191) ?? ""} />
+      <UploadForm initialUserId={rawUserId?.trim().slice(0, 191) ?? ""} initialProjectId={rawProjectId ?? ""} returnTo={returnTo} />
     </main>
   );
 }

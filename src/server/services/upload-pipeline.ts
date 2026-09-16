@@ -253,6 +253,7 @@ async function processImage(
       ]);
       const common = {
         taskId: context.task.id,
+        projectId: context.task.projectId,
         taskItemId: context.item.id,
         name: baseName(context.item.filename),
         description: "",
@@ -480,6 +481,7 @@ async function processVideo(
           );
           await tx.insert(publicAssets).values(
             segmentRows.map(({ publicSegment, segmentId, publicMediaId, publicThumbnailMediaId, publicAssetId }) => ({
+              projectId: context.task.projectId,
               id: publicAssetId,
               uploaderUserId: context.task.userId,
               taskId: context.task.id,
@@ -508,6 +510,7 @@ async function processVideo(
             await tx.insert(privateAssets).values(
               segmentRows.map((row) => ({
                 id: row.privateAssetId!,
+                projectId: context.task.projectId,
                 publicAssetId: row.publicAssetId,
                 userId: context.task.userId!,
                 taskId: context.task.id,

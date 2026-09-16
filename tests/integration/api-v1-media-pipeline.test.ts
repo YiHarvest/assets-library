@@ -318,10 +318,12 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     filename: string,
     bytes: Buffer,
     userId: string | null = "user-pipeline",
+    projectId?: string,
   ) {
     const service = new api.DefaultApiV1Service();
     const created = await service.createUploadTask({
       user_id: userId,
+      project_id: projectId,
       callback_url: null,
       items: [{ filename, size_bytes: bytes.byteLength, content_type: null }],
     });
@@ -365,7 +367,8 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     })
       .png()
       .toBuffer();
-    const { service, taskId, itemId } = await createAndSeal("sample.png", image);
+    const projectId = crypto.randomUUID();
+    const { service, taskId, itemId } = await createAndSeal("sample.png", image, "user-pipeline", projectId);
 
     await processUntilIdle();
     const status = await service.getTask(taskId);
@@ -396,6 +399,9 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       .from(schema.publicAssets)
       .where(eq(schema.publicAssets.id, status.items[0]!.public_asset_ids[0]!));
     const analysisRows = await database.db.select().from(schema.analysisResults);
+    expect(privateAsset.projectId).toBe(projectId);
+    expect(publicAsset.projectId).toBe(projectId);
+    expect((await service.getAsset(privateAsset.id, { mode: "user", user_id: "user-pipeline" })).project_id).toBe(projectId);
     const objects = await database.db
       .select()
       .from(schema.mediaObjects);
@@ -551,9 +557,12 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       timeoutMs: 10_000,
       fetchImplementation: fake.request,
     });
+    const projectId = crypto.randomUUID();
     const { service, taskId, itemId } = await createAndSeal(
       "parent.mp4",
       parentBytes,
+      "user-pipeline",
+      projectId,
     );
     const framePreparation = vi.fn(async () => undefined);
 
@@ -600,6 +609,7 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     expect(privateAssetRows.every((row) => row.processingStatus === "completed")).toBe(true);
     expect(privateAssetRows.every((row) => row.reviewStatus === "pending_review")).toBe(true);
     expect(publicAssetRows.every((row) => row.reviewStatus === "pending_review")).toBe(true);
+    expect([...privateAssetRows, ...publicAssetRows].every((row) => row.projectId === projectId)).toBe(true);
     expect(analysisRows).toHaveLength(4);
     expect(analysisRows.every((row) => row.resultJson.kind === "video")).toBe(true);
     expect(analyzeMock).toHaveBeenCalledTimes(2);

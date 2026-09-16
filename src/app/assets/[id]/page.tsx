@@ -32,6 +32,7 @@ export default async function AssetDetailPage({
     scope: asset.user_id ? "private" : "public",
   });
   if (asset.user_id) fallback.set("user_id", asset.user_id);
+  if (asset.project_id) fallback.set("project_id", asset.project_id);
   let returnTo = appUrl(`/?${fallback}`);
   const rawReturnTo = Array.isArray(query.return_to) ? query.return_to[0] : query.return_to;
   if (rawReturnTo) {

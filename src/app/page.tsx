@@ -17,6 +17,7 @@ import { WebUiLink } from "@/components/webui-link";
 import { serverApiV1, serverWebUiApi } from "@/lib/server-api-v1";
 import { appUrl } from "@/lib/paths";
 import { redirect } from "next/navigation";
+import { projectIdSchema } from "@/shared/contracts";
 import type {
   AssetQueryResponse,
   UserDirectoryResponse,
@@ -55,6 +56,7 @@ function overviewHref(input: {
   tag?: string;
   layout?: OverviewLayout;
   userId?: string;
+  projectId?: string;
   scope: LibraryScope;
 }) {
   const parameters = new URLSearchParams({ view: input.view, scope: input.scope });
@@ -70,6 +72,7 @@ function overviewHref(input: {
   }
   if (input.layout === "list") parameters.set("layout", "list");
   if (input.scope === "private" && input.userId) parameters.set("user_id", input.userId);
+  if (input.projectId) parameters.set("project_id", input.projectId);
   return appUrl(`/?${parameters.toString()}`);
 }
 
@@ -83,10 +86,14 @@ export default async function OverviewPage({
     view?: string | string[];
     layout?: string | string[];
     user_id?: string | string[];
+    project_id?: string | string[];
     scope?: string | string[];
   }>;
 }) {
   const parameters = await searchParams;
+  const rawProjectId = firstParameter(parameters.project_id)?.trim() || undefined;
+  const parsedProject = projectIdSchema.optional().safeParse(rawProjectId);
+  const projectId = parsedProject.success ? parsedProject.data : rawProjectId;
   const view: AssetOverviewView =
     firstParameter(parameters.view) === "pending" ? "pending" : "published";
   const layout: OverviewLayout =
@@ -109,12 +116,13 @@ export default async function OverviewPage({
     ? { mode: "user", user_id: userId }
     : { mode: "public" };
   const [page, userDirectory] = await Promise.all([
-    serverApiV1<AssetQueryResponse>("/assets/query", {
+    parsedProject.success ? serverApiV1<AssetQueryResponse>("/assets/query", {
       method: "POST",
       body: JSON.stringify({
         ...(tagQuery ? { keywords: [tagQuery] } : {}),
         filter: {
           user_scope: userScope,
+          project_id: projectId,
           review_statuses: [
             effectiveView === "published" ? "published" : "pending_review",
           ],
@@ -123,19 +131,20 @@ export default async function OverviewPage({
         limit: 8,
         include_tag_statistics: true,
       }),
-    }),
+    }) : Promise.resolve<AssetQueryResponse>({ items: [], next_cursor: null, has_more: false, tag_statistics: null, search: null }),
     serverWebUiApi<UserDirectoryResponse>("/users"),
   ]);
-  const common = { view: effectiveView, tag: tagQuery, layout, userId, scope };
-  const uploadHref = userId
-    ? appUrl(`/upload?user_id=${encodeURIComponent(userId)}`)
-    : appUrl("/upload");
+  const common = { view: effectiveView, tag: tagQuery, layout, userId, scope, projectId };
   const total = page.tag_statistics?.total_assets ?? page.items.length;
   if (cursor && !page.items.length && history.length) {
     const lastPage = Math.min(history.length - 1, Math.max(0, Math.ceil(total / 8) - 1));
     redirect(overviewHref({ ...common, cursor: history[lastPage], history: history.slice(0, lastPage) }));
   }
   const returnTo = overviewHref({ ...common, cursor, history });
+  const uploadParameters = new URLSearchParams({ return_to: returnTo });
+  if (userId) uploadParameters.set("user_id", userId);
+  if (projectId && parsedProject.success) uploadParameters.set("project_id", projectId);
+  const uploadHref = appUrl(`/upload?${uploadParameters}`);
   const currentUser = userDirectory.items.find(
     (user) => user.user_id === userId,
   );
@@ -145,6 +154,7 @@ export default async function OverviewPage({
       : `用户 ${userId} 的素材`
     : "公共素材库";
   const publicScopeHref = overviewHref({
+    projectId,
     view: effectiveView,
     tag: tagQuery,
     layout,
@@ -154,6 +164,7 @@ export default async function OverviewPage({
   const userOptions = userDirectory.items.map((user) => ({
     ...user,
     href: overviewHref({
+      projectId,
       view: "published",
       tag: tagQuery,
       layout,
@@ -186,6 +197,22 @@ export default async function OverviewPage({
         publicHref={publicScopeHref}
         users={userOptions}
       />
+
+      <form action={appUrl("/")} method="get" className="mb-4 flex flex-wrap items-center gap-2">
+        <input type="hidden" name="view" value={effectiveView} />
+        <input type="hidden" name="scope" value={scope} />
+        <input type="hidden" name="layout" value={layout} />
+        {userId && <input type="hidden" name="user_id" value={userId} />}
+        {tagQuery && <input type="hidden" name="tag" value={tagQuery} />}
+        <label htmlFor="project-filter" className="text-sm">项目 ID</label>
+        <Input key={projectId ?? ""} id="project-filter" name="project_id" defaultValue={projectId ?? ""}
+          maxLength={36} placeholder="填写项目 UUID，留空查看全部项目" className="w-full sm:w-96" />
+        <Button type="submit" size="sm">筛选项目</Button>
+        {projectId && <Button asChild variant="ghost" size="sm">
+          <WebUiLink href={overviewHref({ ...common, projectId: undefined })}>清除项目筛选</WebUiLink>
+        </Button>}
+        {!parsedProject.success && <p role="alert" className="w-full text-sm text-red-600">项目 ID 必须是有效的 UUID。</p>}
+      </form>
 
       <div className="mb-7 flex flex-col gap-3 rounded-[1.5rem] border border-black/[0.06] bg-white/70 p-3 shadow-sm backdrop-blur-xl dark:border-white/[0.10] dark:bg-white/[0.06] sm:flex-row sm:items-center">
         <nav
@@ -226,6 +253,7 @@ export default async function OverviewPage({
               <input type="hidden" name="layout" value="list" />
             )}
             {userId && <input type="hidden" name="user_id" value={userId} />}
+            {projectId && <input type="hidden" name="project_id" value={projectId} />}
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
               <Input

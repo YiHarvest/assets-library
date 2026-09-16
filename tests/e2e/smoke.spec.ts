@@ -108,6 +108,7 @@ test("overview and upload pages expose the MVP scope", async ({ page }) => {
 test("submits selected assets through one manifest task", async ({
   page,
 }) => {
+  const projectId = "00000000-0000-4000-8000-000000000099";
   const taskId = "00000000-0000-4000-8000-000000000010";
   const itemIds = [
     "00000000-0000-4000-8000-000000000011",
@@ -156,6 +157,7 @@ test("submits selected assets through one manifest task", async ({
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
     if (request.method() === "POST" && pathname.endsWith("/api/v1/uploads")) {
+      expect(request.postDataJSON().project_id).toBe(projectId);
       manifestCount += 1;
       await route.fulfill({
         status: 201,
@@ -199,11 +201,22 @@ test("submits selected assets through one manifest task", async ({
     await route.continue();
   });
 
-  await page.goto("/upload");
+  await page.getByRole("textbox", { name: "项目 ID", exact: true }).fill(projectId);
+  await page.getByRole("button", { name: "筛选项目" }).click();
+  await expect(page).toHaveURL(new RegExp(`project_id=${projectId}`));
+  await page.getByRole("link", { name: "待入库", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`project_id=${projectId}`));
+  await page.getByRole("link", { name: "列表视图" }).click();
+  await expect(page).toHaveURL(new RegExp(`project_id=${projectId}`));
+  await page.getByRole("link", { name: "添加新素材" }).click();
+  await page.waitForLoadState("load");
+  await expect(page.getByRole("textbox", { name: "项目 ID（可选）" })).toHaveValue(projectId);
+  await expect(page.getByRole("link", { name: "返回素材库" })).toHaveAttribute("href", new RegExp(`project_id=${projectId}`));
   await page.locator('input[type="file"]').setInputFiles([
     { name: "one.png", mimeType: "image/png", buffer: png },
     { name: "two.png", mimeType: "image/png", buffer: png },
   ]);
+  await expect(page.getByText("one.png", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "开始上传" }).click();
 
   await expect.poll(() => manifestCount).toBe(1);
@@ -212,6 +225,12 @@ test("submits selected assets through one manifest task", async ({
   await expect(
     page.getByText("本次任务中的素材均已处理完成。"),
   ).toBeVisible();
+  await page.getByRole("link", { name: "返回素材库" }).click();
+  await expect(page).toHaveURL(new RegExp(`project_id=${projectId}`));
+  await expect(page).toHaveURL(/layout=list/);
+  await page.getByRole("link", { name: "清除项目筛选" }).click();
+  await expect(page).not.toHaveURL(/project_id=/);
+  await expect(page.getByRole("textbox", { name: "项目 ID", exact: true })).toHaveValue("");
 });
 
 test("shows an asynchronous media validation error without requiring hover", async ({

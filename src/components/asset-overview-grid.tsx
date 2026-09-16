@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AssetProject } from "@/components/asset-project";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
@@ -342,6 +343,7 @@ function GalleryCard({
           </span>
         </div>
         <AssetStatus asset={asset} />
+        <AssetProject projectId={asset.project_id} />
         <AssetTags asset={asset} />
         {showDiagnostics && <Diagnostics asset={asset} />}
       </CardContent>
@@ -405,6 +407,7 @@ function ListRow({
         <p className="line-clamp-1 text-sm text-slate-500 dark:text-slate-400">
           {asset.description || "暂无描述"}
         </p>
+        <AssetProject projectId={asset.project_id} />
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <AssetStatus asset={asset} /> <AssetTags asset={asset} />
         </div>

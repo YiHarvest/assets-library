@@ -36,6 +36,7 @@ const knownRequestFields = new Set([
   "llm",
   "semantic_threshold",
   "text",
+  "project_id",
 ]);
 
 interface TimedWord {
@@ -245,6 +246,7 @@ const compatibilityMatchDependencies: CompatibilityMatchDependencies = {
 };
 
 interface CompatibilityMatchOptions {
+  projectId?: string | null;
   assetUrls?: CompatibilityMatchRequest["asset_url_list"];
   isRandom?: boolean;
   semanticThreshold?: number;
@@ -312,7 +314,7 @@ export async function matchCompatibilitySegments(
     for (let start = 0; start < segments.length; start += 4) {
       searches.push(...await Promise.all(segments.slice(start, start + 4).map((segment, offset) => dependencies.search(
         { description: segment.text, keywords: segment.keyword.trim() ? [segment.keyword.trim()] : [], limit: Math.min(candidateAssetIds?.length ?? 100, 100) },
-        { includeAllUsers: true }, {
+        { includeAllUsers: true, ...(options.projectId ? { projectId: options.projectId } : {}) }, {
           ...(shortVideosOnly ? { shortVideosOnly: true } : { minDurationMs: minVideoDurationMs }),
           ...(contexts[start + offset] !== segment.text.trim() ? { context: contexts[start + offset] } : {}),
           ...(contexts[start + offset] !== segment.text.trim() && requiresRecallContext(segment.text) ? { contextRequired: true } : {}),
@@ -493,6 +495,7 @@ export async function createCompatibilityMatchTask(
       id: taskId,
       type: "match",
       status: "queued",
+      projectId: request.project_id ?? null,
       phase: "matching",
       callbackUrl: request.callback_url,
       totalItems: 1,
@@ -565,6 +568,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
         isRandom: payload.request.is_random,
         semanticThreshold: payload.request.semantic_threshold,
         sourceText: payload.request.text,
+        projectId: payload.request.project_id,
       },
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);

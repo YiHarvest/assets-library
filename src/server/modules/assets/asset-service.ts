@@ -146,6 +146,7 @@ export class AssetService {
       : asset.mediaUrl;
     return {
       asset_id: asset.id,
+      project_id: record.projectId ?? null,
       parent_video_id: record.videoSourceId,
       segment_index: record.segmentIndex,
       user_id: record.userId,
@@ -193,6 +194,7 @@ export class AssetService {
     const scope = scopeForAssetQuery(input);
     const result = await this.dependencies.repository.queryAssetsPage({
       ...scope,
+      projectId: input.filter.project_id,
       page: pageNumber,
       limit: input.limit,
       mediaTypes: input.filter.media_types,

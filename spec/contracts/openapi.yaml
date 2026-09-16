@@ -42,7 +42,9 @@ paths:
       tags: [Uploads]
       operationId: createUploadTask
       summary: 创建上传任务和文件清单
-      description: 每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建互相独立、均待审核的私人素材和公共副本。
+      description: >-
+        每个任务最多 100 个文件，总声明大小最多 2 GiB；填写 user_id 时同时创建互相独立、均待审核的私人素材和公共副本。
+        可在清单顶层传入 project_id，整批图片、分镜及公私副本继承；省略或 null 表示未归属项目，后续上传和封存不必重复传递。
       requestBody:
         required: true
         content:
@@ -60,6 +62,15 @@ paths:
                     - filename: demo.mp4
                       size_bytes: 52428800
                       content_type: video/mp4
+              projectUpload:
+                summary: 上传到指定项目（project_id 可省略）
+                value:
+                  user_id: user_123
+                  project_id: 7425d659-e92e-4b1e-8be2-33d7fa1a2cf5
+                  items:
+                    - filename: product.png
+                      size_bytes: 182304
+                      content_type: image/png
       callbacks:
         taskFinished:
           $ref: "#/components/callbacks/TaskFinished"
@@ -165,12 +176,31 @@ paths:
         兼容两种旧剪辑业务格式：存在 ASR transcripts 时，Worker 按顺序生成
         start_time、end_time 和 group_id；ASR 为空时，直接复用 LLM segments 已有的
         时间轴字段。两种格式都复用ES 双路召回和 RRF 融合函数为每段选择至多一个素材。
+        顶层 project_id 为可选 UUID，与 asset_url_list 勾选范围取交集；指定项目时不包含未归属素材，不会回退到其他项目。
+        project_id 不透传到回调，既有分段、时间轴、结果字段不变。
         请求中的未知顶层字段会原样透传到终态回调。
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CompatibilityMatchRequest" }
+            examples:
+              projectScoped:
+                summary: 在指定项目中匹配已有时间轴的文案
+                value:
+                  project_id: 7425d659-e92e-4b1e-8be2-33d7fa1a2cf5
+                  asr: {}
+                  llm:
+                    segments:
+                      - segment_id: 1
+                        text: 夕阳下的海边
+                        keyword: 海边
+                        level: 1
+                        group_id: [1, 1]
+                        start_time: 0.32
+                        end_time: 2.2
+                  asset_url_list: []
+                  callback_url: https://internal.example/callbacks/segment-match
       callbacks:
         matchFinished:
           '{$request.body#/callback_url}':
@@ -201,8 +231,10 @@ paths:
       operationId: queryAssets
       summary: 浏览或混合搜索素材
       description: >-
-        统一游标分页、ES 双路分块搜索、受控 filter 和标签统计；分块 RRF 融合后按素材保留最高分块。public 与 exclude_user
+        统一游标分页、Embedding 与 ES 词法搜索、素材级 RRF 融合、受控 filter 和标签统计。public 与 exclude_user
         始终只查询公共表，不会把私人素材扩展进公共结果。
+        filter.project_id 与 user_scope、媒体类型和标签等条件取交集；mode=all 也保留项目约束。
+        省略或 null 不限制项目；指定 UUID 时排除其他项目及未归属素材。翻页保留筛选条件，切换项目时重置 cursor。
       requestBody:
         required: true
         content:
@@ -221,6 +253,14 @@ paths:
                   cursor: null
                   limit: 20
                   include_tag_statistics: true
+              projectPublic:
+                summary: 浏览指定项目的公共素材
+                value:
+                  filter:
+                    user_scope: { mode: public }
+                    project_id: 7425d659-e92e-4b1e-8be2-33d7fa1a2cf5
+                  cursor: null
+                  limit: 20
       responses:
         "200":
           description: 素材页及标签统计
@@ -319,8 +359,9 @@ paths:
         - name: project_id
           in: query
           required: false
-          description: 只查询此项目的素材；省略时保持原有用户范围。
+          description: 只查询此项目的素材，与路径中的用户范围取交集；省略时不限制项目。不要传空字符串或字面量 null。
           schema: { type: string, format: uuid }
+          example: 7425d659-e92e-4b1e-8be2-33d7fa1a2cf5
         - name: cursor
           in: query
           required: false
@@ -678,6 +719,7 @@ components:
       properties:
         project_id:
           $ref: "#/components/schemas/ProjectId"
+          description: 与勾选素材范围取交集，同时应用于普通候选和短视频组合；省略或 null 不限制项目，不透传到回调。
         asr:
           description: 可传 ASR transcripts；LLM segments 已带时间轴时也可传空对象。
           type: object
@@ -743,7 +785,10 @@ components:
                           - { type: number }
                       start_time: { type: number }
                       end_time: { type: number }
-        text: { type: string }
+        text:
+          type: string
+          maxLength: 1000000
+          description: 全文用于恢复局部语境辅助召回，不改变已有分段时间轴，也不回传。
         asset_url_list:
           type: array
           default: []
@@ -760,9 +805,8 @@ components:
           type: boolean
           default: true
           description: >-
-            true 时从当前融合候选中的不同素材中等概率随机选择；
-            false 时选择融合排名最高的素材。
-            两种模式均按分段顺序在召回前排除本任务已用的素材，剩余候选不足时返回未匹配。
+            仅控制同等相关性和排序分候选的并列顺序；
+            两种模式都收集完整候选后统一分配，不绕过语义门槛、项目范围或素材去重。
         semantic_threshold:
           type: number
           minimum: 0
@@ -817,7 +861,7 @@ components:
             - { type: string }
             - { type: "null" }
         matched_candidate_score:
-          description: 命中分数；未命中但存在低分候选时为阈值过滤前最高分。
+          description: 归一化 RRF 排名分，不代表相似概率；最终去重或可用性检查未通过时可能保留候选分数，无可用分数时为 null。是否命中应检查 matched_candidate_url。
           oneOf:
             - { type: number, minimum: 0, maximum: 1 }
             - { type: "null" }
@@ -903,6 +947,7 @@ components:
       properties:
         project_id:
           $ref: "#/components/schemas/ProjectId"
+          description: 整批素材及其分镜、公私副本的项目归属；省略或 null 表示未归属。
         user_id: { $ref: "#/components/schemas/NullableUserId" }
         callback_url: { $ref: "#/components/schemas/CallbackUrl" }
         items:
@@ -1145,8 +1190,10 @@ components:
       description: >-
         可选业务项目 UUID，统一存为小写。上传时整批图片、分镜及公私副本继承；
         查询时与原用户、公私库及其他过滤条件取交集。省略或 null 不限制项目；
-        指定项目不包含未归属素材。它是归属字段，不代替用户作用域。
+        指定项目不包含未归属素材，也不会回退到其他项目。空字符串或非 UUID 返回 400 invalid_request。
+        它是归属字段，不代替用户作用域；无需预先创建项目，也不修改存量素材的归属。
       oneOf: [{ type: string, format: uuid }, { type: "null" }]
+      examples: [7425d659-e92e-4b1e-8be2-33d7fa1a2cf5, null]
 
     AssetQueryFilter:
       type: object
@@ -1247,17 +1294,17 @@ components:
           type: number
           minimum: 0
           maximum: 1
-          description: 素材最高分块的归一化 RRF 排名分数，不代表相似度或概率；不应用旧分数阈值。
+          description: 素材级归一化 RRF 排名分数，不代表相似度或概率；不应用旧分数阈值。
         keyword_score:
           type: number
           minimum: 0
           maximum: 1
-          description: 最高分块在关键词路的归一化 RRF 贡献，最高 0.5；未命中时省略。
+          description: 词法方向的归一化 RRF 贡献合计，v1 最高 0.5；未命中时省略。
         semantic_score:
           type: number
           minimum: 0
           maximum: 1
-          description: 最高分块在向量路的归一化 RRF 贡献，最高 0.5；未命中时省略。
+          description: 语义方向的归一化 RRF 贡献合计，v1 最高 0.5；未命中时省略。
         match_type:
           type: string
           enum: [exact, alias, prefix, contains, typo, semantic, hybrid]

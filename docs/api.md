@@ -6,7 +6,7 @@
 ## 1. 通用约定
 
 - Base URL：`http(s)://<assets-library-host>`，本文不绑定具体主机或端口。
-- ID（`task_id`、`item_id`、`asset_id`、`parent_video_id`）均为 UUID。
+- ID（`task_id`、`item_id`、`asset_id`、`parent_video_id`、`project_id`）均为 UUID 字符串。
 - 关系数据库保存 UTC；JSON 时间使用 ISO 8601，并以上海时区偏移 `+08:00` 返回。
 - 文件大小单位均为 byte。默认单任务最多 100 个文件、总计最多 2 GiB。
 - JSON 请求体上限为 1 MiB；文件内容通过单独的流式 PUT 上传。
@@ -16,6 +16,28 @@
   UUID 格式的 `X-Request-Id` 便于链路排查。
 
 完整的机器可读定义见 [`spec/contracts/openapi.yaml`](../spec/contracts/openapi.yaml)。
+
+### 可选项目归属与筛选
+
+`project_id` 由调用方传入，不需要在素材库预先创建项目。服务端去除首尾空白并统一为
+小写；空字符串、非 UUID 或非字符串返回 `400 invalid_request`。旧调用方无需增加参数。
+
+| 接口 | 参数位置 | 作用 |
+| --- | --- | --- |
+| `POST /api/v1/uploads` | JSON 顶层 `project_id` | 整批图片、视频分镜及公私副本继承同一归属。 |
+| `POST /api/v1/assets/query` | `filter.project_id` | 限定列表、搜索及标签统计的项目范围。 |
+| `POST /api/v1/compat/segment-match` | JSON 顶层 `project_id` | 限定普通候选与短视频组合候选；与勾选素材取交集。 |
+| `GET /api/v1/users/{user_id}/media` | URL 查询参数 `project_id` | 在指定用户的素材中按项目筛选。 |
+
+上传省略或传 `null` 时归属为空；历史素材也保留为 `null`。查询和匹配省略或传 `null`
+时不限制项目，继续使用原有用户、状态和勾选范围；指定 UUID 时只包含该项目，**不包含
+未归属素材，也不会因没有命中而回退到其他项目**。GET 查询不筛项目时直接省略该参数，
+不要传字面量 `null` 或空字符串。
+
+项目条件与 `user_scope`、媒体类型、标签等条件按 AND 组合，`mode: "all"` 也不能绕过
+项目条件。它不代替原有用户作用域。素材列表和详情返回 `project_id`；任务、匹配结果及
+回调结构保持原样，`project_id` 不作为未知业务字段透传到匹配回调。目前不提供修改存量
+素材项目归属或项目管理接口；媒体下载 URL 无需追加项目参数。
 
 ## 2. 访问边界
 
@@ -83,6 +105,7 @@ API 网关增加访问控制。
 ```json
 {
   "user_id": "user_123",
+  "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
   "callback_url": "https://internal.example/callbacks/assets",
   "items": [
     {
@@ -102,6 +125,7 @@ API 网关增加访问控制。
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `user_id` | `string \| null` | 否 | 1–191 字符。非空时创建互相独立、均待审核的私人素材与公共副本；空字符串或 `null` 只创建公共素材。 |
+| `project_id` | `string(uuid) \| null` | 否 | 本批素材的项目归属；省略或 `null` 表示未归属。只在创建清单时传入，后续 PUT 和封存无需重复传递。 |
 | `callback_url` | `string(url) \| null` | 否 | 任务终态回调，只支持 HTTP/HTTPS，最长 2,048 字符。 |
 | `items` | `array` | 是 | 1–100 项，总声明大小不超过 2 GiB。 |
 | `items[].filename` | `string` | 是 | 1–255 字符；扩展名决定目标媒体格式。 |
@@ -254,6 +278,7 @@ curl -X PUT \
   "keywords": ["橙子", "白色背景"],
   "filter": {
     "user_scope": { "mode": "user", "user_id": "user_123" },
+    "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
     "media_types": ["image"],
     "statuses": ["done"],
     "review_statuses": ["published"],
@@ -270,6 +295,7 @@ curl -X PUT \
 | `query` | `string?` | 1–1,000 字符；与 keywords 合并执行 ES 双路召回；存在时仍返回单页 Top-K。 |
 | `keywords` | `string[]?` | 最多 10 项，每项 1–64 字符；与 query 合并为检索文本，不作为标签硬过滤。 |
 | `filter.user_scope` | `UserScope` | 默认 `{ "mode": "public" }`。 |
+| `filter.project_id` | `string(uuid) \| null` | 可选；与用户范围取交集。翻页时须保留该筛选，切换项目时重置 cursor。 |
 | `filter.media_types` | `("image"\|"video")[]?` | 最多 2 项。 |
 | `filter.statuses` | `TaskStatus[]?` | 最多 4 项。 |
 | `filter.review_statuses` | `ReviewStatus[]?` | `pending_review`、`published`、`deleted`，最多 3 项。 |
@@ -290,17 +316,19 @@ curl -X PUT \
 `snake_case`；视频切片会返回 `parent_video_id` 和 `segment_index`。
 
 `query` 和 `keywords` 合并为完整查询文本，同时执行 ES 向量检索与关键词检索，
-按分块 ID 用等权 RRF 融合，再按素材 ID 去重，保留最高分块。用户范围、审核状态、媒体类型和 `filter.tags` 仍在召回前严格过滤。
+v1 按素材汇总分块证据，再融合语义与词法排名。用户范围、`filter.project_id`、审核状态、媒体类型和 `filter.tags` 在召回前严格过滤，返回前再次回表校验。
 无搜索文本时维持普通列表；带 `query` 时不接受非空 cursor；仅带 `keywords` 时，
 在 `.env` 配置的双路分块候选融合、素材去重后分页，翻完返回 `has_more=false`。
-同素材不同分块不提前合并分数，素材分数及分项贡献取自最高 RRF 分块。
+同素材的分块先汇总为各检索方向的证据，再计算素材级 RRF 分数及分项贡献。
 Top-K 配置按分块计数，去重后素材数可能少于请求数量，不额外补召回。
 
 RRF 前分别使用服务端 `.env` 阈值过滤分块：`SEARCH_SEMANTIC_THRESHOLD` 是原始余弦相似度下限
 （默认 `0.5`），`SEARCH_KEYWORD_THRESHOLD` 是 BM25 原始分数下限（默认 `22.25`）。
-等于阈值也保留；任一路通过即可融合，不要求同时通过。两路均无结果时返回 `no_candidates`。
+BM25 命中不能单独绕过语义门槛；当前句、局部语境、整片描述及可播放区间证据共同约束候选。
+短词搜索还会校验完整词证据或较强的整片语义证据，避免单个同字词造成泛化匹配。
 
-`search_score = Σ 1/(k+rank) × (k+1)/2`，范围 `[0,1]`，表示融合排名强度，
+v1 使用加权 RRF：`search_score = Σ weight × (k+1)/(k+rank)`，rank 从 1 开始，
+参与方向的权重由服务端策略决定，总权重为 1。分数范围 `[0,1]`，表示融合排名强度，
 不代表语义相似度或匹配概率；每路未命中贡献为零。`keyword_score` 和 `semantic_score`
 返回对应路的归一化 RRF 贡献（每路最高 0.5）。融合分数不另设阈值，兼容字段 `search.threshold=0`，不代表两路原始分数未过滤。
 embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪装为空结果。
@@ -308,6 +336,7 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
 | 素材摘要字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `asset_id` | `string(uuid)` | 素材 ID。 |
+| `project_id` | `string(uuid) \| null` | 项目归属；历史或未指定项目的素材为 `null`。 |
 | `parent_video_id` | `string(uuid) \| null` | 视频切片所属父视频；图片为 `null`。 |
 | `segment_index` | `integer \| null` | 子视频的零基序号；图片为 `null`。 |
 | `user_id` | `string \| null` | 个人归属；`null` 表示公共素材。 |
@@ -331,6 +360,7 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
   "items": [
     {
       "asset_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
       "search_score": 1,
       "keyword_score": 0.5,
       "semantic_score": 0.5,
@@ -409,10 +439,11 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
 | --- | --- | --- | --- | --- |
 | `asr` | object | 是 | 无 | 语音识别结果，用于给 LLM 分段对齐时间轴。已有时间轴时传 `{}`，不能省略整个字段。 |
 | `llm` | object 或 JSON string | 是 | 无 | 包含 `segments` 的分段结果；支持直接传对象，也支持该对象序列化后的 JSON 字符串。接口使用已有分段，不负责调用 LLM 生成分段。 |
-| `text` | string | 否 | 无 | 兼容旧调用方的全文字段，最长 1,000,000 字符。当前不参与对齐或素材搜索，也不回传。搜索使用每段的 `text`。 |
-| `asset_url_list` | array | 否 | `[]` | 最多 10,000 项。空数组表示从所有待审核或已发布、未删除的公共及个人素材中召回；非空时限定素材范围，详见下文。 |
+| `text` | string | 否 | 无 | 全文，最长 1,000,000 字符；用于恢复局部语境辅助召回，不改变已有分段时间轴，也不回传。 |
+| `project_id` | string(uuid) 或 null | 否 | 不限制项目 | 指定时只召回本项目素材，与 `asset_url_list` 取交集；不包含未归属素材，也不透传到回调。 |
+| `asset_url_list` | array | 否 | `[]` | 最多 10,000 项。空数组表示不额外限制素材 ID；非空时限定勾选范围。两种情况都保留项目、处理状态及可用状态过滤。 |
 | `semantic_threshold` | number | 否 | `0.3` | 已废弃的兼容参数，仍校验范围 `[0,1]`，不参与过滤。 |
-| `is_random` | boolean | 否 | `true` | `true`：从本次融合候选中等概率随机选一个；`false`：选最高分。两种模式均按分段顺序排除本任务已使用的素材。 |
+| `is_random` | boolean | 否 | `true` | 仅控制同等相关性和排序分候选的并列顺序；不绕过语义门槛或全局分配，不会从所有候选中等概率随机选取。 |
 | `callback_url` | string (URL) | 是 | 无 | 接收任务成功或失败结果的地址，仅支持 HTTP/HTTPS，最长 2,048 字符。 |
 | 其他顶层字段 | 任意 JSON 值 | 否 | 无 | 作为业务自定义字段透传到终态回调，例如 `business_id`。不参与匹配；顶层 `user_id` 也不会限制素材范围。避免使用回调保留字段 `taskId`、`status`、`result`、`error`、`completed_at`，同名值可能被系统覆盖。 |
 
@@ -476,6 +507,7 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
 ```json
 {
   "business_id": "edit_20260908_001",
+  "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
   "asr": {},
   "llm": {
     "segments": [
@@ -537,14 +569,14 @@ embedding 或 ES 失败返回明确的 502/503 错误，不回退为单路或伪
 
 #### 匹配与选择规则
 
-1. 按分段顺序，以每段 `text` 执行 ES 双路召回，使用 RRF 融合；每段最多一个结果。v1 使用当前组和前一组作为辅助上下文，仅对已有候选追加半路权重的 RRF 加分，并将总分归一化到 `[0,1]`。上下文未过线不会淘汰单句候选，也不单独引入候选；普通人物或居家画面可凭单句匹配入选，更明确的关系或场景可获得上下文加分。
-2. 召回前应用指定素材范围，收集各段候选后统一分配。服务端默认使用 v1；启用 v2 后，两路按不同素材召回，摘要向量放在素材文档内，名称和标签参与词法检索，并在素材层执行 RRF。业务请求无需改变。
+1. 使用每段 `text`、关键词及局部语境做 Embedding + ES 检索，再执行 RRF 融合；每段最多一个结果。全文 `text` 和相邻分组用于补全语境，语境本身可以引入候选；依赖上下文的碎片句须有语境证据。BM25 不能绕过语义准入。检索过程不调用 LLM 生成或改写召回文本。
+2. 召回前将 `project_id` 与勾选素材范围取交集，收集各段候选后统一分配；返回前再次校验数据库范围。服务端通过 `SEARCH_RECALL_ENGINE` 选择 v1 或 v2；项目筛选适用于两者，业务请求无需指定检索版本。
 3. 请求中的 `semantic_threshold` 已废弃但保留原校验、默认值与接收行为，不参与过滤。v1 使用服务端 `.env` 的双路阈值，v2 使用版本化策略文件。`matched_candidate_score` 始终返回归一化 RRF 排名分，不表示相似概率。
-4. 全局分配优先保证可命中的段数，再使素材沿文本时间轴均匀分布；`is_random` 控制同等候选的选择顺序。同一素材不重复使用。
+4. 全局分配以超过准入门槛的语义收益为主要目标，兼顾时间轴分布和时长；允许保留空位，避免弱匹配抢走更相关句子的素材。`is_random` 仅控制同等候选的并列顺序。同一素材或同源副本不重复使用。
 5. 返回前再次校验素材可用状态，个人素材 URL 追加 `user_id`。embedding 或 ES 错误导致任务失败并走原有重试、回调流程。
-6. 原视频时长达到 3 秒时可独立参与匹配；不足 3 秒的按下述组合规则补充，缺少时长的不参与。`SEGMENT_MATCH_CLIP_ENABLED=true`（默认）时，长于文本时段的视频 URL 会附带 `clip_ms`，仅截取当前素材的前 N 秒，N 为 `end_time-start_time`；不是从成片的 `start_time` 开始裁剪。达到 3 秒但等于或短于文本时段的视频直接使用，不循环或拼接。关闭开关后，独立视频返回原素材 URL，短片组合返回完整拼接视频；独立视频或组合累计至少 3 秒的门槛仍生效。
+6. 视频最小时长由服务端 `SEGMENT_MATCH_MIN_VIDEO_DURATION_MS` 控制，代码默认 `1000` 毫秒，当前生产配置为 `500` 毫秒。达到该门槛即可独立参与匹配，缺少时长的不参与。`SEGMENT_MATCH_CLIP_ENABLED=true`（默认）时，长于目标文本时段的视频 URL 会附带 `clip_ms`，只截取素材前 N 秒，N 为当前段 `end_time-start_time`，不是上下文拼接时长。达到门槛但不长于目标的视频直接使用，不循环补齐。关闭裁剪开关后返回完整原片或完整拼接视频，最小时长门槛仍生效。
 7. 图片命中后固定生成 3 秒静态 MP4，URL 附带 `still_ms=3000`，`matched_candidate_type` 返回 `video`；不再根据文本时段裁短这份静态视频，也不修改原文本时间轴。这条规则不受长视频裁剪开关影响，素材库里的原图仍可正常访问。
-8. 独立素材分配后仍有空缺时，补充召回不足 3 秒的视频。每个组成片段对当前文本的原始 Embedding 余弦相似度必须 **大于 0.5**（不是返回的 RRF 分数），不接受仅 BM25 过线的短片。先形成互不占用源片段的组合，再统一分配，分配后用剩余合格片段尽量贴近实际文本时长；累计不足 3 秒则放弃。组合 URL 在原媒体路径上携带内部 `concat` 参数，仍通过 `matched_candidate_url` 返回一个视频，文本时间轴及响应字段不变。裁剪开关开启时，组合超过文本时长便截取前 N 秒；文本不足 3 秒时也按此裁剪。组合已达 3 秒但短于文本时长则直接返回，不循环补齐。
+8. 小于该门槛的短视频可形成组合候选；每个片段须有 **大于 0.5** 的原始语义证据和综合匹配质量，不接受仅 BM25 过线的短片。各文本独立产生组合，不提前占用素材；全局分配统一处理组合间的源片段冲突，再用剩余合格片段调整时长。累计不足最小时长则放弃，尽量接近当前文本段时长。组合 URL 携带内部 `concat` 参数，仍通过 `matched_candidate_url` 返回一个视频，文本时间轴及响应字段不变；裁剪只保留前 N 秒，并校验实际可播放区间的证据，避免占用不会播放的后续片段。组合达到门槛但短于文本时长则直接返回，不循环补齐。
 
 下游应原样下载 `matched_candidate_url`，无需新增请求参数。视频裁剪、短片拼接和图片转视频在首次下载时通过异步 FFmpeg 子进程执行，HTTP 请求等待文件完成后响应；每个 Web 进程最多同时准备两个片段。`FFMPEG_HW_ACCEL=auto` 优先 GPU NVENC 编码，失败回退 CPU；`none` 仅 CPU，`cuda` 强制 GPU。裁剪保留原视频音轨（如有），按帧边界截断，时长可能与目标相差一帧；图片视频为无声 H.264 MP4。短片组合统一为第一段画面尺寸、25 fps、H.264/AAC，按比例留边；无音轨片段补静音，每个组成素材下载前分别检查原有作用域和可用状态。片段缓存复用 `STAGING_RETENTION_HOURS` 清理，过期后自动重新生成；媒体权限和 Range 下载沿用原接口。已有裁剪 URL 在关闭开关后仍可使用，库内原素材不会被覆盖。
 
@@ -774,7 +806,13 @@ HTTP `202 Accepted`，JSON 格式如下：
 
 ### `GET /api/v1/users/{user_id}/media`
 
-查询参数 `cursor` 可选，`limit` 为 1–100、默认 20。响应包含 `items`、
+查询参数 `cursor`、`project_id` 可选，`limit` 为 1–100、默认 20。例如：
+
+```http
+GET /api/v1/users/user_123/media?project_id=7425d659-e92e-4b1e-8be2-33d7fa1a2cf5&limit=20
+```
+
+翻页时继续携带同一 `project_id`；切换项目时重置 cursor。响应包含 `items`、
 `next_cursor` 和 `has_more`：
 
 - 图片项返回 `media_url`，可直接作为 `<img src>`。

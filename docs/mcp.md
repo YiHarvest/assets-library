@@ -90,6 +90,27 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
 | `get_storage_usage` | 存储用量统计 | 同步 |
 | `get_media_links` | 媒体链接；视频同时返回缩略图链接（返回相对路径） | 同步 |
 
+## 项目归属与筛选
+
+`upload_from_url`、`upload_batch_from_urls`、`query_assets`、`list_user_media` 均支持
+顶层可选参数 `project_id`（UUID 字符串）。上传时整批图片、分镜及公私副本继承同一项目；
+省略或传 `null` 时不记录归属。查询时省略或 `null` 表示不限制项目，指定后与原用户范围
+取交集；`scope: "all"` 也保留项目限制，未归属素材不会混入指定项目。
+
+例如，在本人素材中按项目搜索：
+
+```json
+{
+  "scope": "own",
+  "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
+  "keywords": ["夕阳"],
+  "limit": 20
+}
+```
+
+`query_assets` 的素材项和 `get_asset` 详情返回 `project_id`，旧素材为 `null`。
+此字段不是用户身份，不改变 `x-request-userid` 的权限规则；无需新增环境变量或项目创建接口。
+
 ## upload_from_url 详解
 
 单文件 URL 入库参数：
@@ -98,18 +119,21 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
 {
   "url": "https://storage.example.com/tmp/demo.mp4",
   "filename": "demo.mp4",
+  "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
   "idempotency_key": "upload-demo-20260821"
 }
 ```
 
 - `url`：必填。支持扩展名 `.jpg/.jpeg/.png/.webp/.mp4`；扩展名决定媒体类型。
 - `filename`：可选，覆盖 URL 推断的文件名（URL 无扩展名时必须提供）。
+- `project_id`：可选 UUID，去除首尾空白并统一小写；空字符串或非 UUID 会被拒绝。
 - `idempotency_key`：可选；同一用户、同一工具、同一参数重试时返回原任务。
 
 批量上传使用独立工具，避免单文件参数变成 union：
 
 ```json
 {
+  "project_id": "7425d659-e92e-4b1e-8be2-33d7fa1a2cf5",
   "items": [
     { "url": "https://storage.example.com/tmp/a.jpg", "filename": "a.jpg" },
     { "url": "https://storage.example.com/tmp/b.mp4", "filename": "b.mp4" }
@@ -139,6 +163,7 @@ Cherry Studio 等）可以直接搜索、上传、管理素材。
 
 - 相同参数重试会复用数据库中保存的原响应和 `task_id`；
 - 同一个键改传不同参数会返回 409，防止误复用；
+- 上传的 `project_id` 也参与参数比对；更换项目应使用新的幂等键；
 - 幂等记录与任务保留期一致；同键并发调用通过数据库锁串行化；
 - 未传键时保持原行为，每次调用创建新任务。
 

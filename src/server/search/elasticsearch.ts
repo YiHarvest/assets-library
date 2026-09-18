@@ -4,6 +4,7 @@ import type { AssetDetail } from "@/shared/contracts";
 import { searchWithV2 } from "./v2/facade";
 import { assetEvidence, evidenceInWindow, indexedTagCategories, type PlaybackEvidence } from "./asset-evidence";
 import { unusableVisualReason } from "@/server/media/material-quality";
+import { auditLog, elapsedMilliseconds, errorAuditFields } from "@/server/observability/audit-log";
 
 export interface RecallOptions { playbackDurationMs?: number; contextRequired?: boolean; keywordSearch?: boolean; allowThemeMatch?: boolean }
 
@@ -82,6 +83,7 @@ async function esRequest(path: string, init?: RequestInit, allowedStatuses: numb
   if (!config.ELASTICSEARCH_URL) {
     throw new AppError("storage_error", "Elasticsearch 服务尚未配置。", 503);
   }
+  const started = process.hrtime.bigint();
   let response: Response;
   try {
     response = await fetch(`${config.ELASTICSEARCH_URL.replace(/\/$/, "")}/${encodeURIComponent(config.ELASTICSEARCH_INDEX)}${path}`, {
@@ -95,10 +97,23 @@ async function esRequest(path: string, init?: RequestInit, allowedStatuses: numb
       },
       signal: AbortSignal.timeout(config.SEARCH_TIMEOUT_MS),
     });
-  } catch {
+  } catch (error) {
+    auditLog("elasticsearch_request_failed", {
+      es_path: path,
+      es_method: init?.method ?? "GET",
+      duration_ms: elapsedMilliseconds(started),
+      ...errorAuditFields(error),
+    }, "error");
     throw new AppError("storage_error", "Elasticsearch 服务连接失败或请求超时。", 503);
   }
   if (!response.ok && !allowedStatuses.includes(response.status)) {
+    auditLog("elasticsearch_request_failed", {
+      es_path: path,
+      es_method: init?.method ?? "GET",
+      es_status: response.status,
+      duration_ms: elapsedMilliseconds(started),
+      es_response: await response.clone().text().catch(() => "[unreadable]"),
+    }, "error");
     throw new AppError("storage_error", `Elasticsearch 请求失败：HTTP ${response.status}。`, 502);
   }
   return response;

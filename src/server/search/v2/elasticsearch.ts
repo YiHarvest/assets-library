@@ -1,4 +1,5 @@
 import { AppError } from "@/server/errors";
+import { auditLog, elapsedMilliseconds, errorAuditFields } from "@/server/observability/audit-log";
 import { fingerprint } from "./fingerprint";
 import { parseSearchManifest, searchIndexDefinition } from "./manifest";
 import type { EmbeddedSearchDocument, SearchBuildManifest } from "./types";
@@ -10,6 +11,7 @@ export class ElasticsearchClient {
   constructor(private readonly options: ElasticsearchOptions) {}
 
   async request(path: string, init: RequestInit = {}, allowedStatuses: number[] = []) {
+    const started = process.hrtime.bigint();
     let response: Response;
     try {
       response = await fetch(`${this.options.url.replace(/\/$/, "")}${path}`, {
@@ -18,8 +20,23 @@ export class ElasticsearchClient {
           ...(this.options.username ? { authorization: `Basic ${Buffer.from(`${this.options.username}:${this.options.password ?? ""}`).toString("base64")}` } : {}) },
         signal: AbortSignal.timeout(this.options.timeoutMs),
       });
-    } catch { throw new AppError("storage_error", "Elasticsearch 服务连接失败或请求超时。", 503); }
+    } catch (error) {
+      auditLog("elasticsearch_request_failed", {
+        es_path: path,
+        es_method: init.method ?? "GET",
+        duration_ms: elapsedMilliseconds(started),
+        ...errorAuditFields(error),
+      }, "error");
+      throw new AppError("storage_error", "Elasticsearch 服务连接失败或请求超时。", 503);
+    }
     if (!response.ok && !allowedStatuses.includes(response.status)) {
+      auditLog("elasticsearch_request_failed", {
+        es_path: path,
+        es_method: init.method ?? "GET",
+        es_status: response.status,
+        duration_ms: elapsedMilliseconds(started),
+        es_response: await response.clone().text().catch(() => "[unreadable]"),
+      }, "error");
       throw new AppError("storage_error", `Elasticsearch 请求失败：HTTP ${response.status}。`, 502);
     }
     return response;

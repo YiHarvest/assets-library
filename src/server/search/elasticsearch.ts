@@ -18,6 +18,10 @@ function lexicalMatch(field: string, query: string, options: { boost?: number; _
   return { bool: { should: terms.map(term => ({ match_phrase: { [field]: term } })), minimum_should_match: 1, ...options } };
 }
 
+function lexicalMultiMatch(fields: string[], query: string, options: { boost?: number; _name?: string } = {}) {
+  return { multi_match: { query, fields, type: isShortSearchTerm(query) ? "phrase" : "best_fields", ...options } };
+}
+
 export interface SearchCandidate {
   assetId: string;
   searchScore: number;
@@ -307,6 +311,10 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
   ], minimum_should_match: 1 } }];
   const vectorFilter = { bool: { filter: [filter, ...window], must_not: [{ term: { evidenceKind: "theme" } }] } };
   const source = ["assetId", "evidenceKind", "startMs", "endMs", "content"];
+  // 完整语境用于 embedding；BM25 只保留末尾 256 字，避免长文案在多字段展开后超过 Lucene 子句上限。
+  const lexicalContext = context && context.trim() !== query.trim()
+    ? Array.from(context).slice(-256).join("") : undefined;
+  const metadataFields = ["events", "facets.topic", "facets.object", "facets.form", "facets.style", "facets.color_composition", "facets.custom"];
   const bodies = [
     {
       size: config.SEARCH_VECTOR_TOP_K,
@@ -325,15 +333,15 @@ export async function recallChunks(query: string, assetIds: string[], context?: 
       _source: ["assetId", "humanTags"],
       query: { bool: { should: [
         lexicalMatch("content", query, { boost: 2 }),
-        ...(contextVector ? [lexicalMatch("content", context!, { boost: 1 })] : []),
-        ...["events", "facets.topic", "facets.object", "facets.form", "facets.style", "facets.color_composition", "facets.custom"].map(field => lexicalMatch(field, context || query, { _name: field })),
+        ...(lexicalContext ? [lexicalMatch("content", lexicalContext, { boost: 1 })] : []),
+        lexicalMultiMatch(metadataFields, query, { _name: "metadata" }),
         lexicalMatch("humanTags", query, { _name: "humanTags" }),
       ], minimum_should_match: 1, filter: [filter] } },
       sort: [{ _score: "desc" }, { assetId: "asc" }],
     },
   ] as const;
   const visual = { ...bodies[1], query: { bool: { filter: [filter], minimum_should_match: 1,
-    should: ["facets.person", "facets.scene"].map(field => lexicalMatch(field, context || query, { _name: field })) } } };
+    should: [lexicalMultiMatch(["facets.person", "facets.scene"], query, { _name: "visual_metadata" })] } } };
   const requests = [...bodies, ...(contextVector ? [{ ...bodies[0], knn: { ...bodies[0].knn, query_vector: contextVector } }] : []), visual];
   const run = async (body: object, lexical = false, playbackOnly = true) => {
     const response = await esRequest("/_search?allow_partial_search_results=false", {

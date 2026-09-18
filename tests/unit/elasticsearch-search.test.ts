@@ -199,9 +199,30 @@ describe("ES asset recall", () => {
     const lexical = requests.filter(body => !body.knn);
     expect(lexical).toHaveLength(2);
     for (const body of lexical) {
-      expect(JSON.stringify(body)).toContain('"match_phrase"');
+      expect(JSON.stringify(body)).toMatch(/"match_phrase"|"type":"phrase"/);
       expect(JSON.stringify(body)).not.toContain('"match":');
     }
+  });
+
+  it("bounds BM25 context without shortening the embedding context or repeating it across metadata fields", async () => {
+    const context = "赚钱逻辑".repeat(100);
+    type Clause = { match?: { content?: { boost?: number; query?: string } }; multi_match?: unknown };
+    type SearchBody = { knn?: unknown; query?: { bool?: { should?: Clause[] } } };
+    const requests: SearchBody[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes("/embeddings")) {
+        expect(JSON.parse(String(init.body)).input).toEqual(["赚差价", context]);
+        return json({ data: [{ index: 0, embedding: [1, 0] }, { index: 1, embedding: [0, 1] }] });
+      }
+      requests.push(JSON.parse(String(init.body)));
+      return json({ hits: { hits: [] } });
+    }));
+    await searchAssets("赚差价", ["asset-a"], undefined, context);
+    const should = requests.find(body => !body.knn && (body.query?.bool?.should?.length ?? 0) > 1)?.query?.bool?.should ?? [];
+    const contextMatch = should.find(clause => clause.match?.content?.boost === 1);
+    expect(Array.from(contextMatch?.match?.content?.query ?? "")).toHaveLength(256);
+    expect(should.filter(clause => clause.multi_match)).toHaveLength(1);
+    expect(JSON.stringify(should)).not.toContain(context);
   });
 
   it("does not admit black footage for unrelated text even with a high embedding score", () => {
@@ -446,7 +467,7 @@ describe("ES asset recall", () => {
     expect(keyword.query.bool.should).toContainEqual({ bool: { should: [
       { match_phrase: { content: "夕阳下的海边" } }, { match_phrase: { content: "小船" } },
     ], minimum_should_match: 1, boost: 2 } });
-    expect(JSON.parse(fetchMock.mock.calls[3][1].body).query.bool.should).toHaveLength(2);
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body).query.bool.should).toHaveLength(1);
     expect(await rerank("query", result)).toBe(result);
   });
 

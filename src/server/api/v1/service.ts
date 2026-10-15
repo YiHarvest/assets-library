@@ -15,6 +15,7 @@ import type {
   UserScope,
   UserStorageUsageResponse,
 } from "@/shared/contracts";
+import { observe } from "@/server/observability/trace";
 import { defaultApiV1Service } from "@/server/api/v1/default-service";
 import type {
   ListTasksInput,
@@ -67,5 +68,12 @@ export function installApiV1Service(service: ApiV1Service | undefined) {
 }
 
 export function getApiV1Service() {
-  return installedService ?? defaultApiV1Service;
+  return new Proxy(installedService ?? defaultApiV1Service, {
+    get(target, key, receiver) {
+      const method = Reflect.get(target, key, receiver);
+      if (typeof method !== "function") return method;
+      return (...args: unknown[]) => observe(String(key), args, () => method.apply(target, args),
+        { kind: key === "createCompatibilityMatchTask" ? "match" : "function" });
+    },
+  });
 }

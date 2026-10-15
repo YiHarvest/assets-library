@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   callback: vi.fn(),
   compatibilityMatch: vi.fn(),
+  semanticMatch: vi.fn(),
   completeJob: vi.fn().mockResolvedValue(1),
   failJob: vi.fn().mockResolvedValue(1),
   heartbeatJob: vi.fn().mockResolvedValue(1),
@@ -34,6 +35,7 @@ vi.mock("@/server/services/mutation-pipeline", () => ({
 vi.mock("@/server/services/compatibility-match", () => ({
   processCompatibilityMatchJob: mocks.compatibilityMatch,
 }));
+vi.mock("@/server/services/match", () => ({ processMatchJob: mocks.semanticMatch }));
 vi.mock("@/server/services/callbacks", () => ({
   processCallbackJob: mocks.callback,
 }));
@@ -112,5 +114,13 @@ describe("worker dispatcher", () => {
     const claimed = job("match");
     await processJob(claimed, analyzer, undefined, undefined, storage);
     expect(mocks.compatibilityMatch).toHaveBeenCalledWith(claimed);
+    expect(mocks.semanticMatch).not.toHaveBeenCalled();
+  });
+
+  it("把带 query 的 match 作业交给文本匹配函数", async () => {
+    const claimed = { ...job("match"), payload: { query: "海边汽车" } };
+    await processJob(claimed, analyzer, undefined, undefined, storage);
+    expect(mocks.semanticMatch).toHaveBeenCalledWith(claimed);
+    expect(mocks.compatibilityMatch).not.toHaveBeenCalled();
   });
 });

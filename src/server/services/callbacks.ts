@@ -10,6 +10,7 @@ import {
   type ClaimedJob,
 } from "@/server/repositories/assets";
 import { compatibilityCallbackFromJob } from "@/server/services/compatibility-match";
+import { logTaskStep } from "./task-observability";
 
 const maximumAttempts = 5;
 const maximumResponseCharacters = 4_096;
@@ -118,6 +119,7 @@ export async function processCallbackJob(job: ClaimedJob) {
     startedAt,
   });
   try {
+    await logTaskStep("callback", "开始发送任务结果回调。", { attempt: job.attempt, url: task.callbackUrl });
     const response = await fetch(task.callbackUrl, {
       method: "POST",
       headers: {
@@ -133,6 +135,7 @@ export async function processCallbackJob(job: ClaimedJob) {
       0,
       maximumResponseCharacters,
     );
+    await logTaskStep("callback", `回调返回 HTTP ${response.status}。`, { status: response.status, body: responseBody }, response.ok ? "info" : "warn");
     if (!response.ok) throw new Error(`回调返回 HTTP ${response.status}。`);
     const now = new Date();
     await db.transaction(async (tx) => {
@@ -157,6 +160,7 @@ export async function processCallbackJob(job: ClaimedJob) {
     await completeJob(job);
   } catch (error) {
     const message = error instanceof Error ? error.message : "回调投递失败。";
+    await logTaskStep("callback", job.attempt < maximumAttempts ? "回调投递失败，准备重试。" : "回调投递失败，已达到最大重试次数。", { error: message, attempt: job.attempt }, "error");
     const now = new Date();
     await db
       .update(callbackDeliveries)

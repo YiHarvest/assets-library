@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { callContext } from "./context";
 
 type AuditLevel = "info" | "warn" | "error";
 type AuditFields = Record<string, unknown>;
@@ -142,6 +143,7 @@ export function auditLog(
       : {}),
     ...(safeValue(fields) as AuditFields),
   };
+  callContext.getStore()?.onAudit?.(event, payload, level);
   const line = JSON.stringify(payload);
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);

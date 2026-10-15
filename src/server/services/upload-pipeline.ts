@@ -1,3 +1,4 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -642,6 +643,7 @@ export async function processValidateJob(
       stagingPath(context, dependencies),
       context.item.filename,
     );
+    await logTaskStep("validating", "文件校验完成。", { item_id: context.item.id, filename: context.item.filename, media_type: validated.mediaType });
     if (validated.mediaType === "image") {
       stage = "persist_image";
       await processImage(job, context, validated, dependencies);

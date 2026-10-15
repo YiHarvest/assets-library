@@ -229,6 +229,7 @@ export class UploadService {
     });
     await this.dependencies.repository.createTaskWithItems({
       id: taskId,
+      input: { ...input },
       type: "upload",
       userId: input.user_id,
       projectId: input.project_id,

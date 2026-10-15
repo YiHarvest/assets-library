@@ -86,6 +86,9 @@ export const tasks = mysqlTable(
     errorMessage: text("error_message"),
     errorDetails: json("error_details").$type<Record<string, unknown>>(),
     result: json("result").$type<Record<string, unknown>>(),
+    input: json("input").$type<Record<string, unknown>>(),
+    traceId: uuid("trace_id"),
+    originSpanId: uuid("origin_span_id"),
     callbackAttempts: int("callback_attempts", { unsigned: true }).notNull().default(0),
     nextCallbackAt: utcDateTime("next_callback_at"),
     callbackCompletedAt: utcDateTime("callback_completed_at"),
@@ -101,6 +104,54 @@ export const tasks = mysqlTable(
     index("tasks_user_created_idx").on(table.userId, table.createdAt),
   ],
 );
+
+/** 任务级结构化执行日志，随任务保留策略级联清理。 */
+export const taskLogs = mysqlTable(
+  "task_logs",
+  {
+    id: bigint("id", { mode: "number", unsigned: true }).autoincrement().primaryKey(),
+    taskId: uuid("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+    level: mysqlEnum("level", ["info", "warn", "error"]).notNull().default("info"),
+    phase: varchar("phase", { length: 64 }).notNull(),
+    message: text("message").notNull(),
+    data: json("data").$type<Record<string, unknown>>(),
+    createdAt: utcDateTime("created_at").notNull(),
+  },
+  (table) => [index("task_logs_task_id_idx").on(table.taskId, table.id)],
+);
+
+/** API、业务函数与素材匹配共享的调用记录。无异步任务的调用也会独立保留。 */
+export const callSpans = mysqlTable("call_spans", {
+  id: uuid("id").primaryKey(),
+  traceId: uuid("trace_id").notNull(),
+  parentSpanId: uuid("parent_span_id"),
+  taskId: uuid("task_id"),
+  kind: mysqlEnum("kind", ["api", "function", "match"]).notNull(),
+  name: varchar("name", { length: 512 }).notNull(),
+  status: mysqlEnum("status", ["running", "done", "failed"]).notNull().default("running"),
+  input: json("input").$type<unknown>(),
+  output: json("output").$type<unknown>(),
+  error: json("error").$type<unknown>(),
+  statusCode: int("status_code", { unsigned: true }),
+  durationMs: double("duration_ms"),
+  startedAt: utcDateTime("started_at").notNull(),
+  finishedAt: utcDateTime("finished_at"),
+  expiresAt: utcDateTime("expires_at").notNull(),
+}, (table) => [
+  index("call_spans_started_idx").on(table.startedAt, table.id),
+  index("call_spans_trace_idx").on(table.traceId, table.startedAt),
+  index("call_spans_task_idx").on(table.taskId, table.startedAt),
+  index("call_spans_expires_idx").on(table.expiresAt),
+]);
+
+export const callLogs = mysqlTable("call_logs", {
+  id: bigint("id", { mode: "number", unsigned: true }).autoincrement().primaryKey(),
+  spanId: uuid("span_id").notNull().references(() => callSpans.id, { onDelete: "cascade" }),
+  level: mysqlEnum("level", ["info", "warn", "error"]).notNull().default("info"),
+  message: text("message").notNull(),
+  data: json("data").$type<unknown>(),
+  createdAt: utcDateTime("created_at").notNull(),
+}, (table) => [index("call_logs_span_idx").on(table.spanId, table.id)]);
 
 /** 上传任务中的原始文件。文件字节流先写入 stagingPath，封存后才进入处理链。 */
 export const taskItems = mysqlTable(

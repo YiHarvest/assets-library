@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { taskTraceFields } from "@/server/observability/context";
+import { redact } from "@/server/observability/payload";
 import {
   and,
   asc,
@@ -103,6 +105,7 @@ export interface CreateTaskManifest {
   callbackUrl?: string | null;
   expiresAt?: Date | null;
   result?: Record<string, unknown> | null;
+  input?: Record<string, unknown> | null;
   items?: TaskItemManifest[];
 }
 
@@ -151,6 +154,8 @@ export async function createMutationTask(input: CreateMutationTaskInput) {
         });
     }
     await tx.insert(tasks).values({
+      ...taskTraceFields(taskId),
+      input: redact({ asset_id: input.assetId, user_id: input.userId ?? null, ...input.payload }) as Record<string, unknown>,
       id: taskId,
       type: input.type,
       status: "queued",
@@ -199,6 +204,8 @@ export async function createTaskWithItems(manifest: CreateTaskManifest) {
         });
     }
     await tx.insert(tasks).values({
+      ...taskTraceFields(manifest.id),
+      input: redact(manifest.input ?? null) as Record<string, unknown> | null,
       id: manifest.id,
       type: manifest.type,
       phase: manifest.type === "upload" ? "receiving" : "queued",

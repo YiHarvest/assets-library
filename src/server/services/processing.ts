@@ -1,3 +1,4 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -51,6 +52,8 @@ import { parseRecallJob, recordRecallFailure } from "@/server/search/v2/reposito
 import { SceneDetectClient } from "@/server/scene/client";
 import { processCallbackJob } from "@/server/services/callbacks";
 import { processMutationJob } from "@/server/services/mutation-pipeline";
+import { processMatchJob } from "@/server/services/match";
+import { observeJob } from "@/server/observability/trace";
 import { processCompatibilityMatchJob } from "@/server/services/compatibility-match";
 import {
   failMutationTask,
@@ -491,9 +494,12 @@ async function processEmbeddingJob(job: ClaimedJob) {
   if (job.payload && "recall" in job.payload) {
     const recall = parseRecallJob(job.payload.recall);
     try {
+      await logTaskStep("indexing", "开始构建并写入召回索引。", { asset_id: recall.assetId });
       await executeRecallJob(db, recall);
       await completeJob(job);
+      await logTaskStep("indexing", "召回索引写入完成。");
     } catch (error) {
+      await logTaskStep("indexing", "召回索引写入失败。", { error: error instanceof Error ? error.message : String(error), attempt: job.attempt }, "error");
       await recordRecallFailure(db, recall, error instanceof AppError ? error.message : "召回构建写入失败。");
       if (job.attempt < 3) await requeueJob(job, job.attempt * 30_000);
       else await failJob(job);
@@ -511,6 +517,7 @@ async function processEmbeddingJob(job: ClaimedJob) {
   }
   const ref = recordRef(asset);
   try {
+    await logTaskStep("indexing", "开始生成向量并更新素材索引。", { asset_id: job.assetId });
     await indexAsset(await getAssetDetail(job.assetId, { includeAllUsers: true }));
     await db
       .insert(searchIndexState)
@@ -525,7 +532,9 @@ async function processEmbeddingJob(job: ClaimedJob) {
         set: { status: "done", indexedAt: new Date(), errorMessage: null, updatedAt: new Date() },
       });
     await completeJob(job);
+    await logTaskStep("indexing", "素材索引更新完成。", { asset_id: job.assetId });
   } catch (error) {
+    await logTaskStep("indexing", job.attempt < 3 ? "素材索引更新失败，准备重试。" : "素材索引更新失败，已达到最大重试次数。", { error: error instanceof Error ? error.message : String(error), attempt: job.attempt }, "error");
     if (job.attempt < 3) {
       await requeueJob(job, job.attempt * 30_000);
     } else {
@@ -587,6 +596,7 @@ async function processAnalysisJob(
       await stopUnavailableAnalysis(job);
       return;
     }
+    await logTaskStep("validating", "开始准备分析所需的媒体文件。", { asset_id: asset.id });
     const prepared = hydrated.precomputedFrames
       ? { mimeType: asset.mimeType, sizeBytes: asset.sizeBytes }
       : await mediaPreparer(asset);
@@ -603,6 +613,7 @@ async function processAnalysisJob(
       );
     });
     if (asset.mediaType === "video" && !hydrated.precomputedFrames) {
+      await logTaskStep("analyzing", "开始提取视频关键帧。", { asset_id: asset.id });
       stage = "prepare_frames";
       await videoFramePreparer(asset);
     }
@@ -613,6 +624,7 @@ async function processAnalysisJob(
       await stopUnavailableAnalysis(job);
       return;
     }
+    await logTaskStep("analyzing", "开始调用模型分析素材。", { asset_id: asset.id });
     stage = "analyze";
     const outcome = await analyzer.analyze({
       assetId: asset.id,
@@ -620,6 +632,7 @@ async function processAnalysisJob(
       mimeType: prepared.mimeType,
       relativePath: asset.originalPath,
     });
+    await logTaskStep("analyzing", "模型分析完成，准备保存描述和标签。", { asset_id: asset.id, model: outcome.model.name });
     stage = "persist_analysis";
     if (
       await persistAnalysis(
@@ -629,6 +642,7 @@ async function processAnalysisJob(
         outcome.model.name,
       )
     ) {
+      await logTaskStep("analyzing", "分析结果已保存。", { asset_id: asset.id });
       stage = "finish_task";
       await finishAnalysisLifecycle(job);
     }
@@ -650,7 +664,14 @@ async function processAnalysisJob(
 }
 
 /** worker 的统一作业分派入口。 */
-export async function processJob(
+export async function processJob(...args: Parameters<typeof runJob>) {
+  const job = args[0];
+  return observeJob(`processJob(${job.type})`, job,
+    { job_id: job.id, task_id: job.taskId, asset_id: job.assetId, attempt: job.attempt, payload: job.payload },
+    () => runJob(...args));
+}
+
+async function runJob(
   job: ClaimedJob,
   analyzer: MultimodalAnalyzer = new OpenAICompatibleAnalyzer(),
   mediaPreparer: MediaPreparer = prepareMedia,
@@ -716,7 +737,8 @@ export async function processJob(
       return;
     }
     if (job.type === "match") {
-      await processCompatibilityMatchJob(job);
+      if (typeof job.payload?.query === "string") await processMatchJob(job);
+      else await processCompatibilityMatchJob(job);
       return;
     }
     if (["update", "publish", "retry", "delete"].includes(job.type)) {

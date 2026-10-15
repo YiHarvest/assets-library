@@ -1,3 +1,4 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import crypto from "node:crypto";
 import type { ObjectStorage, StoredObject } from "@/server/storage/object-storage";
 import type { PreparedSceneBatch } from "@/server/scene/batch";
@@ -95,6 +96,7 @@ export async function persistSceneBatch(
   const scopedPrefix = input.variant ? `${prefix}/${input.variant}` : prefix;
   const uploaded: StoredObject[] = [];
   try {
+    await logTaskStep("persisting", "开始上传父视频及分镜片段。", { variant: input.variant, segment_count: input.batch.segments.length });
     const semaphore = new Semaphore(input.concurrency ?? 8);
     const storeTracked = async (
       request: Parameters<ObjectStorage["storeFile"]>[0],
@@ -121,6 +123,7 @@ export async function persistSceneBatch(
         filePath: segment.thumbnailAbsolutePath,
         contentType: "image/jpeg",
       });
+      await logTaskStep("persisting", `片段 ${segment.index} 及缩略图上传完成。`, { variant: input.variant });
       return {
         index: segment.index,
         startSeconds: segment.startSeconds,
@@ -156,6 +159,7 @@ export async function persistSceneBatch(
 
     const persisted = { parentObject, segments };
     await input.commitDatabase(persisted);
+    await logTaskStep("persisting", "视频批次已完整保存。", { variant: input.variant, segment_count: segments.length });
     return persisted;
   } catch (error) {
     const cleanupResults = await Promise.allSettled(
@@ -164,6 +168,7 @@ export async function persistSceneBatch(
     const cleanupFailures = cleanupResults.filter(
       (result) => result.status === "rejected",
     ).length;
+    await logTaskStep("persisting", "视频批次持久化失败，已执行对象回收。", { cleanup_failures: cleanupFailures, error: error instanceof Error ? error.message : String(error) }, "error");
     throw new ScenePipelineError(
       "scene_persistence_failed",
       "视频批次未能完整写入 ZOS 和 MySQL，整批已取消。",

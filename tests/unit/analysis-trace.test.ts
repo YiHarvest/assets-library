@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("@/server/db", () => ({ db: mocks.db }));
+vi.mock("@/server/services/match", () => ({ processMatchJob: vi.fn() }));
 vi.mock("@/server/repositories/assets", () => ({
   getAssetRecord: mocks.asset, heartbeatJob: vi.fn(), failJob: vi.fn(),
   searchAssetsByDescriptionDetailed: vi.fn(),

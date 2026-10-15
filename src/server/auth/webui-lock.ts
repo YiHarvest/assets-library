@@ -72,6 +72,7 @@ export function isProtectedWebUiPath(pathname: string) {
   if (
     normalized === "/" ||
     normalized === "/upload" ||
+    normalized === "/monitor" ||
     normalized === "/docs" ||
     normalized === "/api-docs"
   ) {

@@ -64,6 +64,8 @@ describe("WebUI lock primitives", () => {
     const env = { NEXT_PUBLIC_BASE_PATH: "/feisu/assets-library" };
     expect(stripAppBasePath("/feisu/assets-library/upload", env)).toBe("/upload");
     expect(isProtectedWebUiPath("/assets/asset-1")).toBe(true);
+    expect(isProtectedWebUiPath("/monitor")).toBe(true);
+    expect(safeWebUiReturnPath("/monitor?view=tasks", env)).toBe("/feisu/assets-library/monitor?view=tasks");
     expect(isProtectedWebUiPath("/api/v1/assets/query")).toBe(false);
     expect(isProtectedWebUiPath("/lock")).toBe(false);
     expect(

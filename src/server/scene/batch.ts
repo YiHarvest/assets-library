@@ -1,3 +1,4 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -117,6 +118,7 @@ export async function prepareSceneBatch(
 
   try {
     await fs.mkdir(segmentsPath, { recursive: true });
+    await logTaskStep("splitting", "向分镜服务提交视频，等待分镜结果。", { filename: input.originalFilename });
     manifest = await input.client.splitVideo(
       input.normalizedParentPath,
       input.originalFilename,
@@ -125,6 +127,7 @@ export async function prepareSceneBatch(
 
     // splitVideo 成功后 manifest 必然存在；TS 在闭包内无法自动收窄，这里显式断言
     const splitManifest = manifest as SceneSplitManifest;
+    await logTaskStep("splitting", `分镜服务处理完成，生成 ${manifest.segments.length} 个片段。`, { service_task_id: manifest.taskId });
     // 超限切片不再整批拒绝：改为以父视频为源做本地二次切分，
     // 每段不超过上限后继续走统一入库链路。
 
@@ -136,6 +139,7 @@ export async function prepareSceneBatch(
         expanded.push({ ...segment, remoteIndex: segment.index });
         continue;
       }
+      await logTaskStep("splitting", `片段 ${segment.index} 超出大小限制，开始本地二次切分。`);
       const pieces = await resplitSegment(
         input.normalizedParentPath,
         segment.startSeconds,
@@ -180,6 +184,7 @@ export async function prepareSceneBatch(
           `segment-${String(segment.index).padStart(3, "0")}.mp4`,
         );
         try {
+          await logTaskStep("splitting", `开始准备并校验片段 ${segment.index}。`);
           let sizeBytes: number;
           if (segment.localPath) {
             // 本地二次切分子切片：就地搬移到最终路径，跳过远端下载。
@@ -218,6 +223,7 @@ export async function prepareSceneBatch(
             absolutePath,
             analysisFramesDirectory,
           );
+          await logTaskStep("splitting", `片段 ${segment.index} 校验完成，缩略图和分析帧已生成。`, { size_bytes: validated.sizeBytes });
           return {
             ...segment,
             absolutePath,
@@ -227,6 +233,7 @@ export async function prepareSceneBatch(
             analysisFramesDirectory,
           };
         } catch (error) {
+          await logTaskStep("splitting", `片段 ${segment.index} 处理失败。`, { error: error instanceof Error ? error.message : String(error) }, "error");
           invalid.push({
             segmentIndex: segment.index,
             code:
@@ -265,6 +272,7 @@ export async function prepareSceneBatch(
       );
     }
 
+    await logTaskStep("splitting", "全部分镜片段准备完成，等待持久化。", { segment_count: downloaded.length, resplit_count: resplitCount });
     return {
       batchId,
       serviceTaskId: splitManifest.taskId,

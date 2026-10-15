@@ -505,3 +505,18 @@ pnpm search:rebuild:staging .run/search-rebuild/<状态文件>.json
 普通浏览不访问 ES。当前复用 MySQL 候选 ID 过滤，单次候选范围受 ES terms 默认 65536 项上限约束。
 
 实现参考：[Elasticsearch kNN 过滤与召回](https://www.elastic.co/docs/solutions/search/vector/knn)。
+
+## 统一调用与任务监控
+
+`/monitor` 集中显示 API、Function、Match 的调用状态、耗时、入参、出参和过程日志；
+“任务进度”可查看逐文件状态、公共/私有素材 ID、作业结果和回调。
+页面每 2 秒刷新，支持任务/Trace 筛选、整任务与单调用日志切换和 JSON 导出。
+页面和监控查询接口沿用 WebUI 访问保护，支持现有部署路径前缀。
+
+首次部署执行 `pnpm db:migrate`，新增迁移 `0011_unified-task-monitor`，再启动 Web 和 worker。
+观测数据存入 MySQL 并按任务保留期限清理；历史任务没有采集的日志不会补造。
+观测写入失败不会改变业务返回值。媒体响应记录元数据，入参出参会脱敏并限制大小。
+
+`POST /api/v1/match` 提供文本描述与用户范围、媒体、标签筛选的异步匹配，复用现有
+Elasticsearch 检索；已有 `/api/v1/compat/segment-match` 及其 worker 也进入统一监控。
+详见 [匹配和监控 API](docs/api.md#素材匹配与任务监控)。

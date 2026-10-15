@@ -1,6 +1,7 @@
 .vscode/
 # Logs
 logs
+!src/app/api/v1/tasks/*/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*

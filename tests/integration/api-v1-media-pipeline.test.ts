@@ -239,6 +239,8 @@ const analyzeMock = vi.fn<MultimodalAnalyzer["analyze"]>(async (input) => {
   });
 const analyzer: MultimodalAnalyzer = { analyze: analyzeMock };
 
+vi.unmock("@/server/observability/store");
+
 mysqlPipeline("API v1 完整媒体管线", () => {
   let temporaryRoot: string;
   let database: DatabaseModule;
@@ -386,6 +388,10 @@ mysqlPipeline("API v1 完整媒体管线", () => {
       phase: "finished",
     });
     expect(status.items[0]!.private_asset_ids).toHaveLength(1);
+    const logs = await database.db.select().from(schema.taskLogs).where(eq(schema.taskLogs.taskId, taskId));
+    expect(logs.some(log => log.message.includes("开始调用模型分析素材"))).toBe(true);
+    expect(logs.some(log => log.message.includes("分析结果已保存"))).toBe(true);
+    expect(logs.some(log => log.phase === "task_terminal_done")).toBe(true);
     expect(status.items[0]!.public_asset_ids).toHaveLength(1);
     expect(status.items[0]!.private_asset_ids[0]).not.toBe(
       status.items[0]!.public_asset_ids[0],
@@ -599,6 +605,9 @@ mysqlPipeline("API v1 完整媒体管线", () => {
     const analysisRows = await database.db.select().from(schema.analysisResults);
     expect(sourceRows).toHaveLength(1);
     expect(sourceRows[0]?.generatedSegmentCount).toBe(2);
+    const logs = await database.db.select().from(schema.taskLogs).where(eq(schema.taskLogs.taskId, taskId));
+    expect(logs.some(log => log.message.includes("开始视频分镜"))).toBe(true);
+    expect(logs.some(log => log.message.includes("分镜") && log.message.includes("完成"))).toBe(true);
     expect(sourceRows[0]!.publicMediaObjectId).not.toBe(sourceRows[0]!.privateMediaObjectId);
     expect(privateAssetRows).toHaveLength(2);
     expect(publicAssetRows).toHaveLength(2);

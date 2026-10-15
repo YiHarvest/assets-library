@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { callContext, captureRequestBody } from "@/server/observability/context";
+import { observe } from "@/server/observability/trace";
 import { ZodError, type ZodType } from "zod";
 import { ApiV1Error } from "@/server/api/errors";
 import { isDeadlockError } from "@/server/db/retry";
@@ -99,6 +101,7 @@ function apiPathFields(request: Request) {
 }
 
 function addParsedInputAuditFields(value: unknown) {
+  captureRequestBody(value);
   const fields: Record<string, unknown> = { input: value };
   if (value && typeof value === "object") {
     const input = value as {
@@ -192,6 +195,25 @@ export async function withApiV1(
   handler: () => Promise<Response> | Response,
   authorize: (request: Request) => void = () => undefined,
 ) {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/^.*\/api\/v1(?=\/|$)/, "/api/v1");
+  const execute = () => executeApiV1(request, handler, authorize);
+  if (path.startsWith("/api/v1/monitor/") ||
+    (request.method === "GET" && (path === "/api/v1/tasks" || /\/tasks\/[^/]+\/(monitor|logs)$/.test(path)))) {
+    return callContext.run(null, execute);
+  }
+  const taskId = path.match(/\/(?:tasks|uploads)\/([0-9a-f-]{36})(?:\/|$)/i)?.[1] ?? null;
+  return observe(`${request.method} ${path}`, {
+    method: request.method, path, query: Object.fromEntries(url.searchParams),
+    headers: Object.fromEntries(request.headers),
+  }, execute, { kind: "api", taskId });
+}
+
+async function executeApiV1(
+  request: Request,
+  handler: () => Promise<Response> | Response,
+  authorize: (request: Request) => void = () => undefined,
+) {
   const id = requestId(request);
   const started = process.hrtime.bigint();
   const context = {
@@ -214,6 +236,8 @@ export async function withApiV1(
         Object.assign(context.fields, currentAuditFields());
         const headers = new Headers(response.headers);
         headers.set("x-request-id", id);
+        const traceId = callContext.getStore()?.traceId;
+        if (traceId) headers.set("x-trace-id", traceId);
         const location = headers.get("location");
         auditLog("api_response_opened", {
           http_status: response.status,
@@ -298,6 +322,8 @@ export async function withApiV1(
         });
       } catch (error) {
         const response = apiV1ErrorResponse(error, id);
+        const traceId = callContext.getStore()?.traceId;
+        if (traceId) response.headers.set("x-trace-id", traceId);
         auditLog(
           "api_request_failed",
           {

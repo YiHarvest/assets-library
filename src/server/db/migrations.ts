@@ -20,6 +20,9 @@ import {
   taskItemSegments,
   taskItems,
   tasks,
+  taskLogs,
+  callSpans,
+  callLogs,
   users,
   videoSources,
 } from "@/server/db/schema";
@@ -36,6 +39,9 @@ export const defaultMigrationsFolder = path.resolve(process.cwd(), "drizzle");
 const applicationTables = [
   users,
   tasks,
+  taskLogs,
+  callSpans,
+  callLogs,
   taskItems,
   idempotencyRequests,
   mediaObjects,

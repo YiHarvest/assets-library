@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { logTaskStep } from "./task-observability";
 import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db } from "@/server/db";
 import { withDeadlockRetry } from "@/server/db/retry";
@@ -540,8 +541,10 @@ export async function processMutationJob(
   }
   try {
     await markMutationRunning(job);
+    await logTaskStep(job.type, "开始执行素材变更。", { type: job.type, asset_id: assetId });
     if (job.type === "retry") {
       await queueRetryAnalysis(job);
+      await logTaskStep("retrying", "素材分析重试已入队。", { asset_id: assetId });
       return;
     }
     let result: Record<string, unknown>;
@@ -560,7 +563,9 @@ export async function processMutationJob(
     }
     await finishMutationTask(job.taskId, result);
     await completeJob(job);
+    await logTaskStep("finished", "素材变更已完成。", result);
   } catch (error) {
+    await logTaskStep(job.type, "素材变更失败。", { error: error instanceof Error ? error.message : String(error) }, "error");
     await failMutationTask(job.taskId, error);
     throw error;
   }

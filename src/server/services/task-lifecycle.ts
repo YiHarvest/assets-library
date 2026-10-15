@@ -4,6 +4,7 @@ import { db } from "@/server/db";
 import { assetEntries, jobs, taskItems, tasks } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import { ScenePipelineError } from "@/server/scene/types";
+import { appendTaskLog } from "./task-observability";
 import { auditLog } from "@/server/observability/audit-log";
 
 export interface PersistedTaskError {
@@ -114,9 +115,11 @@ export async function markTaskItemRunning(
       })
       .where(eq(tasks.id, taskId));
   });
+  const message = { validating: "开始校验文件。", splitting: "开始视频分镜。", persisting: "开始持久化素材。", analyzing: "素材已保存，等待模型分析。" }[phase];
+  await appendTaskLog(taskId, phase, message, { item_id: itemId });
 }
 
-async function enqueueTerminalCallback(
+export async function enqueueTerminalCallback(
   tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
   taskId: string,
   now: Date,
@@ -215,6 +218,8 @@ export async function refreshUploadTask(taskId: string) {
           codes: failure.codes,
           ...(failedAssetIds.length > 0 ? { failed_asset_ids: failedAssetIds } : {}),
         }, "warn");
+      } else {
+        auditLog("task_terminal_done", { task_id: taskId, type: "upload", done_items: doneItems, total_items: rows.length });
       }
       await enqueueTerminalCallback(tx, taskId, now);
     }

@@ -1,4 +1,8 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import crypto from "node:crypto";
+import { taskTraceFields } from "@/server/observability/context";
+import { observe } from "@/server/observability/trace";
+import { redact } from "@/server/observability/payload";
 import { and, eq, sql } from "drizzle-orm";
 import { ZodError, z } from "zod";
 import { loadConfig } from "@/server/config";
@@ -275,7 +279,13 @@ function unmatchedSegment(
   };
 }
 
-export async function matchCompatibilitySegments(
+export async function matchCompatibilitySegments(...args: Parameters<typeof runCompatibilityMatch>) {
+  const [segments, publicOrigin, options] = args;
+  return observe("matchCompatibilitySegments", { segments, publicOrigin, options },
+    () => runCompatibilityMatch(...args), { kind: "match" });
+}
+
+async function runCompatibilityMatch(
   segments: AlignedCompatibilitySegment[],
   publicOrigin: string,
   options: CompatibilityMatchOptions = {},
@@ -330,6 +340,7 @@ export async function matchCompatibilitySegments(
       .map(candidate => ({ ...candidate, mediaIdentity: search.mediaIdentities?.[candidate.id], matchQuality: search.matchQualities?.[candidate.id], playbackEvidence: search.playbackEvidence?.[candidate.id] })) }));
   };
   const searches = await recall();
+  await logTaskStep("matching", "分段候选素材召回完成，开始分配素材。", { segments: segments.length, candidates: searches.map(search => search.items.length) });
   let pools: MatchMaterial[][] = searches.map(search => search.items);
   let shortSearches: DescriptionSearchResult[] = [];
   if (!candidateAssetIds || candidateAssetIds.length >= 2) {
@@ -390,6 +401,7 @@ export async function matchCompatibilitySegments(
       matched_candidate_message: null,
     });
   }
+  await logTaskStep("matching", "分段素材分配完成。", { total: matched.length, matched: matched.filter(segment => segment.matched_candidate_url).length });
   return matched;
 }
 
@@ -492,6 +504,8 @@ export async function createCompatibilityMatchTask(
   const normalizedOrigin = new URL(publicOrigin).origin;
   await db.transaction(async (tx) => {
     await tx.insert(tasks).values({
+      ...taskTraceFields(taskId),
+      input: redact(request) as Record<string, unknown>,
       id: taskId,
       type: "match",
       status: "queued",
@@ -558,6 +572,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
 
   try {
     // 把 LLM 文本顺序对齐到 ASR 逐词时间，计算时间范围和 group_id，小程序那边传过来的格式已经做了对齐
+    await logTaskStep("matching", "开始对齐文本时间并匹配素材。");
     const aligned = alignCompatibilitySegments(payload.request);
     // 每个分段复用 ES 双路召回和 RRF 排序。
     const matched = await matchCompatibilitySegments(
@@ -572,11 +587,13 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
       },
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);
+    await logTaskStep("matching", "分段素材匹配完成，结果已保存。", { result: matched });
     await completeJob(job);
   } catch (error) {
     const retriable =
       !(error instanceof AppError && error.code === "invalid_request") &&
       job.attempt < maximumMatchAttempts;
+    await logTaskStep("matching", retriable ? "素材匹配失败，准备重试。" : "素材匹配失败，已达到终态。", { attempt: job.attempt, error: error instanceof Error ? error.message : String(error) }, retriable ? "warn" : "error");
     if (retriable) {
       await requeueJob(job, job.attempt * 30_000);
       return;

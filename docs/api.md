@@ -3,6 +3,136 @@
 本文档描述当前代码实际提供的 HTTP 接口。业务接口统一使用 `/api/v1` 前缀和
 `snake_case` 字段；不再提供旧版接口。
 
+## 素材匹配与任务监控
+
+监控页与监控查询接口沿用 WebUI 页面锁；启用页面锁时需携带有效会话 Cookie 或 Bearer 凭据。新增数据库迁移为 `0011_unified-task-monitor`。
+
+React 统一入口：`/monitor`，主列表展示 API、Function、Match 调用，包含调用状态、
+HTTP 状态、耗时、关联任务及进度。每 2 秒刷新，可暂停、筛选、查看父调用/同 Trace 调用，
+复制 JSON、搜索日志、导出当前记录。`?span_id=<UUID>` 直达调用。
+同页“任务进度”保留任务级列表、日志、入参/出参、作业和回调详情；
+`?task_id=<UUID>` 直达任务，`?view=calls&task_id=<UUID>` 查看任务的全部调用。
+
+“查看调用”的日志默认展示“整个任务”：复用任务日志接口，持续展示上传、校验、分镜、
+片段下载/校验、持久化、关键帧、模型请求/重试/备用模型、分析保存、向量索引、匹配和回调等
+实际执行步骤。可切换“当前调用”查看单次 Span 的日志；无关联任务时仅显示当前调用。
+两个日志范围分别增量读取和导出，页面各保留最近 2000 条，完整已有日志可通过对应接口分页获取。
+失败原因直接展示，时间精确到毫秒；历史未记录的中间步骤不补造。列表分别显示调用状态与任务结果，
+详情提供“查看任务结果”入口。主题、卡片和按钮沿用原素材库样式，支持明暗主题与移动端。
+
+### match API 与服务端 function
+
+`POST /api/v1/match` 接收以下 JSON，返回 HTTP 202、任务对象及
+`Location: /api/v1/tasks/{task_id}`（部署前缀会一并保留）。匹配由现有 worker 执行：
+
+```json
+{
+  "query": "黄昏的海边公路，一辆汽车驶过",
+  "filter": {
+    "user_scope": { "mode": "public" },
+    "media_types": ["video"],
+    "tags": [{ "category": "scene", "value": "海边" }]
+  },
+  "limit": 10,
+  "min_score": 0,
+  "callback_url": null
+}
+```
+
+`query` 必填，长度 1–1000；`limit` 为 1–100，默认 10；`min_score` 为 0–1，默认 0。
+可选 `keywords` 最多 10 个，使用现有关键词过滤规则。`filter` 与素材查询一致，默认
+公共素材、已完成分析、已发布。SQL 先按范围、媒体类型和标签过滤，再调用现有 Elasticsearch 检索，
+最后对返回候选的 `semantic_score` 应用 `min_score` 并降序返回。分数沿用当前检索引擎，
+不是概率；v2 中它是向量通路的归一化 RRF 排名贡献，最高为 0.5，因此 v2 建议从默认阈值 0 开始。
+仅关键词命中的候选没有语义分数，不进入文本匹配结果。
+
+通过 `GET /api/v1/tasks/{task_id}` 轮询；终态出参如下：
+
+```json
+{
+  "query": "黄昏的海边公路，一辆汽车驶过",
+  "items": [],
+  "matched_count": 0,
+  "min_score": 0
+}
+```
+
+上述内容位于响应的 `result` 字段。无匹配时任务为 `done` 且列表为空；未配置
+embedding 时为 `failed`，错误码 `model_not_configured`；上游检索失败同样为失败任务。
+进度为等待时 0%、执行时 10%、终态 100%，表示处理阶段，不估算检索剩余时间。
+
+在 Node.js 服务端也可以复用同一个函数：
+
+```ts
+import { match } from "@/server/services/match";
+import { matchRequestSchema } from "@/shared/monitor-contracts";
+
+const result = await match(matchRequestSchema.parse({ query: "海边汽车" }));
+```
+
+直接调用函数返回 `MatchResult`，不创建异步 task，但会生成独立 Match 调用记录、入参、
+出参、耗时和错误。需要持久化队列和回调时使用 HTTP API 或 `createMatchTask(input)`。
+
+### 统一调用监控
+
+`GET /api/v1/monitor/calls` 返回 `{ items, total, page, has_more }`。筛选：
+`kind=api|function|match`、`status=running|done|failed`、`task_id`、`trace_id`、
+`q`（名称/路径，最多 200 字符）；`page` 默认 1，`limit` 默认 30、最大 100。
+每条记录包含 `id/trace_id/parent_span_id/task_id/kind/name/status/status_code/duration_ms/started_at/finished_at`
+及 `task_status/task_phase/task_progress`。API 返回 202 表示本次请求完成，异步任务状态单独展示。
+
+`GET /api/v1/monitor/calls/{span_id}?after=0&limit=100` 返回
+`{ call, logs, next_after, has_more }`。`call` 额外包含 `input/output/error`；日志参数限制与任务日志一致。
+业务 API 响应的 `X-Trace-Id` 对应调用链 ID。API 创建任务时保存调用上下文，worker 通过任务恢复
+Trace 与父调用；无 task 的独立查询、函数调用也可查看。旧任务没有上下文时 worker 会建立新 Trace。
+
+自动接入范围：业务 `/api/v1` 请求、`getApiV1Service()` 的全部公共服务函数、worker 作业入口、
+`match()` 和现有 `matchCompatibilitySegments()`。媒体、分镜、模型、索引步骤及原有结构化
+审计事件写入所在调用和关联任务的日志。新的业务函数可复用：
+
+```ts
+import { observe, logCall } from "@/server/observability/trace";
+const result = await observe("myFunction", input, async () => {
+  await logCall("开始处理", { item_count: input.items.length });
+  return runBusiness(input);
+});
+```
+
+监控查询自身及其内部函数不记录，防止页面轮询制造记录。媒体只记录元数据，不复制字节流。
+单个输入/输出快照上限 64 KiB，字符串/数组还有限长，截断会标记；凭据字段、URL 凭据及
+Bearer 令牌脱敏。日志为结构化业务事件和调用起止，不是任意 `console.log` 的进程输出镜像。
+进程被强制终止时可能留下没有结束时间的 running 调用，可通过关联任务/重试记录判断后续状态。
+观测写入失败不改变业务返回值或原异常。调用按 `TASK_RETENTION_DAYS` 到期由 worker 清理。
+
+### monitor API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/v1/tasks` | 分页任务列表及状态统计 |
+| GET | `/api/v1/tasks/{task_id}/monitor` | 入参、当前任务出参、worker 作业与回调记录 |
+| GET | `/api/v1/tasks/{task_id}/logs` | 增量执行日志 |
+
+列表参数：`type` 支持 upload/delete/publish/update/retry/match，`status` 支持
+queued/running/done/failed，`task_id` 为完整 UUID，`user_id` 精确匹配任务所属用户。
+`page` 默认 1，最大 10000；`limit` 默认 30，最大 100。按创建时间、UUID 倒序排列。
+`counts` 应用除 status 外的筛选条件；`total` 应用所有条件。新的任务可能改变分页位置。
+
+详情包含 `task`、`input`（接收并规范化后的业务入参）、`output`（当前统一任务响应）、
+`jobs` 和 `callbacks`。任务出错时还可在 `task.error`、逐文件 `items[].error` 和作业
+错误字段中定位原因。输出为当前快照，终态时成为最终响应；文件二进制不写入日志。
+
+日志参数：`after` 默认 0，`limit` 默认 100、最大 500。响应为
+`{ "items": [...], "next_after": 123, "has_more": false }`，下次以 `next_after` 作为
+`after`；每条日志有 `id/level/phase/message/data/created_at`。`level` 为 info/warn/error。
+结构化日志覆盖任务创建、上传、阶段切换、worker 作业及其结束/重试、错误和回调异常，
+不是进程 stdout 的完整镜像。页面最多保留最近加载的 2000 条，导出也限于当前已加载内容；
+完整日志通过 API 持续分页获取。
+
+首次启用执行 `pnpm db:migrate`（新增 task_logs、call_spans、call_logs 和任务入参、Trace 字段），
+再重启 Web 与 worker。入参与日志持久化到 MySQL，随任务保留期级联清理；不存在或已清理
+的任务返回 404。历史任务不补造入参/日志。监控数据递归脱敏凭据字段、Bearer 令牌及
+URL 中的敏感参数；监控查询复用 WebUI 页面锁，授权后能查看所有任务，不按用户隔离。
+
 ## 1. 通用约定
 
 - Base URL：`http(s)://<assets-library-host>`，本文不绑定具体主机或端口。

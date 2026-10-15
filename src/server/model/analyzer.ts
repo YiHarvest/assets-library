@@ -1,3 +1,4 @@
+import { logTaskStep } from "@/server/services/task-observability";
 import fs from "node:fs/promises";
 import {
   loadConfig,
@@ -717,6 +718,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
         candidate === primary ? primaryDeadlineAt : totalDeadlineAt;
       if (this.now() >= candidateDeadlineAt) continue;
       try {
+        await logTaskStep("analyzing", `开始尝试模型 ${candidate.name}。`);
         const result = await this.analyzeWithModel(
           candidate,
           input,
@@ -739,6 +741,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
               model: candidate.name,
             });
           }
+          await logTaskStep("analyzing", "当前模型请求失败，检查备用模型。", { model: candidate.name, kind: error.kind }, "warn");
           lastFailure = "request";
           lastErrorDetails = {
             status: error.status,
@@ -791,6 +794,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
     while (true) {
       const attemptStartedAt = this.now();
       try {
+        await logTaskStep("analyzing", correctionUsed ? "开始请求模型修正响应。" : "开始发送模型请求。", { model: model.name });
         const text = correctionUsed
           ? await this.requestTextRepair(
               model,
@@ -855,6 +859,7 @@ export class OpenAICompatibleAnalyzer implements MultimodalAnalyzer {
           this.config.VLM_FAST_RETRY_WINDOW_MS,
         );
         if (this.now() + retryDelay >= deadlineAt) throw requestError;
+        await logTaskStep("analyzing", "模型请求暂时失败，准备重试。", { model: model.name, delay_ms: retryDelay, retries_remaining: retriesRemaining }, "warn");
         if (retryDelay > 0) await this.sleep(retryDelay);
       }
     }

@@ -4,7 +4,7 @@ info:
   version: 1.0.0
   summary: 基于任务的图片与视频素材分析、存储和检索 API
   description: >-
-    所有业务字段使用 snake_case。接口部署在可信内网，不做应用层鉴权。
+    所有业务字段使用 snake_case。业务接口部署在可信内网；监控管理接口复用 WebUI 页面锁。
     所有写操作异步执行，并由统一任务接口报告进度。
 servers:
   - url: /
@@ -24,6 +24,180 @@ tags:
     description: 旧剪辑业务兼容接口
   - name: Specification
 paths:
+  /api/v1/monitor/calls:
+    get:
+      security:
+        - WebUiBearer: []
+        - WebUiSession: []
+      tags: [Tasks]
+      operationId: listObservedCalls
+      summary: 统一查询 API、Function、Match 调用
+      description: 监控查询本身不生成调用记录。调用状态与异步 task 进度分别展示。
+      parameters:
+        - { name: kind, in: query, schema: { type: string, enum: [api, function, match] } }
+        - { name: status, in: query, schema: { type: string, enum: [running, done, failed] } }
+        - { name: task_id, in: query, schema: { type: string, format: uuid } }
+        - { name: trace_id, in: query, schema: { type: string, format: uuid } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 10000, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        "401":
+          description: WebUI 页面锁启用时需要有效会话或 Bearer 密钥。
+        "200":
+          description: 按开始时间倒序分页的调用列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, page, has_more]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ObservedCall" } }
+                  total: { type: integer }
+                  page: { type: integer }
+                  has_more: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/monitor/calls/{span_id}:
+    get:
+      security:
+        - WebUiBearer: []
+        - WebUiSession: []
+      tags: [Tasks]
+      operationId: getObservedCall
+      summary: 获取调用入参、出参、错误和增量日志
+      parameters:
+        - { name: span_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: after, in: query, schema: { type: integer, minimum: 0, maximum: 9007199254740991, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "401":
+          description: WebUI 页面锁启用时需要有效会话或 Bearer 密钥。
+        "200":
+          description: 调用详情及日志游标；输入输出脱敏且限长，二进制仅保存元数据
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [call, logs, next_after, has_more]
+                properties:
+                  call:
+                    allOf:
+                      - { $ref: "#/components/schemas/ObservedCall" }
+                      - type: object
+                        required: [input, output, error]
+                        properties:
+                          input: {}
+                          output: {}
+                          error: {}
+                  logs:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, level, message, data, created_at]
+                      properties:
+                        id: { type: integer }
+                        level: { type: string, enum: [info, warn, error] }
+                        message: { type: string }
+                        data: {}
+                        created_at: { type: string, format: date-time }
+                  next_after: { type: integer }
+                  has_more: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/match:
+    post:
+      tags: [Assets]
+      operationId: matchAssets
+      summary: 创建可观测的异步素材匹配任务
+      description: 复用用户范围和标签过滤后的语义检索。未配置 embedding 时任务以 model_not_configured 失败；零匹配返回成功空列表。结果位于任务的 result.items。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MatchRequest" }
+      responses:
+        "202":
+          description: 匹配任务已入队
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/tasks:
+    get:
+      security:
+        - WebUiBearer: []
+        - WebUiSession: []
+      tags: [Tasks]
+      operationId: listTasks
+      summary: 分页列出全部类型的任务及状态统计
+      description: counts 应用 type、task_id、user_id 过滤，但不应用 status。仅用于可信内网运维。
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/TaskStatusValue" } }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/TaskType" } }
+        - { name: task_id, in: query, schema: { type: string, format: uuid } }
+        - { name: user_id, in: query, schema: { type: string, minLength: 1, maxLength: 191 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 10000, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        "401":
+          description: WebUI 页面锁启用时需要有效会话或 Bearer 密钥。
+        "200":
+          description: 按创建时间和 task_id 倒序排列的任务
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MonitorTaskList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/tasks/{task_id}/monitor:
+    get:
+      security:
+        - WebUiBearer: []
+        - WebUiSession: []
+      tags: [Tasks]
+      operationId: monitorTask
+      summary: 获取任务入参、当前出参、作业和回调详情
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "401":
+          description: WebUI 页面锁启用时需要有效会话或 Bearer 密钥。
+        "200":
+          description: 脱敏后的监控详情；历史任务的 input 可为 null
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MonitorDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tasks/{task_id}/logs:
+    get:
+      security:
+        - WebUiBearer: []
+        - WebUiSession: []
+      tags: [Tasks]
+      operationId: getTaskLogs
+      summary: 按递增游标增量读取任务日志
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - { name: after, in: query, schema: { type: integer, minimum: 0, maximum: 9007199254740991, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "401":
+          description: WebUI 页面锁启用时需要有效会话或 Bearer 密钥。
+        "200":
+          description: 将 next_after 用于下次请求；has_more 表示尚有积压日志
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskLogPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/openapi:
     get:
       tags: [Specification]
@@ -498,6 +672,15 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
 components:
+  securitySchemes:
+    WebUiBearer:
+      type: http
+      scheme: bearer
+      description: 监控管理接口复用 WebUI 密钥；开发环境未配置页面锁时免验证。
+    WebUiSession:
+      type: apiKey
+      in: cookie
+      name: assets_library_webui_session
   parameters:
     TaskId:
       name: task_id
@@ -594,6 +777,140 @@ components:
               description: 回调已接收
 
   schemas:
+    ObservedCall:
+      type: object
+      required: [id, trace_id, parent_span_id, task_id, kind, name, status, status_code, duration_ms, started_at, finished_at, task_status, task_phase, task_progress]
+      properties:
+        id: { type: string, format: uuid }
+        trace_id: { type: string, format: uuid }
+        parent_span_id: { type: [string, "null"], format: uuid }
+        task_id: { type: [string, "null"], format: uuid }
+        kind: { type: string, enum: [api, function, match] }
+        name: { type: string }
+        status: { type: string, enum: [running, done, failed] }
+        status_code: { type: [integer, "null"] }
+        duration_ms: { type: [number, "null"] }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        task_status: { type: [string, "null"] }
+        task_phase: { type: [string, "null"] }
+        task_progress: { type: [number, "null"] }
+    MatchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        keywords:
+          type: array
+          maxItems: 10
+          items: { type: string, minLength: 1, maxLength: 64 }
+        filter: { $ref: "#/components/schemas/AssetQueryFilter" }
+        limit: { type: integer, minimum: 1, maximum: 100, default: 10 }
+        min_score: { type: number, minimum: 0, maximum: 1, default: 0 }
+        callback_url: { type: [string, "null"], format: uri, maxLength: 2048, default: null }
+    MatchResult:
+      type: object
+      required: [query, items, matched_count, min_score]
+      properties:
+        query: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AssetSummary" }
+        matched_count: { type: integer, minimum: 0 }
+        min_score: { type: number, minimum: 0, maximum: 1 }
+    MonitorTask:
+      type: object
+      required: [task_id, task_type, status, phase, user_id, progress_percent, total_items, done_items, failed_items, created_at, started_at, finished_at, updated_at, error_message]
+      properties:
+        task_id: { type: string, format: uuid }
+        task_type: { $ref: "#/components/schemas/TaskType" }
+        status: { $ref: "#/components/schemas/TaskStatusValue" }
+        phase: { type: string }
+        user_id: { type: [string, "null"] }
+        progress_percent: { type: number, minimum: 0, maximum: 100 }
+        total_items: { type: integer, minimum: 0 }
+        done_items: { type: integer, minimum: 0 }
+        failed_items: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        error_message: { type: [string, "null"] }
+    MonitorTaskList:
+      type: object
+      required: [items, total, page, limit, has_more, counts]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/MonitorTask" }
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1 }
+        has_more: { type: boolean }
+        counts:
+          type: object
+          required: [queued, running, done, failed]
+          properties:
+            queued: { type: integer, minimum: 0 }
+            running: { type: integer, minimum: 0 }
+            done: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+    MonitorJob:
+      type: object
+      required: [job_id, type, status, phase, attempt, input, error_code, error_message, updated_at]
+      properties:
+        job_id: { type: string, format: uuid }
+        type: { type: string }
+        status: { $ref: "#/components/schemas/TaskStatusValue" }
+        phase: { type: string }
+        attempt: { type: integer, minimum: 0 }
+        input: { type: [object, "null"], additionalProperties: true }
+        error_code: { type: [string, "null"] }
+        error_message: { type: [string, "null"] }
+        updated_at: { type: string, format: date-time }
+    MonitorCallback:
+      type: object
+      required: [attempt, input, status_code, output, error_message, started_at, completed_at]
+      properties:
+        attempt: { type: integer, minimum: 1 }
+        input: { type: object, additionalProperties: true }
+        status_code: { type: [integer, "null"] }
+        output: { type: [string, "null"] }
+        error_message: { type: [string, "null"] }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    MonitorDetail:
+      type: object
+      required: [task, input, output, jobs, callbacks]
+      properties:
+        task: { $ref: "#/components/schemas/TaskStatus" }
+        input: { type: [object, "null"], additionalProperties: true }
+        output: { $ref: "#/components/schemas/TaskStatus" }
+        jobs:
+          type: array
+          items: { $ref: "#/components/schemas/MonitorJob" }
+        callbacks:
+          type: array
+          items: { $ref: "#/components/schemas/MonitorCallback" }
+    TaskLogPage:
+      type: object
+      required: [items, next_after, has_more]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, level, phase, message, data, created_at]
+            properties:
+              id: { type: integer, minimum: 1 }
+              level: { type: string, enum: [info, warn, error] }
+              phase: { type: string }
+              message: { type: string }
+              data: { type: [object, "null"], additionalProperties: true }
+              created_at: { type: string, format: date-time }
+        next_after: { type: integer, minimum: 0 }
+        has_more: { type: boolean }
     ErrorCode:
       type: string
       enum:
@@ -672,6 +989,7 @@ components:
     TaskPhase:
       type: string
       enum:
+        - matching
         - receiving
         - waiting_for_seal
         - validating

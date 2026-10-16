@@ -15,6 +15,7 @@ import {
 } from "@/shared/monitor-contracts";
 
 import { LogTimeline, Status, ProgressBar, panelClass as panel, selectClass } from "./monitor-ui";
+import { FailureToast, useFailureAlerts } from "./failure-alerts";
 function timestamp(value: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "—";
 }
@@ -40,6 +41,8 @@ export function TaskMonitor({ initialTaskId }: { initialTaskId: string | null })
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const alerts = useFailureAlerts("任务");
+  const { observe } = alerts;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -54,6 +57,11 @@ export function TaskMonitor({ initialTaskId }: { initialTaskId: string | null })
         const result = await apiV1<MonitorTaskList>(`/tasks?${params}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
         setList(result); setError(""); setUpdatedAt(new Date().toISOString());
+        observe(params.toString(), result.items.filter((task) => task.status === "failed").map((task) => ({
+          id: task.task_id, title: `${taskTypeLabels[task.task_type]}任务`,
+          description: task.error_message || task.task_id,
+          occurredAt: task.finished_at ?? task.updated_at,
+        })));
       } catch (cause) {
         if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "任务列表加载失败。");
       } finally {
@@ -62,7 +70,7 @@ export function TaskMonitor({ initialTaskId }: { initialTaskId: string | null })
     }
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [type, status, page, filters, live, refresh]);
+  }, [type, status, page, filters, live, refresh, observe]);
 
   function filterStatus(value: string) { setStatus(value); setPage(1); setSelected(null); }
   function searchTasks(event: React.FormEvent) {
@@ -71,6 +79,9 @@ export function TaskMonitor({ initialTaskId }: { initialTaskId: string | null })
     if (!parsed.success) { setError("请填写完整有效的 task UUID；用户 ID 最多 191 个字符。"); return; }
     setFilters({ task_id: search.trim(), user_id: userId.trim() }); setPage(1);
   }
+  const notification = <FailureToast notice={alerts.notice} onDismiss={alerts.dismiss} onInspect={(id) => {
+    setSelected(id); window.history.replaceState(null, "", appUrl(`/monitor?task_id=${id}`));
+  }} soundMuted={alerts.soundMuted} soundState={alerts.soundState} onToggleSound={alerts.toggleSound} />;
 
   return (
     <main className="mx-auto max-w-7xl space-y-6 px-5 py-7 sm:py-9">
@@ -121,15 +132,17 @@ export function TaskMonitor({ initialTaskId }: { initialTaskId: string | null })
         </div>
         <div className="flex items-center justify-between border-t p-3"><Button size="sm" variant="ghost" disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</Button><span className="text-xs text-slate-500">第 {page} 页</span><Button size="sm" variant="ghost" disabled={!list?.has_more} onClick={() => setPage(page + 1)}>下一页</Button></div>
       </section>
-      {selected && <TaskDrawer key={selected} taskId={selected} live={live} refresh={refresh}
+      {!selected && notification}
+      {selected && <TaskDrawer key={selected} taskId={selected} live={live} refresh={refresh} notification={notification}
         onRefresh={() => setRefresh((n) => n + 1)} onToggleLive={() => setLive(!live)}
         onClose={() => { setSelected(null); window.history.replaceState(null, "", appUrl("/monitor?view=tasks")); }} />}
     </main>
   );
 }
 
-function TaskDrawer({ taskId, live, refresh, onClose, onRefresh, onToggleLive }: {
+function TaskDrawer({ taskId, live, refresh, onClose, onRefresh, onToggleLive, notification }: {
   taskId: string; live: boolean; refresh: number; onClose: () => void; onRefresh: () => void; onToggleLive: () => void;
+  notification: React.ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -141,6 +154,7 @@ function TaskDrawer({ taskId, live, refresh, onClose, onRefresh, onToggleLive }:
   return <dialog ref={dialog} aria-label="任务详情" onClose={onClose} onClick={(event) => {
     if (event.target === event.currentTarget) dialog.current?.close();
   }} className="fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-4xl overflow-y-auto border-0 bg-[var(--background)] p-0 text-[var(--foreground)] shadow-2xl backdrop:bg-black/35">
+    {notification}
     <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-b bg-white/90 p-4 backdrop-blur-xl dark:border-white/10">
       <h2 className="font-semibold">任务详情</h2>
       <div className="flex items-center gap-1">

@@ -136,3 +136,218 @@ test("暗色主题、日志筛选和任务结果入口保持可用", async ({ pa
   await expect(page.getByLabel("执行日志列表")).toContainText("开始视频分镜。");
   await page.screenshot({ path: testInfo.outputPath("task-dark.png"), fullPage: true });
 });
+
+test("仅实时失败时显示顶部提醒并发声，自动收起且不会重复报警", async ({ page }, testInfo) => {
+  const tones: string[] = [];
+  await page.exposeFunction("recordAlertTone", (type: string) => tones.push(type));
+  await page.addInitScript(() => {
+    const create = AudioContext.prototype.createOscillator;
+    AudioContext.prototype.createOscillator = function () {
+      const oscillator = create.call(this);
+      const start = oscillator.start.bind(oscillator);
+      oscillator.start = (when) => {
+        void (window as unknown as { recordAlertTone: (type: string) => Promise<void> }).recordAlertTone(oscillator.type);
+        start(when);
+      };
+      return oscillator;
+    };
+  });
+  let failed = false;
+  let newFailure = false;
+  let mutedFailure = false;
+  const failureTime = new Date().toISOString();
+  await page.route("**/api/v1/monitor/calls?**", (route) => {
+    const items = calls.map((call, index) => index < 2 ? { ...call, status: failed ? "failed" : "running", finished_at: failed ? failureTime : null, status_code: index === 0 ? (failed ? 500 : null) : null } : call);
+    if (newFailure) items.unshift({ ...calls[0], id: "00000000-0000-4000-8000-000000000008", name: "POST /api/v1/assets", status: "failed", status_code: 400, finished_at: failureTime });
+    if (mutedFailure) items.unshift({ ...calls[0], id: "00000000-0000-4000-8000-000000000009", name: "POST /api/v1/materials", status: "failed", status_code: 500, finished_at: failureTime });
+    return route.fulfill({ json: { items, total: items.length, page: 1, has_more: false } });
+  });
+  await page.goto(monitorPath);
+  await expect(page.getByRole("table", { name: "统一调用列表" }).getByRole("row")).toHaveCount(4);
+  const notice = page.getByRole("alert", { name: "失败通知" });
+  await expect(notice).toHaveCount(0); // The existing failed Match is history.
+  await page.screenshot({ path: testInfo.outputPath("monitor-without-alert.png"), fullPage: true });
+  expect(tones).toHaveLength(0);
+  await page.getByRole("heading", { name: "统一调用监控", exact: true }).click();
+  expect(tones).toHaveLength(0); // User activation must never audition a sound.
+
+  failed = true;
+  await expect(notice).toContainText("2 条调用失败"); // Automatic polling, no manual refresh.
+  await expect(notice).toContainText("HTTP 500");
+  await expect(notice.locator("time").first()).toHaveAttribute("datetime", failureTime);
+  await expect.poll(() => tones.length).toBe(2); // One sound for the whole batch.
+  expect(tones).toEqual(["sine", "sine"]);
+  const box = await notice.boundingBox();
+  expect(box!.y).toBeGreaterThanOrEqual(56); // Keep the site navigation accessible.
+  expect(box!.y).toBeLessThan(100);
+  expect(Math.abs(box!.x + box!.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(2);
+  expect(box!.width).toBeLessThanOrEqual(460); // Keep a compact card instead of a full-width banner.
+  expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width - 16);
+  await page.screenshot({ path: testInfo.outputPath("failure-alert-desktop.png"), fullPage: true });
+  await expect(notice).toHaveCount(0, { timeout: 10_000 }); // Repeated polling must not reset its timer.
+  expect(tones).toHaveLength(2);
+
+  newFailure = true;
+  await expect(notice).toContainText("POST /api/v1/assets");
+  await expect.poll(() => tones.length).toBe(4);
+  await notice.getByRole("button", { name: "静音提醒", exact: true }).click();
+  await expect(notice.getByRole("button", { name: "取消静音" })).toHaveAttribute("aria-pressed", "true");
+  mutedFailure = true;
+  await expect(notice).toContainText("POST /api/v1/materials");
+  expect(tones).toHaveLength(4);
+  await notice.getByRole("button", { name: "关闭失败提醒" }).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().includes("kind=function")),
+    page.getByRole("button", { name: "Function", exact: true }).click(),
+  ]);
+  await expect(notice).toHaveCount(0); // Changing filters does not replay history.
+});
+
+test("新失败在详情抽屉内也能提示，移动端和暗色主题可用", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => localStorage.setItem("theme-mode", "dark"));
+  let items = calls;
+  await page.route("**/api/v1/monitor/calls?**", (route) => route.fulfill({ json: { items, total: items.length, page: 1, has_more: false } }));
+  await page.goto(`${monitorPath}?span_id=${calls[0].id}`);
+  const dialog = page.getByRole("dialog", { name: "调用详情" });
+  await expect(dialog.getByRole("heading", { name: calls[0].name, exact: true })).toBeVisible();
+  await expect(page.getByRole("table", { name: "统一调用列表", includeHidden: true }).getByRole("row", { includeHidden: true })).toHaveCount(4);
+  items = calls.map((call, index) => index === 1 ? { ...call, status: "failed", finished_at: new Date().toISOString() } : call);
+  const notice = dialog.getByRole("alert", { name: "失败通知" });
+  await expect(notice.getByRole("heading", { name: "调用失败", exact: true })).toBeVisible();
+  await expect(notice).toContainText("createMatchTask");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const box = await notice.boundingBox();
+  expect(box!.y).toBeGreaterThanOrEqual(56); // Do not cover the drawer's close action.
+  expect(box!.y).toBeLessThan(100);
+  expect(box!.x).toBeGreaterThanOrEqual(8);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(382);
+  await page.screenshot({ path: testInfo.outputPath("failure-alert-mobile-dark.png"), fullPage: true });
+  await notice.getByRole("button", { name: "查看失败详情：createMatchTask" }).click();
+  await expect(dialog.getByRole("heading", { name: "createMatchTask", exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "失败通知" })).toHaveCount(0);
+});
+
+test("任务失败展示错误原因，音频不可用时仍有文字提醒", async ({ page }, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "AudioContext", { value: undefined });
+  });
+  let failed = false;
+  const failureTime = new Date().toISOString();
+  await page.route("**/api/v1/tasks?**", (route) => route.fulfill({ json: {
+    items: [{ ...task, status: failed ? "failed" : "running", user_id: null, error_message: failed ? "连接分镜服务超时" : null, finished_at: failed ? failureTime : null, updated_at: now }],
+    total: 1, page: 1, has_more: false, counts: { queued: 0, running: failed ? 0 : 1, done: 0, failed: failed ? 1 : 0 },
+  } }));
+  await page.goto(`${monitorPath}?view=tasks`);
+  await expect(page.getByRole("table", { name: "任务监控列表" }).getByRole("row")).toHaveCount(2);
+  await page.getByRole("heading", { name: "任务监控", exact: true }).click();
+  await expect(page.getByRole("alert", { name: "失败通知" })).toHaveCount(0);
+  failed = true;
+  const notice = page.getByRole("alert", { name: "失败通知" });
+  await expect(notice.getByRole("heading", { name: "任务失败", exact: true })).toBeVisible();
+  await expect(notice).toContainText("连接分镜服务超时");
+  await expect(notice).toContainText("当前浏览器无法播放提示音");
+  await expect(notice.getByRole("button", { name: "提示音不可用" })).toBeDisabled();
+  await expect(notice.locator("time")).toHaveAttribute("datetime", failureTime);
+  await page.screenshot({ path: testInfo.outputPath("failure-alert-task.png"), fullPage: true });
+  await notice.getByRole("button", { name: "查看失败详情：素材匹配任务" }).click();
+  await expect(page.getByRole("dialog", { name: "任务详情" })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "失败通知" })).toHaveCount(0);
+});
+
+test.describe("浏览器限制下的失败提示音", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      const probe = window as unknown as { alertAudio: AudioContext; alertTones: Array<{ running: boolean; visible: boolean }>; alertPeak: number; holdAudioUntilGesture?: boolean };
+      probe.alertTones = [];
+      probe.alertPeak = 0;
+      let activated = false;
+      window.addEventListener("click", (event) => { if (event.isTrusted) activated = true; }, true);
+      const NativeAudioContext = window.AudioContext;
+      window.AudioContext = class extends NativeAudioContext {
+        constructor() {
+          super();
+          probe.alertAudio = this;
+          if (probe.holdAudioUntilGesture) void super.suspend();
+        }
+        resume() {
+          // Headless autoplay policies vary. Simulate denied permission while
+          // retaining native audio nodes and the real output signal.
+          if (probe.holdAudioUntilGesture && !activated) {
+            return new Promise<void>((resolve, reject) => {
+              window.addEventListener("click", () => { super.resume().then(resolve, reject); }, { once: true });
+            });
+          }
+          return super.resume();
+        }
+        createOscillator() {
+          const oscillator = super.createOscillator();
+          const start = oscillator.start.bind(oscillator);
+          oscillator.start = (when) => {
+            probe.alertTones.push({ running: this.state === "running", visible: Boolean(document.querySelector('[role="alert"][aria-label="失败通知"]')) });
+            start(when);
+          };
+          return oscillator;
+        }
+        createGain() {
+          const gain = super.createGain();
+          const analyser = this.createAnalyser();
+          gain.connect(analyser);
+          const samples = new Float32Array(analyser.fftSize);
+          const timer = window.setInterval(() => {
+            analyser.getFloatTimeDomainData(samples);
+            for (const value of samples) probe.alertPeak = Math.max(probe.alertPeak, Math.abs(value));
+          }, 20);
+          window.setTimeout(() => { clearInterval(timer); analyser.disconnect(); }, 800);
+          return gain;
+        }
+      };
+    });
+  });
+
+  test("音频暂停后自动恢复，弹框出现时实际产生音频信号", async ({ page }) => {
+    let failed = false;
+    await page.route("**/api/v1/monitor/calls?**", (route) => route.fulfill({ json: {
+      items: calls.map((call, index) => index === 0 && failed ? { ...call, status: "failed", status_code: 500 } : call),
+      total: calls.length, page: 1, has_more: false,
+    } }));
+    await page.goto(monitorPath);
+    await expect(page.getByRole("table", { name: "统一调用列表" }).getByRole("row")).toHaveCount(4);
+    await page.getByRole("heading", { name: "统一调用监控", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertAudio: AudioContext }).alertAudio.state)).toBe("running");
+    await page.evaluate(() => (window as unknown as { alertAudio: AudioContext }).alertAudio.suspend());
+    failed = true;
+    const notice = page.getByRole("alert", { name: "失败通知" });
+    await expect(notice).toContainText("POST /api/v1/match");
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertTones: unknown[] }).alertTones.length)).toBe(2);
+    expect(await page.evaluate(() => (window as unknown as { alertTones: unknown[] }).alertTones)).toEqual([
+      { running: true, visible: true }, { running: true, visible: true },
+    ]);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertPeak: number }).alertPeak)).toBeGreaterThan(0.1);
+    await expect(notice.getByRole("button", { name: "静音提醒", exact: true })).toBeVisible();
+  });
+
+  test("播放受限时明确提示，开启后试听一次且后续任务失败自动发声", async ({ page }, testInfo) => {
+    let failureCount = 0;
+    await page.addInitScript(() => { (window as unknown as { holdAudioUntilGesture: boolean }).holdAudioUntilGesture = true; });
+    await page.route("**/api/v1/tasks?**", (route) => route.fulfill({ json: {
+      items: [0, 1].map((index) => ({ ...task, task_id: index ? traceId : taskId, status: index < failureCount ? "failed" : "running", user_id: null, error_message: index < failureCount ? "请配置 embedding" : null, updated_at: now })),
+      total: 2, page: 1, has_more: false, counts: { queued: 0, running: 2 - failureCount, done: 0, failed: failureCount },
+    } }));
+    await page.goto(`${monitorPath}?view=tasks`);
+    await expect(page.getByRole("table", { name: "任务监控列表" }).getByRole("row")).toHaveCount(3);
+    failureCount = 1;
+    const notice = page.getByRole("alert", { name: "失败通知" });
+    await expect(notice).toContainText("声音尚未启用");
+    expect(await page.evaluate(() => (window as unknown as { alertTones: unknown[] }).alertTones.length)).toBe(0);
+    await page.screenshot({ path: testInfo.outputPath("failure-alert-sound-blocked.png"), fullPage: true });
+    await page.waitForTimeout(650); // An expired resume attempt must not replay alongside the explicit audition.
+    await notice.getByRole("button", { name: "开启声音并试听", exact: true }).click();
+    await expect(notice.getByRole("button", { name: "静音提醒", exact: true })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertTones: unknown[] }).alertTones.length)).toBe(2);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertPeak: number }).alertPeak)).toBeGreaterThan(0.1);
+    failureCount = 2;
+    await expect.poll(() => page.evaluate(() => (window as unknown as { alertTones: unknown[] }).alertTones.length)).toBe(4);
+    await expect(notice).not.toContainText("声音尚未启用");
+  });
+});

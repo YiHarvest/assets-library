@@ -13,6 +13,7 @@ import { taskPhaseLabels, taskStatusLabels, type TaskLogPage } from "@/shared/mo
 
 import { LogTimeline, Status, ProgressBar, panelClass as panel, selectClass, type LogEntry } from "./monitor-ui";
 import { errorSummary } from "@/shared/log-message";
+import { FailureToast, useFailureAlerts } from "./failure-alerts";
 const colors = { api: "bg-violet-50 text-violet-700 dark:bg-violet-950 dark:text-violet-300", function: "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300", match: "bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300" };
 function time(value: string) { return new Date(value).toLocaleString("zh-CN", { hour12: false }); }
 function elapsed(call: CallRecord) {
@@ -34,6 +35,8 @@ export function CallMonitor({ initialSpanId, initialTaskId }: { initialSpanId: s
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
+  const alerts = useFailureAlerts("调用");
+  const { observe } = alerts;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -43,13 +46,20 @@ export function CallMonitor({ initialSpanId, initialTaskId }: { initialSpanId: s
         const params = new URLSearchParams({ page: String(page), limit: "30" });
         for (const [key, value] of Object.entries({ kind, status, ...filters })) if (value) params.set(key, value);
         const next = await apiV1<CallList>(`/monitor/calls?${params}`, { signal: controller.signal });
-        if (!controller.signal.aborted) { setList(next); setError(""); setUpdatedAt(new Date().toISOString()); }
+        if (!controller.signal.aborted) {
+          setList(next); setError(""); setUpdatedAt(new Date().toISOString());
+          observe(params.toString(), next.items.filter((call) => call.status === "failed").map((call) => ({
+            id: call.id, title: call.name,
+            description: `${callKindLabels[call.kind]}${call.status_code ? ` · HTTP ${call.status_code}` : ""}`,
+            occurredAt: call.finished_at,
+          })));
+        }
       } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "调用列表读取失败。"); }
       finally { if (live && !controller.signal.aborted) timer = setTimeout(poll, 2000); }
     }
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [kind, status, filters, page, live, refresh]);
+  }, [kind, status, filters, page, live, refresh, observe]);
 
   function search(event: React.FormEvent) {
     event.preventDefault();
@@ -66,6 +76,7 @@ export function CallMonitor({ initialSpanId, initialTaskId }: { initialSpanId: s
     setTraceId(id); setTaskId(""); setQuery(""); setKind(""); setStatus(""); setPage(1);
     setFilters({ trace_id: id, task_id: "", q: "" }); select(null);
   }
+  const notification = <FailureToast notice={alerts.notice} onDismiss={alerts.dismiss} onInspect={select} soundMuted={alerts.soundMuted} soundState={alerts.soundState} onToggleSound={alerts.toggleSound} />;
 
   return <main className="mx-auto max-w-7xl space-y-5 px-5 py-7 sm:py-9">
     <header className="flex flex-wrap items-start justify-between gap-4">
@@ -104,11 +115,12 @@ export function CallMonitor({ initialSpanId, initialTaskId }: { initialSpanId: s
       <div className="flex items-center justify-between border-t p-3"><Button size="sm" variant="ghost" disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</Button><span className="text-xs text-slate-500">第 {page} 页</span><Button size="sm" variant="ghost" disabled={!list?.has_more} onClick={() => setPage(page + 1)}>下一页</Button></div>
     </section>
     <p className="text-xs leading-5 text-slate-400">调用状态表示本次 API / 函数执行结果；异步 task 的进度单独展示。监控查询自身不生成记录。</p>
-    {selected && <CallDrawer key={selected} id={selected} live={live} refresh={refresh} onClose={() => select(null)} onTrace={showTrace} onSelect={select} />}
+    {!selected && notification}
+    {selected && <CallDrawer key={selected} id={selected} live={live} refresh={refresh} onClose={() => select(null)} onTrace={showTrace} onSelect={select} notification={notification} />}
   </main>;
 }
 
-function CallDrawer({ id, live, refresh, onClose, onTrace, onSelect }: { id: string; live: boolean; refresh: number; onClose: () => void; onTrace: (id: string) => void; onSelect: (id: string) => void }) {
+function CallDrawer({ id, live, refresh, onClose, onTrace, onSelect, notification }: { id: string; live: boolean; refresh: number; onClose: () => void; onTrace: (id: string) => void; onSelect: (id: string) => void; notification: React.ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const cursor = useRef(0);
   const taskCursor = useRef(0);
@@ -157,6 +169,7 @@ function CallDrawer({ id, live, refresh, onClose, onTrace, onSelect }: { id: str
     const link = document.createElement("a"); link.href = url; link.download = `call-${id}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return <dialog ref={dialog} aria-label="调用详情" onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }} className="fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-4xl overflow-y-auto border-0 bg-[var(--background)] p-0 text-[var(--foreground)] shadow-2xl backdrop:bg-black/35">
+    {notification}
     <div className="sticky top-0 z-20 flex items-center justify-between border-b bg-white/90 p-4 backdrop-blur-xl dark:border-white/10"><h2 className="font-semibold">调用详情</h2><Button size="sm" variant="ghost" aria-label="关闭调用详情" onClick={() => dialog.current?.close()}><X size={18} /></Button></div>
     <div className="space-y-5 p-4 sm:p-6">
       {error && <p role="alert" className="text-sm text-red-600">{error}</p>}

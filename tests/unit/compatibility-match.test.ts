@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MySqlDialect } from "drizzle-orm/mysql-core";
 import {
   alignCompatibilitySegments,
@@ -113,6 +113,7 @@ function candidate(): AssetSummary {
 }
 
 describe("compatibility segment matching", () => {
+  beforeEach(() => databaseRows.mockReset().mockResolvedValue([]));
   afterEach(() => vi.unstubAllEnvs());
 
   it("enables clipping by default and accepts an explicit opt-out", () => {
@@ -716,6 +717,63 @@ describe("compatibility segment matching", () => {
     );
   });
 
+  it.each([false, true])("recalls a selected private asset's public copy and deduplicates mixed URLs: %s", async includePublic => {
+    const privateId = "00000000-0000-4000-8000-00000000000a";
+    const publicId = candidate().id;
+    const privateUrl = `https://focus.example.test/feisu/assets-library/api/v1/media/${privateId.toUpperCase()}/?user_id=759`;
+    databaseRows.mockResolvedValueOnce([{ publicAssetId: publicId.toUpperCase() }]);
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({
+      items: [candidate(), { ...candidate(), id: "00000000-0000-4000-8000-000000000099" }],
+      threshold: 0, maxScore: 0.91, reason: "matched", message: null,
+    }));
+    const getAsset = vi.fn(async () => ({ userId: null, reviewStatus: "pending_review" }));
+    const [matched] = await matchCompatibilitySegments(
+      [alignCompatibilitySegments(request())[0]], "https://focus.example.test", {
+        assetUrls: [privateUrl, { file_url: privateUrl, type: "video" },
+          ...(includePublic ? [`https://focus.example.test${candidate().mediaUrl}`] : [])],
+        isRandom: false,
+      }, { search, getAsset },
+    );
+    expect(databaseRows).toHaveBeenCalledOnce();
+    const query = new MySqlDialect().sqlToQuery(databaseRows.mock.calls[0][0]);
+    expect(query.sql).toContain("`private_assets`.`id` in (");
+    expect(query.params).toEqual(includePublic ? [privateId, publicId] : [privateId]);
+    expect(search).toHaveBeenCalledTimes(2);
+    for (const call of search.mock.calls) {
+      expect(call[2]?.candidateAssetIds).toEqual([privateId, publicId]);
+    }
+    expect(getAsset).toHaveBeenCalledExactlyOnceWith(publicId);
+    expect(matched.matched_candidate_url).toBe(`https://focus.example.test${candidate().mediaUrl}`);
+  });
+
+  it.each([null, "00000000-0000-4000-8000-00000000000b"])("keeps a selected private asset eligible when its public copy is unavailable: %s", async publicAssetId => {
+    databaseRows.mockResolvedValueOnce([{ publicAssetId }]);
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async () => ({
+      items: [candidate()], threshold: 0, maxScore: 0.91, reason: "matched", message: null,
+    }));
+    const [matched] = await matchCompatibilitySegments(
+      [alignCompatibilitySegments(request())[0]], "https://focus.example.test", {
+        assetUrls: [`https://focus.example.test${candidate().mediaUrl}&user_id=759`],
+      }, { search, getAsset: async () => ({ userId: "759", reviewStatus: "published" }) },
+    );
+    expect(search.mock.calls[0][2]?.candidateAssetIds).toEqual(
+      publicAssetId ? [candidate().id, publicAssetId] : [candidate().id],
+    );
+    expect(matched.matched_candidate_url).toBe(`https://focus.example.test${candidate().mediaUrl}&user_id=759`);
+  });
+
+  it("propagates candidate lookup failures without broadening the selection", async () => {
+    const error = new Error("candidate lookup failed");
+    databaseRows.mockRejectedValueOnce(error);
+    const search = vi.fn();
+    await expect(matchCompatibilitySegments(
+      [alignCompatibilitySegments(request())[0]], "https://focus.example.test", {
+        assetUrls: [`https://focus.example.test${candidate().mediaUrl}`],
+      }, { search, getAsset: async () => null },
+    )).rejects.toBe(error);
+    expect(search).not.toHaveBeenCalled();
+  });
+
   it("does not fall back to the full library for non-library asset URLs", async () => {
     const segment = alignCompatibilitySegments(request())[0]!;
     const search = vi.fn();
@@ -735,6 +793,7 @@ describe("compatibility segment matching", () => {
     );
 
     expect(search).not.toHaveBeenCalled();
+    expect(databaseRows).not.toHaveBeenCalled();
     expect(unmatched).toMatchObject({
       matched_candidate_url: null,
       matched_candidate_reason: "no_candidates",

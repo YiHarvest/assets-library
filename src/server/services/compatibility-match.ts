@@ -3,11 +3,11 @@ import crypto from "node:crypto";
 import { taskTraceFields } from "@/server/observability/context";
 import { observe } from "@/server/observability/trace";
 import { redact } from "@/server/observability/payload";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { ZodError, z } from "zod";
 import { loadConfig } from "@/server/config";
 import { db } from "@/server/db";
-import { jobs, tasks } from "@/server/db/schema";
+import { jobs, privateAssets, tasks } from "@/server/db/schema";
 import { AppError } from "@/server/errors";
 import {
   completeJob,
@@ -222,14 +222,25 @@ function withUserScope(mediaUrl: string, userId: string | null) {
   return `${mediaUrl}${separator}user_id=${encodeURIComponent(userId)}`;
 }
 
-function compatibilityCandidateAssetIds(
+async function compatibilityCandidateAssetIds(
   assetUrls: CompatibilityMatchRequest["asset_url_list"],
 ) {
-  return [...new Set(assetUrls.flatMap((entry) => {
+  const assetIds = [...new Set(assetUrls.flatMap((entry) => {
     const rawUrl = typeof entry === "string" ? entry : entry.file_url;
     const match = new URL(rawUrl).pathname.match(compatibilityMediaPathPattern);
     return match?.[1] ? [match[1].toLowerCase()] : [];
   }))];
+  if (!assetIds.length) return assetIds;
+
+  const linkedAssets = await db
+    .select({ publicAssetId: privateAssets.publicAssetId })
+    .from(privateAssets)
+    .where(inArray(privateAssets.id, assetIds));
+  // 公共副本可能已入索引，但私有素材也可能独立可用，因此保留两者。
+  return [...new Set([
+    ...assetIds,
+    ...linkedAssets.flatMap(row => row.publicAssetId ? [row.publicAssetId.toLowerCase()] : []),
+  ])];
 }
 
 interface CompatibilityMatchDependencies {
@@ -299,7 +310,7 @@ async function runCompatibilityMatch(
   // 只在用户勾选的素材assetUrls中召回
   const restrictCandidates = assetUrls.length > 0;
   const candidateAssetIds = restrictCandidates
-    ? compatibilityCandidateAssetIds(assetUrls)
+    ? await compatibilityCandidateAssetIds(assetUrls)
     : undefined;
 
   if (restrictCandidates && candidateAssetIds?.length === 0) {

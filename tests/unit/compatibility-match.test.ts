@@ -15,9 +15,10 @@ import * as elasticsearch from "@/server/search/elasticsearch";
 import { loadTestConfig } from "../helpers/config";
 
 const databaseRows = vi.hoisted(() => vi.fn());
+const databaseTagRows = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db", () => ({
   db: { select: () => ({ from: () => ({ where: databaseRows, leftJoin: () => ({ where: databaseRows }),
-    innerJoin: () => ({ where: () => ({ orderBy: async () => [] }) }),
+    innerJoin: () => ({ where: () => ({ orderBy: databaseTagRows }) }),
   }) }) },
 }));
 
@@ -113,7 +114,10 @@ function candidate(): AssetSummary {
 }
 
 describe("compatibility segment matching", () => {
-  beforeEach(() => databaseRows.mockReset().mockResolvedValue([]));
+  beforeEach(() => {
+    databaseRows.mockReset().mockResolvedValue([]);
+    databaseTagRows.mockReset().mockResolvedValue([]);
+  });
   afterEach(() => vi.unstubAllEnvs());
 
   it("enables clipping by default and accepts an explicit opt-out", () => {
@@ -473,13 +477,79 @@ describe("compatibility segment matching", () => {
   });
 
   it.each([true, false])("never enables thematic recall outside an explicit candidate scope: selected=%s", async selected => {
-    databaseRows.mockResolvedValue([{ id: candidate().id }]);
+    databaseRows.mockResolvedValue([{ id: candidate().id, description: "人工智能画面", analysis: null }]);
     const search = vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
     try {
       await searchAssetsByDescriptionDetailed({ description: "AI", limit: 10 }, {}, {
         allowThemeMatch: true, ...(selected ? { candidateAssetIds: [candidate().id] } : {}),
       });
       expect(search.mock.calls[0][4]?.allowThemeMatch).toBe(selected ? true : undefined);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it.each(["v1", "v2"])("admits a current manual tag independently of semantic recall within the selected scope: %s", async engine => {
+    vi.stubEnv("SEARCH_RECALL_ENGINE", engine);
+    const row = { ...candidate(), description: "金融行情走势图", analysis: null,
+      createdAt: new Date(), updatedAt: new Date(), segmentStartMs: 0, segmentEndMs: 4000 };
+    databaseRows.mockResolvedValueOnce([{ id: row.id }]).mockResolvedValue([row]);
+    databaseTagRows.mockResolvedValue([{ assetId: row.id, category: "custom", value: "利用增额寿的复利魔力", source: "human" }]);
+    vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
+    try {
+      const result = await searchAssetsByDescriptionDetailed({ description: "复利魔力", limit: 10 }, { userId: "759", projectId: "project-a" }, {
+        candidateAssetIds: [row.id], allowThemeMatch: true, minDurationMs: 1000, playbackDurationMs: 800,
+        context: "每年存5万，利用增额寿的复利魔力。",
+      });
+      expect(result.items.map(item => item.id)).toEqual([row.id]);
+      expect(result.items[0]).toMatchObject({ searchScore: 1, tags: [{ category: "custom", source: "human" }] });
+      expect(result.items[0].semanticScore).toBeUndefined();
+      expect(result.matchQualities).toEqual({});
+      const predicate = new MySqlDialect().sqlToQuery(databaseRows.mock.calls[1][0]);
+      expect(predicate.params).toEqual(expect.arrayContaining(["759", "project-a", row.id, "completed", "pending_review", "published", 1000]));
+      expect(predicate.sql).toContain("`asset_entries`.`deleted_at` is null");
+      databaseTagRows.mockResolvedValue([]);
+      const afterRemoval = await searchAssetsByDescriptionDetailed({ description: "复利魔力", limit: 10 }, {}, {
+        candidateAssetIds: [row.id], allowThemeMatch: true, context: "利用增额寿的复利魔力。",
+      });
+      expect(afterRemoval.items).toEqual([]);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it("admits a selected short clip by its current manual tag while keeping the duration filter", async () => {
+    const row = { ...candidate(), description: "金融行情走势图", analysis: null,
+      createdAt: new Date(), updatedAt: new Date(), segmentStartMs: 4000, segmentEndMs: 4367 };
+    databaseRows.mockResolvedValue([row]);
+    databaseTagRows.mockResolvedValue([{ assetId: row.id, category: "custom", value: "孩子30岁就能稳稳拿到200万", source: "human" }]);
+    vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
+    try {
+      const result = await searchAssetsByDescriptionDetailed({ description: "稳稳拿到200万", limit: 10 }, {}, {
+        candidateAssetIds: [row.id], allowThemeMatch: true, shortVideosOnly: true,
+        context: "孩子30岁就能稳稳拿到200万。",
+      });
+      expect(result.items.map(item => item.id)).toEqual([row.id]);
+      expect(result.shortVideoDurations).toEqual({ [row.id]: 367 });
+      expect(result.matchQualities).toEqual({});
+      const predicate = new MySqlDialect().sqlToQuery(databaseRows.mock.calls[1][0]);
+      expect(predicate.params).toContain("video");
+      expect(predicate.sql).toContain("`asset_entries`.`segment_end_ms` < `asset_entries`.`segment_start_ms`");
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it.each([
+    { selected: false, source: "human", description: "复利魔力", material: "金融行情走势图" },
+    { selected: true, source: "model", description: "复利魔力", material: "金融行情走势图" },
+    { selected: true, source: "human", description: "孩子30岁就能", material: "金融行情走势图" },
+    { selected: true, source: "human", description: "复利魔力", material: "视频全程为黑屏画面，无任何可见视觉内容。" },
+  ])("does not admit an unrelated, model-tagged, unusable or unselected asset: %j", async ({ selected, source, description, material }) => {
+    databaseRows.mockResolvedValue([{ id: candidate().id, description: material, analysis: null }]);
+    databaseTagRows.mockResolvedValue([{ assetId: candidate().id, category: "custom", value: "利用增额寿的复利魔力", source }]);
+    vi.spyOn(elasticsearch, "searchAssets").mockResolvedValue([]);
+    try {
+      const result = await searchAssetsByDescriptionDetailed({ description, limit: 10 }, {}, {
+        ...(selected ? { candidateAssetIds: [candidate().id] } : {}), allowThemeMatch: true,
+        context: "利用增额寿的复利魔力，孩子30岁就能稳稳拿到200万。",
+      });
+      expect(result.items).toEqual([]);
+      if (!selected) expect(databaseTagRows).not.toHaveBeenCalled();
     } finally { vi.restoreAllMocks(); }
   });
 

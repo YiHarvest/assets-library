@@ -1,8 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { assetEvidence, evidenceInWindow } from "@/server/search/asset-evidence";
+import { assetEvidence, evidenceInWindow, manualTagMatchesSegment } from "@/server/search/asset-evidence";
 import { unusableVisualReason } from "@/server/media/material-quality";
 
 describe("material playback evidence", () => {
+  it.each([
+    ["利用增额寿的", true],
+    ["复利魔力", true],
+    ["每年存5万，利用增额寿的", true],
+    ["30岁起", false],
+    ["孩子30岁就能", false],
+    ["不在原句中的内容", false],
+    ["的", false],
+  ])("matches a spanning manual tag only where it overlaps the current segment: %s", (segment, expected) => {
+    expect(manualTagMatchesSegment("利用增额寿的复利魔力", segment,
+      "30岁起，每年存5万，利用增额寿的复利魔力，孩子30岁就能稳稳拿到200万。"))
+      .toBe(expected);
+  });
+
+  it("normalizes punctuation and width, checks repeated fragments, and rejects one-character tags", () => {
+    expect(manualTagMatchesSegment("ＡＩ 应用", "介绍 ai应用。")).toBe(true);
+    expect(manualTagMatchesSegment("增额寿的复利魔力", "复利魔力", "复利魔力：增额寿的复利魔力。")).toBe(true);
+    expect(manualTagMatchesSegment("增额寿的复利魔力", "复利魔力", "这是另一句中的复利魔力。")).toBe(false);
+    expect(manualTagMatchesSegment("的", "利用增额寿的复利魔力")).toBe(false);
+  });
+
   it("indexes current form, style, composition and custom labels without restoring deleted model labels", () => {
     const result = assetEvidence({ description: "电脑屏幕", analysis: null, tags: [
       { category: "form", value: "投流", source: "human" },

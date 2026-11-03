@@ -17,6 +17,19 @@ export function evidenceInWindow(evidence: Omit<PlaybackEvidence, "similarity">,
   return evidence.kind === "range" && evidence.endMs !== undefined && evidence.endMs <= durationMs;
 }
 
+export function manualTagMatchesSegment(tag: string, segment: string, context = segment) {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const label = normalize(tag), fragment = normalize(segment), sentence = normalize(context);
+  if (label.length < 2 || fragment.length < 2) return false;
+  // 标签可跨分段，但不能让同一句中没有重叠的片段一并准入。
+  for (let start = sentence.indexOf(fragment); start >= 0; start = sentence.indexOf(fragment, start + 1)) {
+    for (let offset = sentence.indexOf(label); offset >= 0; offset = sentence.indexOf(label, offset + 1)) {
+      if (Math.min(start + fragment.length, offset + label.length) - Math.max(start, offset) >= 2) return true;
+    }
+  }
+  return false;
+}
+
 /** Keep timed facts separate from whole-video descriptions and current editable tags. */
 export function assetEvidence(asset: Pick<AssetDetail, "description" | "analysis" | "tags">) {
   const analysis = asset.analysis;

@@ -42,7 +42,7 @@ import {
   DEFAULT_ANALYZE_TASK_SOFT_LIMIT,
 } from "@/server/jobs/scheduling";
 import { searchAssets, type SearchCandidate, type RecallOptions } from "@/server/search/elasticsearch";
-import type { PlaybackEvidence } from "@/server/search/asset-evidence";
+import { assetEvidence, manualTagMatchesSegment, type PlaybackEvidence } from "@/server/search/asset-evidence";
 import { loadConfig } from "@/server/config";
 import { enqueueRecallSource } from "@/server/search/v2/repository";
 import { apiV1Path } from "@/lib/paths";
@@ -1330,7 +1330,7 @@ export interface DescriptionSearchResult {
 }
 
 export interface DescriptionSearchOptions extends RecallOptions {
-  /** 仅召回低于配置的最小时长且有效播放语义分数大于 0.5 的视频。 */
+  /** 召回低于最小时长的视频；须通过语义门槛或勾选素材的人工标签准入。 */
   shortVideosOnly?: boolean;
   /** Internal target slot duration; images can fill a slot without this limit. */
   minDurationMs?: number;
@@ -1396,17 +1396,33 @@ export async function searchAssetsByDescriptionDetailed(
   const recallOptions = options.playbackDurationMs !== undefined || options.contextRequired || options.allowThemeMatch
     ? { playbackDurationMs: options.playbackDurationMs, contextRequired: options.contextRequired,
       ...(allowThemeMatch ? { allowThemeMatch: true } : {}) } : undefined;
-  const candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context, recallOptions))
+  let candidates = (await recallWithinDatabaseScope([description, ...keywords].join(" ").trim(), eligible.map((row) => row.id), where, [], options.context, recallOptions))
     .filter(candidate => !options.shortVideosOnly || (((options.contextRequired ? candidate.contextSimilarity : allowThemeMatch
       ? Math.max(candidate.semanticSimilarity ?? -1, candidate.contextSimilarity ?? -1) : candidate.semanticSimilarity) ?? -1) > 0.5 &&
       (candidate.matchQuality ?? -1) > 0.5));
+  let selectedTags: Map<string, AssetTag[]> | undefined;
+  if (allowThemeMatch && eligible.length) {
+    const selected = await db.select({ id: assets.id, description: assets.description, analysis: analysisResults.resultJson })
+      .from(assets).leftJoin(analysisResults, eq(analysisResults.assetId, assets.id)).where(where);
+    const currentTags = await getTagsForAssets(selected.map(row => row.id));
+    selectedTags = currentTags;
+    const manual = selected.filter(row => assetEvidence({
+      description: row.description,
+      analysis: row.analysis ? analysisResultSchema.parse(row.analysis) : null,
+      tags: currentTags.get(row.id) ?? [],
+    }).humanTags.some(tag => manualTagMatchesSegment(tag, description, options.context)))
+      // 显式人工选择优先，不伪造相似度或带时间的画面证据。
+      .map(row => ({ assetId: row.id, searchScore: 1 }));
+    const manualIds = new Set(manual.map(candidate => candidate.assetId));
+    candidates = [...manual, ...candidates.filter(candidate => !manualIds.has(candidate.assetId))];
+  }
   const candidateMap = new Map(candidates.map((item) => [item.assetId, item]));
   const ids = candidates.map((item) => item.assetId);
   const rankedIds = options.isRandom ? sampleAssetIds(ids, limit) : ids.slice(0, limit);
   const rows = rankedIds.length ? await db.select().from(assets)
     .where(and(where, inArray(assets.id, rankedIds))) : [];
   const rowsById = new Map(rows.map((row) => [row.id, row]));
-  const tagMap = await getTagsForAssets(rankedIds);
+  const tagMap = selectedTags ?? await getTagsForAssets(rankedIds);
   const metadata = searchMetadata(candidates);
   return {
     mediaIdentities: Object.fromEntries(rows.map(row => [row.id, assetMediaIdentity(row)])),

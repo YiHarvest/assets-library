@@ -12,6 +12,16 @@ const search = (durations: Record<string, number>): DescriptionSearchResult => (
   shortVideoDurations: durations, threshold: 0, maxScore: 0.5, reason: "matched", message: null });
 
 describe("short video combinations", () => {
+  it.each([500, 1000])("keeps duration and distinct-source checks for manually admitted 367 ms clips with a %s ms minimum", minimum => {
+    const found = { ...search({ a: 367, b: 367 }), matchQualities: {} };
+    found.items = found.items.map(item => ({ ...item, searchScore: 1 }));
+    const pools = addShortVideoGroups(timeline.slice(0, 1), [[]], [found], minimum);
+    expect(pools[0].length > 0).toBe(minimum === 500);
+    const sameSource = { ...found, mediaIdentities: { a: "same-file", b: "same-file" } };
+    expect(addShortVideoGroups(timeline.slice(0, 1), [[]], [sameSource], minimum)).toEqual([[]]);
+    expect(addShortVideoGroups(timeline.slice(0, 1), [[]], [{ ...found, items: found.items.slice(0, 1) }], minimum)).toEqual([[]]);
+  });
+
   it.each([1000, 1500, 2000])("uses %s ms for both member eligibility and the minimum combined duration", minimum => {
     const half = minimum / 2;
     const found = search({ a: half, b: half, regular: minimum });

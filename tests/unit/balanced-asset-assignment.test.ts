@@ -7,6 +7,16 @@ const segments = Array.from({ length: 9 }, (_, i) => ({ start_time: i, end_time:
 const a = { id: "a" }, b = { id: "b" }, c = { id: "c" };
 
 describe("balanced material placement", () => {
+  it.each([0.5, 1])("prioritizes manual admission over a semantic copy without reusing the source at threshold %s", threshold => {
+    const manual = { id: "private", mediaIdentity: "same-file", searchScore: 1 };
+    const pools = [
+      [{ id: "public", mediaIdentity: "same-file", searchScore: 1, matchQuality: 0.99 }],
+      [manual],
+    ];
+    expect([...balancedAssetAssignment(segments.slice(0, 2), pools, true, threshold)])
+      .toEqual([[1, manual]]);
+  });
+
   it("reserves public/private copies as one source and reallocates the alternate material", () => {
     const pools = [
       [{ id: "public", mediaIdentity: "same-file", matchQuality: 0.6 }, { id: "other", matchQuality: 0.59 }],

@@ -22,6 +22,7 @@ import { persistedTaskError } from "@/server/services/task-lifecycle";
 import { requiresRecallContext, segmentRecallContexts } from "@/server/search/segment-context";
 import { balancedAssetAssignment, candidateIdentity } from "./balanced-asset-assignment";
 import { addShortVideoGroups, fitShortVideoGroups, type MatchMaterial } from "./short-video-groups";
+import { planMaterialPlayback } from "./material-playback";
 import {
   compatibilityMatchRequestSchema,
   type CompatibilityMatchAccepted,
@@ -41,6 +42,7 @@ const knownRequestFields = new Set([
   "semantic_threshold",
   "text",
   "project_id",
+  "audio_duration",
 ]);
 
 interface TimedWord {
@@ -67,6 +69,8 @@ export interface MatchedCompatibilitySegment
   matched_candidate_score: number | null;
   matched_candidate_reason: DescriptionSearchResult["reason"] | null;
   matched_candidate_message: string | null;
+  matched_candidate_start_time?: number | null;
+  matched_candidate_end_time?: number | null;
 }
 
 const compatibilityJobPayloadSchema = z.object({
@@ -266,6 +270,7 @@ interface CompatibilityMatchOptions {
   isRandom?: boolean;
   semanticThreshold?: number;
   sourceText?: string;
+  audioDuration?: number;
 }
 
 function unmatchedSegment(
@@ -314,16 +319,19 @@ async function runCompatibilityMatch(
     : undefined;
 
   if (restrictCandidates && candidateAssetIds?.length === 0) {
-    return segments.map((segment) => unmatchedSegment(segment, {
+    return segments.map((segment): MatchedCompatibilitySegment => ({ ...unmatchedSegment(segment, {
       maxScore: null,
       reason: "no_candidates",
       message: "asset_url_list 中没有可识别的素材库 URL。",
-    }));
+    }), ...(options.audioDuration === undefined ? {} : {
+      matched_candidate_start_time: null, matched_candidate_end_time: null,
+    }) }));
   }
   const allowedAssetIds = candidateAssetIds
     ? new Set(candidateAssetIds)
     : undefined;
   const matched: MatchedCompatibilitySegment[] = [];
+  const playbackMaterials: Parameters<typeof planMaterialPlayback>[0][number][] = [];
   const usedAssetIds = new Set<string>();
   const config = loadConfig();
   const clipEnabled = config.SEGMENT_MATCH_CLIP_ENABLED;
@@ -390,6 +398,11 @@ async function runCompatibilityMatch(
       continue;
     }
     parts.forEach(part => usedAssetIds.add(candidateIdentity(part)));
+    if (options.audioDuration !== undefined) {
+      playbackMaterials.push({ index, start: segment.start_time, type: candidate.mediaType,
+        duration: candidate.mediaType === "image" ? 3 : records.reduce((total, item) =>
+          total + Math.max(0, (item!.segmentEndMs ?? 0) - (item!.segmentStartMs ?? 0)) / 1000, 0) });
+    }
     const mediaUrl = new URL(withUserScope(parts[0].mediaUrl, record.userId), publicOrigin);
     const durationMs = Math.round((segment.end_time - segment.start_time) * 1000);
     if (candidate.parts) {
@@ -410,6 +423,30 @@ async function runCompatibilityMatch(
       matched_candidate_score: candidateScore,
       matched_candidate_reason: null,
       matched_candidate_message: null,
+    });
+  }
+  if (options.audioDuration !== undefined) {
+    const playback = planMaterialPlayback(playbackMaterials, options.audioDuration);
+    matched.forEach((segment, index) => {
+      const placement = playback.get(index);
+      segment.matched_candidate_start_time = placement?.start ?? null;
+      segment.matched_candidate_end_time = placement?.end ?? null;
+      if (!segment.matched_candidate_url) return;
+      if (!placement) {
+        Object.assign(segment, unmatchedSegment(segment, { maxScore: segment.matched_candidate_score,
+          reason: "no_candidates", message: "素材没有可用播放时长，或无法在音频范围内安排播放。" }));
+        return;
+      }
+      const url = new URL(segment.matched_candidate_url);
+      url.searchParams.delete("clip_ms");
+      url.searchParams.delete("loop_ms");
+      const durationMs = Math.ceil((placement.end - placement.start) * 1000 - 1e-7);
+      if (url.searchParams.has("still_ms")) url.searchParams.set("still_ms", String(durationMs));
+      else if (placement.loop > 0) {
+        url.searchParams.set("clip_ms", String(durationMs));
+        url.searchParams.set("loop_ms", String(Math.ceil(placement.loop * 1000 - 1e-7)));
+      }
+      segment.matched_candidate_url = url.toString();
     });
   }
   await logTaskStep("matching", "分段素材分配完成。", { total: matched.length, matched: matched.filter(segment => segment.matched_candidate_url).length });
@@ -595,6 +632,7 @@ export async function processCompatibilityMatchJob(job: ClaimedJob) {
         semanticThreshold: payload.request.semantic_threshold,
         sourceText: payload.request.text,
         projectId: payload.request.project_id,
+        audioDuration: payload.request.audio_duration,
       },
     );
     await finishCompatibilityTask(job.taskId, payload.callbackFields, matched);

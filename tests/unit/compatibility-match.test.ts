@@ -120,6 +120,52 @@ describe("compatibility segment matching", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
+  it("validates the optional audio clock and excludes it from passthrough callbacks", () => {
+    expect(compatibilityMatchRequestSchema.parse({ ...request(), audio_duration: 81.091333 }).audio_duration).toBe(81.091333);
+    for (const value of [0, -1, Infinity, NaN, "81", 86401]) {
+      expect(() => compatibilityMatchRequestSchema.parse({ ...request(), audio_duration: value })).toThrow();
+    }
+    expect(compatibilityCallbackFields({ ...request(), audio_duration: 81 })).not.toHaveProperty("audio_duration");
+  });
+
+  it("returns separate overlay times and playable loop URLs while preserving subtitle times", async () => {
+    const segments = alignCompatibilitySegments(request()).map((segment, index) => ({ ...segment,
+      start_time: [0, .4, 2.5][index], end_time: [.2, .7, 2.8][index] }));
+    const assets = segments.map((_, index) => ({ ...candidate(), id: `00000000-0000-4000-8000-00000000000${index + 1}`,
+      mediaType: index === 0 ? "image" as const : "video" as const,
+      mediaUrl: `/api/v1/media/00000000-0000-4000-8000-00000000000${index + 1}?v=1` }));
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (input, _scope, options) => ({
+      items: options?.shortVideosOnly ? [] : [assets[segments.findIndex(s => s.text === input.description)]],
+      threshold: 0, maxScore: 1, reason: "matched", message: null,
+    }));
+    const matched = await matchCompatibilitySegments(segments, "https://focus.example.test", { audioDuration: 6.1 }, {
+      search, getAsset: async id => ({ userId: "759", reviewStatus: "published", segmentStartMs: 0,
+        segmentEndMs: id === assets[1].id ? 1000 : 8500 }),
+    });
+    expect(matched.map(s => [s.start_time, s.end_time])).toEqual(segments.map(s => [s.start_time, s.end_time]));
+    expect(matched.map(s => [s.matched_candidate_start_time, s.matched_candidate_end_time]))
+      .toEqual([[0, 1], [1, 2.5], [2.5, 6.1]]);
+    const urls = matched.map(s => new URL(s.matched_candidate_url!));
+    expect(urls[0].searchParams.get("still_ms")).toBe("1000");
+    expect(urls[1].searchParams.get("clip_ms")).toBe("1500");
+    expect(urls[1].searchParams.get("loop_ms")).toBe("500");
+    expect(urls[2].searchParams.has("clip_ms")).toBe(false);
+    expect(urls.every(url => url.searchParams.get("user_id") === "759")).toBe(true);
+  });
+
+  it("marks an image outside the audio window unplayable without shifting subtitles", async () => {
+    const segment = { ...alignCompatibilitySegments(request())[0], start_time: 9.4, end_time: 9.8 };
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (_input, _scope, options) => ({
+      items: options?.shortVideosOnly ? [] : [{ ...candidate(), mediaType: "image" }],
+      threshold: 0, maxScore: 1, reason: "matched", message: null,
+    }));
+    const [matched] = await matchCompatibilitySegments([segment], "https://focus.example.test", { audioDuration: 10 }, {
+      search, getAsset: async () => ({ userId: null, reviewStatus: "published" }),
+    });
+    expect(matched).toMatchObject({ start_time: 9.4, end_time: 9.8, matched_candidate_url: null,
+      matched_candidate_start_time: null, matched_candidate_end_time: null, matched_candidate_reason: "no_candidates" });
+  });
+
   it("enables clipping by default and accepts an explicit opt-out", () => {
     expect(loadTestConfig({}).SEGMENT_MATCH_CLIP_ENABLED).toBe(true);
     expect(loadTestConfig({ SEGMENT_MATCH_CLIP_ENABLED: "false" }).SEGMENT_MATCH_CLIP_ENABLED).toBe(false);
@@ -844,7 +890,7 @@ describe("compatibility segment matching", () => {
     expect(search).not.toHaveBeenCalled();
   });
 
-  it("does not fall back to the full library for non-library asset URLs", async () => {
+  it.each([undefined, 10])("does not fall back to the full library for non-library asset URLs (audio=%s)", async audioDuration => {
     const segment = alignCompatibilitySegments(request())[0]!;
     const search = vi.fn();
 
@@ -853,6 +899,7 @@ describe("compatibility segment matching", () => {
       "https://focus.example.test",
       {
         assetUrls: ["https://media.example.test/source.mp4"],
+        audioDuration,
         isRandom: false,
         semanticThreshold: 0.55,
       },
@@ -868,6 +915,9 @@ describe("compatibility segment matching", () => {
       matched_candidate_url: null,
       matched_candidate_reason: "no_candidates",
       matched_candidate_message: "asset_url_list 中没有可识别的素材库 URL。",
+    });
+    if (audioDuration !== undefined) expect(unmatched).toMatchObject({
+      matched_candidate_start_time: null, matched_candidate_end_time: null,
     });
   });
 

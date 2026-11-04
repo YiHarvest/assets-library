@@ -22,7 +22,7 @@ export function planMaterialPlayback(materials: readonly Material[], audioDurati
     if (item.type === "video" && item.duration === 0) continue;
     const previous = starts.at(-1);
     const actualStart = Math.max(item.start, previous ? seconds(previous.actualStart + (previous.type === "image" ? 1 : 0)) : 0);
-    if (actualStart >= audioDuration || (item.type === "image" && actualStart + 1 > audioDuration)) continue;
+    if (actualStart >= audioDuration || (item.type === "image" && seconds(actualStart + 1) > audioDuration)) continue;
     starts.push({ ...item, actualStart });
   }
   const placements = starts.flatMap((item, index) => {

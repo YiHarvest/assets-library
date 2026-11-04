@@ -18,11 +18,15 @@ export async function prepareVideoClip(
   downloadSource: (destination: string) => Promise<unknown>,
   stillImage = false,
   additionalSources: Array<(destination: string) => Promise<unknown>> = [],
+  loopMs = 0,
 ) {
   if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
     throw new AppError("invalid_request", "裁剪时长必须是正整数毫秒。", 400);
   }
-  const key = createHash("sha256").update(`${additionalSources.length ? "concat:" : stillImage ? "still:" : ""}${sourceVersion}:${durationMs}`).digest("hex");
+  if (!Number.isSafeInteger(loopMs) || loopMs < 0 || loopMs > 1000 || (loopMs > 0 && stillImage)) {
+    throw new AppError("invalid_request", "视频循环补齐时长无效。", 400);
+  }
+  const key = createHash("sha256").update(`${loopMs ? `loop-v1:${loopMs}:` : ""}${additionalSources.length ? "concat:" : stillImage ? "still:" : ""}${sourceVersion}:${durationMs}`).digest("hex");
   const directory = resolveMediaPath(path.join(".staging", `recall-${key}`));
   const output = path.join(directory, "clip.mp4");
   if (await fs.stat(output).then(stat => stat.size > 0, () => false)) {
@@ -73,7 +77,10 @@ export async function prepareVideoClip(
         }
         const totalMs = Math.round(probes.reduce((sum, probe) => sum + probe.duration * 1000, 0));
         if (totalMs < minVideoDurationMs) throw new AppError("invalid_request", `短视频组合实际时长不足 ${minVideoDurationMs / 1000} 秒。`, 400);
-        outputDurationMs = Math.min(durationMs, totalMs);
+        if (loopMs > 0 && durationMs > totalMs + loopMs + 1) {
+          throw new AppError("invalid_request", "循环输出时长超过原视频及允许补齐的范围。", 400);
+        }
+        outputDurationMs = loopMs > 0 ? totalMs : Math.min(durationMs, totalMs);
         const width = Math.ceil(probes[0].width / 2) * 2, height = Math.ceil(probes[0].height / 2) * 2;
         const filters = probes.flatMap((probe, i) => {
           const seconds = Math.ceil(probe.duration * 25) / 25;
@@ -108,17 +115,27 @@ export async function prepareVideoClip(
         if (!Number.isFinite(sourceDuration) || sourceDuration <= 0 || !Number.isFinite(fps) || fps <= 0) {
           throw failure;
         }
-        // 已通过候选时长门槛的视频若短于目标时段，直接使用原文件，不循环补齐。
-        if (sourceDuration * 1000 <= durationMs) return null;
-        inputArgs = ["-ss", "0", "-i", source];
+        if (loopMs > 0 && durationMs > Math.ceil(sourceDuration * 1000) + loopMs) {
+          throw new AppError("invalid_request", "循环输出时长超过原视频及允许补齐的范围。", 400);
+        }
+        // 只有显式的小空档补齐才重播，普通裁剪仍返回未补时的原文件。
+        if (!loopMs && sourceDuration * 1000 <= durationMs) return null;
+        inputArgs = loopMs ? ["-stream_loop", "-1", "-i", source] : ["-ss", "0", "-i", source];
         outputArgs = ["-map", "0:v:0", "-map", "0:a:0?",
-          "-vf", `fps=${video!.avg_frame_rate}`, "-frames:v", String(Math.max(1, Math.floor(durationMs * fps / 1000))),
+          "-vf", `fps=${video!.avg_frame_rate}`, "-frames:v", String(Math.max(1, (loopMs ? Math.ceil : Math.floor)(durationMs * fps / 1000))),
           "-c:a", "aac"];
       }
       await runH264Encode([
         "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", ...inputArgs,
         "-t", String(outputDurationMs / 1000), ...outputArgs,
       ], temporary, failure, stillImage);
+      if (loopMs > 0 && additionalSources.length) {
+        const combined = path.join(workspace, "combined.mp4");
+        await fs.rename(temporary, combined);
+        await runH264Encode(["-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+          "-stream_loop", "-1", "-i", combined, "-t", String(durationMs / 1000),
+          "-map", "0:v:0", "-map", "0:a:0?", "-c:a", "aac"], temporary, failure);
+      }
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       await fs.rename(temporary, output);
       return output;

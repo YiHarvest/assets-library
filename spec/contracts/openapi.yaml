@@ -1131,6 +1131,14 @@ components:
           maximum: 1
           default: 0.3
           description: 已废弃的兼容参数，保留原校验与默认值但不参与过滤；两路门槛由服务端召回策略控制。
+        audio_duration:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 86400
+          description: >-
+            解说音频实际时长（秒）。传入后返回独立的素材播放起止时间，保留字幕时间。
+            图片默认3秒且至少1秒，视频按自身长度或下一素材裁断，相邻素材间严格小于1秒的正空档重播前一视频补齐。
+            调用方须按新增字段覆盖数字人并限制最终输出为音频时长；省略时保留旧播放行为，不透传到回调顶层。
         callback_url:
           type: string
           format: uri
@@ -1194,6 +1202,16 @@ components:
           description: 命中时为 null；未命中时为可直接展示的说明。
           oneOf:
             - { type: string }
+            - { type: "null" }
+        matched_candidate_start_time:
+          description: 仅传入 audio_duration 时生成的素材覆盖起点（秒），可能因图片最低显示时长而顺延；无可用覆盖时为 null。原 start_time 仍为字幕时间。
+          oneOf:
+            - { type: number, minimum: 0 }
+            - { type: "null" }
+        matched_candidate_end_time:
+          description: 仅传入 audio_duration 时生成的素材覆盖终点（秒），包括不足1秒的相邻空档补齐且不超过音频时长；无可用覆盖时为 null。
+          oneOf:
+            - { type: number, minimum: 0 }
             - { type: "null" }
 
     CompatibilityMatchCallback:

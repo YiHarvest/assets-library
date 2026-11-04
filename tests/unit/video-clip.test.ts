@@ -75,6 +75,67 @@ describe("matched video clipping through the media response", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it("restarts the source for a short gap instead of freezing its last frame", async () => {
+    const loopUrl = url.replace("1480", "9000") + "&loop_ms=500";
+    const bytes = Buffer.from(await (await mediaResponse(assetId, new Request(loopUrl))).arrayBuffer());
+    const file = path.join(root, "loop.mp4");
+    await fs.writeFile(file, bytes);
+    const info = await probe(file);
+    expect(Number(info.format.duration)).toBeCloseTo(9, 1);
+    expect(info.streams.some(s => s.codec_type === "audio")).toBe(true);
+    for (const [time, channel] of [[8.3, 2], [8.7, 0]]) {
+      const frame = path.join(root, `loop-${time}.png`);
+      await exec("ffmpeg", ["-v", "error", "-ss", String(time), "-i", file, "-frames:v", "1", frame]);
+      expect((await sharp(frame).stats()).channels[channel].mean).toBeGreaterThan(240);
+    }
+    await exec("ffmpeg", ["-v", "error", "-xerror", "-i", file, "-f", "null", "-"]);
+    const ranged = await mediaResponse(assetId, new Request(loopUrl, { headers: { range: "bytes=10-99" } }));
+    expect(ranged.status).toBe(206);
+    expect(Buffer.from(await ranged.arrayBuffer())).toEqual(bytes.subarray(10, 100));
+    await expect(mediaResponse(assetId, new Request(loopUrl.replace("loop_ms=500", "loop_ms=499"))))
+      .rejects.toMatchObject({ status: 400 });
+    expect(await fs.readFile(path.join(root, "original.mp4"))).toEqual(source);
+  });
+
+  it("loops a tiny source more than once when the allowed gap is longer than the source", async () => {
+    await fs.copyFile(path.join(fixtureRoot, "tiny-short-a.mp4"), path.join(root, "original.mp4"));
+    const response = await mediaResponse(assetId, new Request(url.replace("1480", "1300") + "&loop_ms=800"));
+    const file = path.join(root, "tiny-loop.mp4");
+    await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+    expect(Number((await probe(file)).format.duration)).toBeCloseTo(1.3, 1);
+  });
+
+  it.each(["0", "-1", "NaN", "Infinity", "1.5", "1001"])("rejects invalid loop duration %s", loop => {
+    return expect(mediaResponse(assetId, new Request(url + `&loop_ms=${loop}`))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects unbounded loop output and a loop without a target", async () => {
+    await expect(mediaResponse(assetId, new Request(url.replace("1480", "999999999") + "&loop_ms=500")))
+      .rejects.toMatchObject({ status: 400 });
+    await expect(mediaResponse(assetId, new Request(url.replace("clip_ms=1480", "loop_ms=500"))))
+      .rejects.toMatchObject({ status: 400 });
+  });
+
+  it.each([1000, 3500])("serves the planned still-image interval of %s ms", async duration => {
+    const data = await sharp({ create: { width: 96, height: 160, channels: 3, background: "red" } }).png().toBuffer();
+    await fs.writeFile(path.join(root, "still.png"), data);
+    object.localPath = "still.png";
+    object.sizeBytes = data.length;
+    fakes.getAsset.mockResolvedValue({ id: assetId, mediaObjectId: object.id, mediaType: "image", mimeType: "image/png",
+      originalFilename: "still.png", processingStatus: "completed", reviewStatus: "published", deletedAt: null });
+    const stillUrl = url + `&still_ms=${duration}`;
+    const response = await mediaResponse(assetId, new Request(stillUrl));
+    const file = path.join(root, "planned-still.mp4");
+    await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+    const info = await probe(file);
+    expect(Math.abs(Number(info.format.duration) - duration / 1000)).toBeLessThanOrEqual(.04);
+    expect(info.streams.some(s => s.codec_type === "audio")).toBe(false);
+    await expect(mediaResponse(assetId, new Request(stillUrl + "&loop_ms=500"))).rejects.toMatchObject({ status: 400 });
+    for (const invalid of [999, 4001, 1000.5]) {
+      await expect(mediaResponse(assetId, new Request(url + `&still_ms=${invalid}`))).rejects.toMatchObject({ status: 400 });
+    }
+  });
+
   async function shortVideoUrl(durationMs = 1000) {
     const secondId = "00000000-0000-4000-8000-000000000002";
     const objects = [object, { ...object, id: "second-object", provider: "zos", objectKey: "short-b.mp4" }];
@@ -93,6 +154,22 @@ describe("matched video clipping through the media response", () => {
     combined.searchParams.set("concat", Buffer.from(JSON.stringify([{ assetId, userId: "759" }, { assetId: secondId, userId: null }])).toString("base64url"));
     return { combined, secondId, objects };
   }
+
+  it("replays a complete short-video combination and rechecks its component scope", async () => {
+    const { combined, secondId } = await shortVideoUrl();
+    combined.searchParams.set("clip_ms", "2500");
+    combined.searchParams.set("loop_ms", "500");
+    const response = await mediaResponse(assetId, new Request(combined));
+    const file = path.join(root, "combined-loop.mp4");
+    await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+    expect(Number((await probe(file)).format.duration)).toBeCloseTo(2.5, 1);
+    const frame = path.join(root, "combined-loop-frame.png");
+    await exec("ffmpeg", ["-v", "error", "-ss", "2.2", "-i", file, "-frames:v", "1", frame]);
+    expect((await sharp(frame).stats()).channels[0].mean).toBeGreaterThan(240);
+    expect(fakes.getDetail).toHaveBeenCalledWith(secondId, {});
+    fakes.getDetail.mockRejectedValueOnce(new Error("scope denied"));
+    await expect(mediaResponse(assetId, new Request(combined))).rejects.toThrow("scope denied");
+  });
 
   it.each([null, 1480, 2700, 5000])("joins mixed sizes, frame rates and audio tracks for target %s without looping", async target => {
     const { combined, secondId } = await shortVideoUrl();

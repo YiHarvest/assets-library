@@ -259,6 +259,11 @@ export async function mediaResponse(assetId: string, request: Request) {
   }
   const params = new URL(request.url).searchParams;
   const clipMs = params.get("clip_ms");
+  const loopMs = params.has("loop_ms") ? Number(params.get("loop_ms")) : 0;
+  if (params.has("loop_ms") && (!Number.isSafeInteger(loopMs) || loopMs <= 0 || loopMs > 1000 ||
+    clipMs === null || asset.mediaType !== "video" || params.has("still_ms"))) {
+    throw new AppError("invalid_request", "循环补齐必须用于视频裁剪，补齐时长为 1–1000 毫秒。", 400);
+  }
   if (params.has("concat")) {
     const minVideoDurationMs = loadConfig().SEGMENT_MATCH_MIN_VIDEO_DURATION_MS;
     let parts: Array<{ assetId: string; userId: string | null }>;
@@ -290,19 +295,20 @@ export async function mediaResponse(assetId: string, request: Request) {
     if (totalMs < minVideoDurationMs) throw new AppError("invalid_request", `短视频组合时长不足 ${minVideoDurationMs / 1000} 秒。`, 400);
     const clipped = await prepareVideoClip(objects.map(item => `${item.id}:${item.updatedAt.getTime()}`).join(","),
       clipMs === null ? totalMs : Number(clipMs), destination => downloadMediaObject(objects[0], destination), false,
-      objects.slice(1).map(item => destination => downloadMediaObject(item, destination)));
+      objects.slice(1).map(item => destination => downloadMediaObject(item, destination)), loopMs);
     return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-concat.mp4` }, clipped!, request);
   }
   const stillImage = asset.mediaType === "image" && params.has("still_ms");
-  if (stillImage && params.get("still_ms") !== "3000") {
-    throw new AppError("invalid_request", "静态图片视频时长固定为 3000 毫秒。", 400);
+  const stillMs = Number(params.get("still_ms"));
+  if (stillImage && (!Number.isSafeInteger(stillMs) || stillMs < 1000 || stillMs > 4000)) {
+    throw new AppError("invalid_request", "静态图片视频时长必须为 1000–4000 毫秒的整数。", 400);
   }
   if (stillImage || (clipMs !== null && asset.mediaType === "video")) {
     if (object.status !== "persisted") {
       throw new AppError("storage_error", "素材的持久化对象不存在。", 404);
     }
-    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, stillImage ? 3000 : Number(clipMs),
-      destination => downloadMediaObject(object, destination), stillImage);
+    const clipped = await prepareVideoClip(`${object.id}:${object.updatedAt.getTime()}`, stillImage ? stillMs : Number(clipMs),
+      destination => downloadMediaObject(object, destination), stillImage, [], loopMs);
     if (clipped) {
       return localMediaResponse({ mimeType: "video/mp4", filename: `${asset.id}-clip.mp4` }, clipped, request);
     }

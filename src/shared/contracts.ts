@@ -344,6 +344,7 @@ export const compatibilityMatchRequestSchema = z
       .passthrough(),
     llm: compatibilityLlmSchema,
     text: z.string().max(1_000_000).optional(),
+    audio_duration: z.number().finite().positive().max(86_400).optional(),
     asset_url_list: z
       .array(compatibilityAssetUrlSchema)
       .max(10_000)

@@ -351,7 +351,11 @@ paths:
         start_time、end_time 和 group_id；ASR 为空时，直接复用 LLM segments 已有的
         时间轴字段。两种格式都复用ES 双路召回和 RRF 融合函数为每段选择至多一个素材。
         顶层 project_id 为可选 UUID，与 asset_url_list 勾选范围取交集；指定项目时不包含未归属素材，不会回退到其他项目。
-        project_id 不透传到回调，既有分段、时间轴、结果字段不变。
+        顶层 audio_duration 为可选的解说音频实际时长，单位秒；传入后启用音频主时钟播放规则，
+        回调新增 matched_candidate_start_time/end_time 表示素材覆盖区间，原 start_time/end_time 继续用于字幕。
+        图片默认显示3秒且至少1秒；视频播完、遇下一素材或音频结束时裁断；相邻素材之间不足1秒的正空档由前一素材重播或延长静态画面补齐。
+        合成端应原样下载 matched_candidate_url，按新增覆盖区间合成并将最终输出限制为音频时长；下载文件已包含重播，不要再次循环补齐。
+        省略 audio_duration 时保持旧播放行为。project_id 和 audio_duration 不透传到回调。
         请求中的未知顶层字段会原样透传到终态回调。
       requestBody:
         required: true
@@ -360,9 +364,11 @@ paths:
             schema: { $ref: "#/components/schemas/CompatibilityMatchRequest" }
             examples:
               projectScoped:
-                summary: 在指定项目中匹配已有时间轴的文案
+                summary: 音频主时钟：在指定项目中匹配已有时间轴的文案
+                description: audio_duration 是音频总时长（秒），不是文案段时长；不传该字段时保留旧播放规则。
                 value:
                   project_id: 7425d659-e92e-4b1e-8be2-33d7fa1a2cf5
+                  audio_duration: 5.0
                   asr: {}
                   llm:
                     segments:
@@ -384,6 +390,31 @@ paths:
                 content:
                   application/json:
                     schema: { $ref: "#/components/schemas/CompatibilityMatchCallback" }
+                    examples:
+                      audioMaster:
+                        summary: 新播放模式成功回调（图片静态视频示例）
+                        description: 字幕仍显示于0.32–2.2秒，图片画面覆盖0.32–3.32秒；素材结束后显示当前时刻的数字人，整片在请求指定的5秒结束。实际素材及覆盖区间以匹配结果为准。
+                        value:
+                          taskId: b7520ddd-dda3-43cc-8c0c-1d10488ed04c
+                          status: success
+                          result:
+                            segments:
+                              - segment_id: 1
+                                text: 夕阳下的海边
+                                keyword: 海边
+                                level: 1
+                                group_id: [1, 1]
+                                start_time: 0.32
+                                end_time: 2.2
+                                matched_candidate_url: https://assets.example/api/v1/media/eb92d2f0-9e2c-40bc-9908-392cb53453d8?still_ms=3000
+                                matched_candidate_type: video
+                                matched_candidate_desc: 夕阳下的海边照片
+                                matched_candidate_score: 0.9
+                                matched_candidate_reason: null
+                                matched_candidate_message: null
+                                matched_candidate_start_time: 0.32
+                                matched_candidate_end_time: 3.32
+                          completed_at: "2026-11-05T10:00:00.000000"
               responses:
                 "200": { description: 回调已接收；任意 2xx 均视为成功 }
       responses:

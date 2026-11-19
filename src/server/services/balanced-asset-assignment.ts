@@ -122,3 +122,27 @@ export function balancedAssetAssignment<T extends MatchCandidate>(
   }
   return best;
 }
+
+/** 同一素材连续匹配多句时，均衡分配只看时间轴位置，会落在最靠近槽位中心的那句；
+ *  此处把它前移到这串连续句子的第一句，让素材从其描述开始的地方播放。 */
+export const SENTENCE_ANCHOR_QUALITY_TOLERANCE = 0.02;
+
+export function anchorAssignmentsToSentenceStart<T extends MatchCandidate>(
+  pools: readonly (readonly T[])[], assignment: Map<number, T>, minimumQuality = 0.5,
+) {
+  for (const index of [...assignment.keys()].sort((a, b) => a - b)) {
+    const asset = assignment.get(index)!;
+    const identity = candidateIdentity(asset);
+    const floor = matchQuality(asset) - SENTENCE_ANCHOR_QUALITY_TOLERANCE;
+    let target = index;
+    for (let previous = index - 1; previous >= 0 && !assignment.has(previous); previous--) {
+      const same = pools[previous]?.find(candidate => candidateIdentity(candidate) === identity);
+      if (!same || matchQuality(same) < floor || (same.matchQuality !== undefined && same.matchQuality < minimumQuality)) break;
+      target = previous;
+    }
+    if (target === index) continue;
+    assignment.delete(index);
+    assignment.set(target, pools[target].find(candidate => candidateIdentity(candidate) === identity)!);
+  }
+  return assignment;
+}

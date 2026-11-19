@@ -20,7 +20,7 @@ import {
 } from "@/server/repositories/assets";
 import { persistedTaskError } from "@/server/services/task-lifecycle";
 import { requiresRecallContext, segmentRecallContexts } from "@/server/search/segment-context";
-import { balancedAssetAssignment, candidateIdentity } from "./balanced-asset-assignment";
+import { anchorAssignmentsToSentenceStart, balancedAssetAssignment, candidateIdentity } from "./balanced-asset-assignment";
 import { addShortVideoGroups, fitShortVideoGroups, type MatchMaterial } from "./short-video-groups";
 import { planMaterialPlayback } from "./material-playback";
 import {
@@ -366,7 +366,8 @@ async function runCompatibilityMatch(
     shortSearches = await recall(true);
     pools = addShortVideoGroups(segments, pools, shortSearches, minVideoDurationMs, clipEnabled);
   }
-  const assignment = balancedAssetAssignment(segments, pools, isRandom, config.SEARCH_SEMANTIC_THRESHOLD);
+  const assignment = anchorAssignmentsToSentenceStart(pools,
+    balancedAssetAssignment(segments, pools, isRandom, config.SEARCH_SEMANTIC_THRESHOLD), config.SEARCH_SEMANTIC_THRESHOLD);
   fitShortVideoGroups(segments, assignment, shortSearches, minVideoDurationMs, clipEnabled);
   for (const [index, segment] of segments.entries()) {
     const search = searches[index];

@@ -153,6 +153,21 @@ describe("compatibility segment matching", () => {
     expect(urls.every(url => url.searchParams.get("user_id") === "759")).toBe(true);
   });
 
+  it("starts a material that covers consecutive sentences at the first one instead of the timeline centre", async () => {
+    // 单素材时唯一槽位在时间轴中点；描述“你所走之路，所遇之人，”同时命中两句，应从第一句开始。
+    const segments = alignCompatibilitySegments(request()).map((segment, index) => ({ ...segment,
+      start_time: [0, 1.2, 2.2][index], end_time: [1, 2, 4][index] }));
+    const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (input, _scope, options) => ({
+      items: options?.shortVideosOnly || input.description === segments[2].text ? [] : [candidate()],
+      threshold: 0, maxScore: 1, reason: "matched", message: null,
+    }));
+    const matched = await matchCompatibilitySegments(segments, "https://focus.example.test", { audioDuration: 6, isRandom: false }, {
+      search, getAsset: async () => ({ userId: "759", reviewStatus: "published", segmentStartMs: 0, segmentEndMs: 3000 }),
+    });
+    expect(matched.map(s => s.matched_candidate_url !== null)).toEqual([true, false, false]);
+    expect([matched[0].matched_candidate_start_time, matched[0].matched_candidate_end_time]).toEqual([0, 3]);
+  });
+
   it("marks an image outside the audio window unplayable without shifting subtitles", async () => {
     const segment = { ...alignCompatibilitySegments(request())[0], start_time: 9.4, end_time: 9.8 };
     const search = vi.fn<typeof searchAssetsByDescriptionDetailed>(async (_input, _scope, options) => ({

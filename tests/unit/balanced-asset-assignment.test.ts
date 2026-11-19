@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { balancedAssetAssignment } from "@/server/services/balanced-asset-assignment";
+import { anchorAssignmentsToSentenceStart, balancedAssetAssignment } from "@/server/services/balanced-asset-assignment";
 
 vi.mock("node:crypto", () => ({ randomInt: () => 0 }));
 
@@ -106,5 +106,44 @@ describe("balanced material placement", () => {
       expect(result.size).toBe(maximum);
       expect(timingCost([...result.keys()].sort((x, y) => x - y))).toBeCloseTo(minimum, 7);
     }
+  });
+
+  describe("sentence-start anchoring", () => {
+    const empty = () => segments.map(() => [] as { id: string; matchQuality?: number; searchScore?: number }[]);
+
+    it("moves a material back over consecutive sentences it matches equally well", () => {
+      const pools = empty();
+      pools[2] = [{ id: "a", matchQuality: 1 }]; pools[3] = [{ id: "a", matchQuality: 1 }]; pools[4] = [{ id: "a", matchQuality: 1 }];
+      const balanced = balancedAssetAssignment(segments, pools);
+      expect([...balanced.keys()]).toEqual([4]);
+      expect([...anchorAssignmentsToSentenceStart(pools, balanced).keys()]).toEqual([2]);
+    });
+
+    it("stops at an occupied sentence, a gap, or a clearly weaker match", () => {
+      const pools = empty();
+      pools[1] = [{ id: "a", matchQuality: 0.9 }];
+      pools[3] = [{ id: "a", matchQuality: 0.7 }];
+      pools[4] = [{ id: "a", matchQuality: 0.9 }];
+      pools[6] = [{ id: "c", matchQuality: 0.9 }, { id: "d", matchQuality: 0.6 }];
+      pools[7] = [{ id: "c", matchQuality: 0.9 }];
+      const assignment = new Map([[4, pools[4][0]], [6, pools[6][1]], [7, pools[7][0]]]);
+      expect([...anchorAssignmentsToSentenceStart(pools, assignment)].map(([i, x]) => [i, x.id]).sort(([x], [y]) => +x - +y))
+        .toEqual([[4, "a"], [6, "d"], [7, "c"]]);
+    });
+
+    it("tolerates a small quality drop and keeps the predecessor's own candidate", () => {
+      const pools = empty();
+      pools[0] = [{ id: "a", matchQuality: 0.89 }]; pools[1] = [{ id: "a", matchQuality: 0.9 }];
+      const result = anchorAssignmentsToSentenceStart(pools, new Map([[1, pools[1][0]]]));
+      expect([...result]).toEqual([[0, pools[0][0]]]);
+    });
+
+    it("keeps RRF-only candidates movable and respects the admission threshold for semantic ones", () => {
+      const pools = empty();
+      pools[0] = [{ id: "a", searchScore: 0.03 }]; pools[1] = [{ id: "a", searchScore: 0.03 }];
+      pools[4] = [{ id: "b", matchQuality: 0.49 }]; pools[5] = [{ id: "b", matchQuality: 0.5 }];
+      const result = anchorAssignmentsToSentenceStart(pools, new Map([[1, pools[1][0]], [5, pools[5][0]]]));
+      expect([...result.keys()].sort()).toEqual([0, 5]);
+    });
   });
 });
